@@ -1,0 +1,21 @@
+{
+  "order.buy_complete": "{market} ซื้อเสร็จสิ้น ({amount})",
+  "order.sell_complete": "{market} ขายเสร็จสิ้น",
+  "order.short_open": "{market} เปิดชอร์ต ({amount})",
+  "order.short_close": "{market} ปิดชอร์ต",
+  "server.started": "🚀 [Autocoin Server เริ่มต้น]\nMode: {mode}\nHost: {host}\nTime: {time}",
+  "server.stopped": "🛑 [Autocoin Server หยุด]\nHost: {host}\nTime: {time}",
+  "alert.loss_streak": "⚠️ [{market}] {strategy} ขาดทุนต่อเนื่อง {count} ครั้ง (รวม {total})",
+  "alert.anomaly": "🚨 [{market}] ตรวจพบการซื้อขายผิดปกติ: {loss} ({deviation}% เทียบกับค่าเฉลี่ย)",
+  "alert.daily_summary": "📊 รายงานประจำวัน ({date})\nการซื้อขาย: {trades} | อัตราชนะ: {win_rate}%\nPnL: {pnl}\nดีที่สุด: {best}\nแย่ที่สุด: {worst}",
+  "engine.started": "▶️ เครื่องยนต์เริ่มทำงาน",
+  "engine.stopped": "⏹️ เครื่องยนต์หยุดทำงาน",
+  "engine.emergency_stop": "🚨 หยุดฉุกเฉิน!",
+  "tp.hit": "🎯 [{market}] ถึง TP ({pnl_pct}%)",
+  "sl.hit": "🛑 [{market}] ถึง SL ({pnl_pct}%)",
+  "ladder.filled": "🪜 LADDER สำเร็จ: {market} {side} {price}",
+  "autopilot.promoted": "🚀 Autopilot: {market} → ACTIVE ({strategy})",
+  "autopilot.demoted": "⬇️ Autopilot: {market} → WATCH",
+  "guard.btc_alert": "⚠️ BTC Guard แจ้งเตือน: โหมด {mode} เปิดใช้งาน",
+  "guard.btc_normal": "✅ BTC Guard ปกติ: ยกเลิกแจ้งเตือน"
+}

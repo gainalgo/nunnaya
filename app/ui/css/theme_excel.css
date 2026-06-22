@@ -1,0 +1,135 @@
+/* ============================================================
+   theme_excel.css — 봇 v4 dashboard_v3 테마 (Excel/Photoshop 전문 스튜디오 톤)
+   다크 프로페셔널 팔레트 + 기본 타이포 + 버튼/입력 (구조는 ribbon.css)
+   ============================================================ */
+
+:root {
+  /* 배경 레이어 (어두→밝) */
+  --v3-bg-0: #0b1017;   /* 앱 바탕 */
+  --v3-bg-1: #121925;   /* 패널 */
+  --v3-bg-2: #1a2433;   /* 그룹 박스 */
+  --v3-bg-3: #233044;   /* hover / 입력 */
+  --v3-line: #2c3a4f;   /* 경계선 */
+  --v3-line-2: #3a4d6a;
+
+  /* 텍스트 */
+  --v3-fg: #e6edf6;
+  --v3-fg-dim: #9fb0c4;
+  --v3-fg-mute: #6b7c92;
+
+  /* 강조 */
+  --v3-accent: #3b82f6;       /* 리본 active / 포커스 */
+  --v3-accent-soft: #1d3a66;
+  --v3-long: #16c784;         /* LONG / 수익 */
+  --v3-long-soft: #0e3d2c;
+  --v3-short: #ea3943;        /* SHORT / 손실 */
+  --v3-short-soft: #43121a;
+  --v3-warn: #f0a020;
+  --v3-warn-soft: #4a3410;
+
+  --v3-radius: 8px;
+  --v3-radius-sm: 5px;
+  --v3-shadow: 0 4px 18px rgba(0,0,0,.35);
+  --v3-font: -apple-system, "Segoe UI", "Malgun Gothic", "맑은 고딕", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  color-scheme: dark;   /* native 컨트롤(체크박스/셀렉트/스크롤바) 다크 렌더 */
+  background: var(--v3-bg-0);
+  color: var(--v3-fg);
+  font-family: var(--v3-font);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,h2,h3,h4,h5,h6 { margin: 0; font-weight: 600; }
+small { color: var(--v3-fg-dim); }
+a { color: var(--v3-accent); text-decoration: none; }
+
+/* 스크롤바 (얇고 어둡게) */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--v3-line-2); border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: #4a6088; }
+
+/* ── 입력 컨트롤 ── */
+.v3-input, input[type="text"].v3, input[type="number"].v3, select.v3 {
+  width: 100%;
+  background: var(--v3-bg-3);
+  color: var(--v3-fg);
+  border: 1px solid var(--v3-line);
+  border-radius: var(--v3-radius-sm);
+  padding: 6px 9px;
+  font-size: 13px;
+  font-family: var(--v3-font);
+  outline: none;
+  transition: border-color .12s;
+}
+.v3-input:focus, input.v3:focus, select.v3:focus {
+  border-color: var(--v3-accent);
+  box-shadow: 0 0 0 2px var(--v3-accent-soft);
+}
+label.v3-label { display: block; font-size: 11.5px; color: var(--v3-fg-dim); margin-bottom: 3px; }
+
+/* ── 버튼 ── */
+.v3-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  background: var(--v3-bg-3); color: var(--v3-fg);
+  border: 1px solid var(--v3-line-2); border-radius: var(--v3-radius-sm);
+  padding: 7px 14px; font-size: 13px; font-weight: 500; cursor: pointer;
+  transition: filter .12s, transform .05s;
+}
+.v3-btn:hover { filter: brightness(1.15); }
+.v3-btn:active { transform: translateY(1px); }
+.v3-btn.ghost { background: transparent; }
+
+.v3-btn-lg { padding: 14px 18px; font-size: 16px; font-weight: 700; border-radius: var(--v3-radius); }
+.v3-btn-long  { background: var(--v3-long-soft);  border-color: var(--v3-long);  color: #d6ffe9; }
+.v3-btn-long:hover  { background: var(--v3-long);  color: #06281a; }
+.v3-btn-short { background: var(--v3-short-soft); border-color: var(--v3-short); color: #ffd9dc; }
+.v3-btn-short:hover { background: var(--v3-short); color: #2a0509; }
+.v3-btn[disabled] { opacity: .45; cursor: not-allowed; }
+
+/* ── 배지 ── */
+/* 아웃라인 배지 (글씨=테두리 같은 색, 투명 배경) — 셀 채우면 행 많을 때 촌스러움 */
+.v3-badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; background: transparent; border: 1px solid currentColor; }
+.v3-badge.long  { color: var(--v3-long); }
+.v3-badge.short { color: var(--v3-short); }
+.v3-badge.warn  { color: var(--v3-warn); }
+.v3-badge.mute  { color: var(--v3-fg-dim); border-color: var(--v3-line-2); }
+/* 아웃라인 버튼 (Close All 등) */
+.v3-btn-outline-danger { background: transparent; border-color: var(--v3-short); color: var(--v3-short); }
+.v3-btn-outline-danger:hover { background: var(--v3-short-soft); filter: none; }
+
+.v3-pos { color: var(--v3-long); }
+.v3-neg { color: var(--v3-short); }
+
+/* ── 토스트 ── */
+#v3-toasts { position: fixed; right: 18px; bottom: 18px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; }
+.v3-toast {
+  background: var(--v3-bg-2); color: var(--v3-fg);
+  border: 1px solid var(--v3-line-2); border-left-width: 4px;
+  border-radius: var(--v3-radius); padding: 10px 14px; min-width: 240px; max-width: 380px;
+  box-shadow: var(--v3-shadow); animation: v3-slide .18s ease;
+}
+.v3-toast.ok    { border-left-color: var(--v3-long); }
+.v3-toast.err   { border-left-color: var(--v3-short); }
+.v3-toast.warn  { border-left-color: var(--v3-warn); }
+.v3-toast.info  { border-left-color: var(--v3-accent); }
+@keyframes v3-slide { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
+/* 🏠 홈 status line — Running 점 깜빡임 (v2 pulse 재현) */
+.v3-blink { animation: v3-pulse 2s infinite; }
+@keyframes v3-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+/* Tick heartbeat — 살아있음(박동). 회색=멈춤 / 초록·노랑·적색=속도 */
+.v3-tick-beat { animation: v3-tickbeat 1.3s infinite; }
+@keyframes v3-tickbeat { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.45); } }
+
+/* ── 모달 (확인 다이얼로그) ── */
+.v3-modal-back { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 9998; display: none; align-items: center; justify-content: center; }
+.v3-modal-back.show { display: flex; }
+.v3-modal { background: var(--v3-bg-1); border: 1px solid var(--v3-line-2); border-radius: var(--v3-radius); box-shadow: var(--v3-shadow); width: 420px; max-width: 92vw; padding: 20px; }
+.v3-modal h3 { font-size: 16px; margin-bottom: 10px; }
+.v3-modal .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }

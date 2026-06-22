@@ -1,0 +1,7 @@
+{
+  "strictness": 50,
+  "min_test_samples": 475,
+  "min_acc_mean": 0.56,
+  "min_high_conf_acc_mean": 0.6000000000000001,
+  "updated_ts": 0
+}

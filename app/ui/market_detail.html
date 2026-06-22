@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>Market Detail — Autocoin OS</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="/ui/css/dashboard.css" />
+  <link rel="stylesheet" href="/ui/css/strategy.css" />
+  <style>
+    .lang-select { min-width: 90px; }
+    .tv-panel {
+      height: 500px;
+      padding: 0;
+      overflow: hidden;
+      position: relative;
+    }
+    .tv-chart-container {
+      height: 100%;
+      width: 100%;
+    }
+    .exchange-link-wrap {
+      text-align: center;
+      margin-top: 10px;
+    }
+    .exchange-link {
+      width: 100%;
+      display: block;
+      text-align: center;
+    }
+    .strategy-params-mt { margin-top: 10px; }
+    .btn-guards-mt { margin-top: 10px; }
+    .ledger-scroll { overflow-x: auto; }
+    .raw-state-summary {
+      cursor: pointer;
+      color: var(--text-sub);
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+
+<header id="oma-global">
+  <div class="oma-title">
+    <a href="javascript:history.back()" class="back-btn" title="Go Back" data-i18n-title="market_detail.go_back">←</a>
+    <h1><span id="mktTitle">Market</span> <span data-i18n="market_detail.title_detail" data-i18n-fallback="Detail">Detail</span></h1>
+  </div>
+  <div class="oma-stats">
+    <div class="stat">
+      <label for="lang-select" data-i18n="common.language" data-i18n-fallback="Language">Language</label>
+      <select id="lang-select" class="form-select form-select-sm lang-select" title="Language">
+        <option value="ko">한국어</option>
+        <option value="en">English</option>
+        <option value="th">ไทย</option>
+      </select>
+    </div>
+  </div>
+</header>
+
+<main id="strat-main">
+  <div class="detail-grid">
+    <!-- 0. TradingView Chart -->
+    <div class="panel full-width tv-panel">
+      <div id="tv_chart_container" class="tv-chart-container"></div>
+    </div>
+
+    <!-- 1. Overview Panel -->
+    <div class="panel">
+      <div class="panel-head"><h3 data-i18n="market_detail.overview" data-i18n-fallback="Overview">Overview</h3></div>
+      <div class="sc-row"><span class="sc-label" data-i18n="market_detail.current_price" data-i18n-fallback="Current Price">Current Price</span><span class="sc-val" id="valPrice">—</span></div>
+      <div class="sc-row"><span class="sc-label" data-i18n="market_detail.position" data-i18n-fallback="Position">Position</span><span class="sc-val" id="valPos">—</span></div>
+      <div class="sc-row"><span class="sc-label" data-i18n="market_detail.unrealized_pnl" data-i18n-fallback="Unrealized PnL">Unrealized PnL</span><span class="sc-val" id="valPnl">—</span></div>
+      <div class="sc-row"><span class="sc-label" data-i18n="market_detail.active_strategy" data-i18n-fallback="Active Strategy">Active Strategy</span><span class="sc-val" id="valStrat">—</span></div>
+      <div class="sc-divider"></div>
+      <div class="exchange-link-wrap">
+        <a id="exchangeLink" href="#" target="_blank" class="btn btn-ghost exchange-link" data-i18n="market_detail.open_exchange_chart" data-i18n-fallback="Open Bybit Chart">Open Bybit Chart</a>
+      </div>
+    </div>
+
+    <!-- 2. AI / Brain Analysis -->
+    <div class="panel">
+      <div class="panel-head"><h3 data-i18n="market_detail.ai_brain_analysis" data-i18n-fallback="AI / Brain Analysis">AI / Brain Analysis</h3></div>
+      <div id="brainMetrics">
+        <div class="empty" data-i18n="market_detail.loading_analysis" data-i18n-fallback="Loading analysis...">Loading analysis...</div>
+      </div>
+    </div>
+
+    <!-- 3. Controls (Strategy & Guards) -->
+    <div class="panel full-width">
+      <div class="panel-head"><h3 data-i18n="market_detail.strategy_guard_controls" data-i18n-fallback="Strategy & Guard Controls">Strategy & Guard Controls</h3></div>
+      <div class="control-grid">
+        <!-- Strategy -->
+        <div class="control-group">
+          <h4 data-i18n="market_detail.strategy_override" data-i18n-fallback="Strategy Override">Strategy Override</h4>
+          <div class="cg-row">
+            <label><input type="checkbox" id="stEnabled"> <span data-i18n="market_detail.enabled" data-i18n-fallback="Enabled">Enabled</span></label>
+            <select id="stMode" title="Strategy Mode" aria-label="Strategy Mode">
+              <option value="AI" data-i18n="market_detail.ai_default" data-i18n-fallback="AI (Default)">AI (Default)</option>
+              <option value="PINGPONG">PINGPONG</option>
+              <option value="AUTOLOOP">AUTOLOOP</option>
+              <option value="GAZUA">GAZUA</option>
+              <option value="LIGHTNING">LIGHTNING</option>
+            </select>
+            <button class="btn" id="btnSaveStrat" data-i18n="market_detail.apply_strategy" data-i18n-fallback="Apply Strategy">Apply Strategy</button>
+          </div>
+          <div id="strategyParams" class="strategy-params-box strategy-params-mt">
+            <!-- JS will populate strategy-specific parameters here -->
+            <div class="muted" data-i18n="market_detail.strategy_select_hint" data-i18n-fallback="Select a strategy to see its parameters.">Select a strategy to see its parameters.</div>
+          </div>
+        </div>
+        <!-- Guards -->
+        <div class="control-group">
+          <h4 data-i18n="market_detail.guard_overrides" data-i18n-fallback="Guard Overrides">Guard Overrides</h4>
+          <div class="chk-grid" id="guardChecks">
+            <!-- JS will populate -->
+          </div>
+          <button class="btn btn-guards-mt" id="btnSaveGuards" data-i18n="market_detail.apply_guards" data-i18n-fallback="Apply Guards">Apply Guards</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. Recent Ledger (Trade History) -->
+    <div class="panel full-width">
+      <div class="panel-head">
+        <h3 data-i18n="market_detail.recent_activity" data-i18n-fallback="Recent Activity (Ledger)">Recent Activity (Ledger)</h3>
+        <div class="panel-sub" data-i18n="market_detail.last_50_events" data-i18n-fallback="Last 50 events for this market">Last 50 events for this market</div>
+      </div>
+      <div class="ledger-scroll">
+        <table class="lh-table" id="ledgerTable">
+          <thead><tr><th data-i18n="market_detail.time" data-i18n-fallback="Time">Time</th><th data-i18n="market_detail.event" data-i18n-fallback="Event">Event</th><th data-i18n="market_detail.side" data-i18n-fallback="Side">Side</th><th data-i18n="market_detail.price_info" data-i18n-fallback="Price / Info">Price / Info</th></tr></thead>
+          <tbody><tr><td colspan="4" class="empty" data-i18n="common.loading" data-i18n-fallback="Loading...">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    
+    <!-- 4. Raw State (Debug) -->
+    <div class="panel full-width">
+      <details>
+        <summary class="raw-state-summary" data-i18n="market_detail.raw_state" data-i18n-fallback="Raw Strategy State (JSON)">Raw Strategy State (JSON)</summary>
+        <div class="json-box" id="rawState"></div>
+      </details>
+    </div>
+  </div>
+</main>
+
+<script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+<script src="/ui/js/embed_i18n.js"></script>
+<script src="/ui/js/market_detail.js"></script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+{
+  "order.buy_complete": "{market} 매수 완료 ({amount}원)",
+  "order.sell_complete": "{market} 매도 완료",
+  "order.short_open": "{market} 숏 진입 ({amount})",
+  "order.short_close": "{market} 숏 청산",
+  "server.started": "🚀 [Autocoin Server Started]\nMode: {mode}\nHost: {host}\nTime: {time}",
+  "server.stopped": "🛑 [Autocoin Server Stopped]\nHost: {host}\nTime: {time}",
+  "alert.loss_streak": "⚠️ [{market}] {strategy} 연속 {count}회 손실 (총 {total}원)",
+  "alert.anomaly": "🚨 [{market}] 이상 거래 감지: {loss}원 (평균 대비 {deviation}%)",
+  "alert.daily_summary": "📊 일일 리포트 ({date})\n거래: {trades}건 | 승률: {win_rate}%\nPnL: {pnl}원\n최고 전략: {best}\n최저 전략: {worst}",
+  "engine.started": "▶️ 엔진 시작",
+  "engine.stopped": "⏹️ 엔진 정지",
+  "engine.emergency_stop": "🚨 비상 정지!",
+  "tp.hit": "🎯 [{market}] TP 도달 ({pnl_pct}%)",
+  "sl.hit": "🛑 [{market}] SL 도달 ({pnl_pct}%)",
+  "ladder.filled": "🪜 LADDER 체결: {market} {side} {price}",
+  "autopilot.promoted": "🚀 Autopilot: {market} → ACTIVE ({strategy})",
+  "autopilot.demoted": "⬇️ Autopilot: {market} → WATCH",
+  "guard.btc_alert": "⚠️ BTC Guard 경고: {mode} 모드 활성화",
+  "guard.btc_normal": "✅ BTC Guard 정상: 경고 해제"
+}

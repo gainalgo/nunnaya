@@ -1,0 +1,75 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+venv/
+.venv/
+
+# Runtime (large/dynamic files)
+runtime/
+logs/
+
+# Secrets
+.env
+.env.bybit
+*.cookie
+*.cookies
+Autocoincookie*
+Autocoinruntime*
+cookie.txt
+*credentials*
+
+# IDE
+.vscode/
+.idea/
+
+# Backups
+backups/
+*.bak
+*.bak_*
+*.backup
+*.backup_*
+
+# Temp/analysis scripts and data
+tmp_*.py
+tmp_*.json
+temp_*.py
+scratch_*.py
+
+# Root-level state/data (runtime/와 별도)
+context_state.json
+trade_journal.jsonl*
+
+# Pytest
+.pytest_cache/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Temp
+*.tmp
+nul
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Claude
+.claude/
+
+# security/temp (2026-06-02)
+.env.txt
+_tmp_*.py
+
+# 런타임 데이터 (봇 자동생성/갱신, git 추적시 매 pull 충돌 — 2026-06-02 부모님)
+app/data/bybit_markets.json
+app/data/autoloop_markets.json
+data/autopilot_decisions.jsonl
+
+# gen_spot_cfg_ui 스크래치/백업 (추적 X)
+docs/_genmirror/*.bak.py
+docs/_genmirror/_spot672_block.py
+docs/_genmirror/spot_config_mirror_fields.txt
