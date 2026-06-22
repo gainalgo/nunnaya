@@ -1702,7 +1702,7 @@ async function saveConfig(scope){
   const msgs = root.querySelectorAll('.cfg-msg');
   try{
     let ok=true, err='';
-    for(let i=0;i<parts.length;i+=250){          // 그룹당 ≤197 → 1회 POST. 250 초과 시만 분할(URL 길이 안전망)
+    for(let i=0;i<parts.length;i+=80){           // ★ stride=slice=80 일치. 옛 stride250+slice80 = 81번째~필드 영영 안 보내짐(Regime 197필드 중 index80+ 저장 누락 버그, 2026-06-23)
       const r = await api('/config?'+parts.slice(i,i+80).join('&'), {method:'POST'});
       if(!r || !r.ok){ ok=false; err=(r&&r.error)||''; break; }
     }
