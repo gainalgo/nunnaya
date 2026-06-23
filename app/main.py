@@ -291,6 +291,8 @@ from app.api.strategy_focus_router import router as focus_router
 from app.api.upbit_gazua_router import router as upbit_gazua_router
 from app.api.bithumb_gazua_router import router as bithumb_gazua_router
 from app.api.bybit_spot_gazua_router import router as bybit_spot_gazua_router
+from app.api.binance_spot_gazua_router import router as binance_spot_gazua_router
+from app.api.binance_futures_router import router as binance_futures_router
 from app.api.spot_gazua_cross_router import router as spot_gazua_cross_router
 from app.api.strategy_harpoon_router import router as harpoon_router
 from app.api.news_sentiment_router import router as news_sentiment_router
@@ -665,6 +667,11 @@ async def dashboard_bybit_spot_v3_html():
     """Bybit 현물(USDT) FOCUS v3 리본 대시보드 (Upbit v3 미러 — Bybit 현물 전용 API)."""
     return _serve_html_no_cache("app/ui/dashboard_bybit_spot_v3.html")
 
+@app.get("/ui/dashboard_binance_spot_v3.html", include_in_schema=False)
+async def dashboard_binance_spot_v3_html():
+    """Binance 현물(USDT) FOCUS v3 리본 대시보드 (Bybit 현물 v3 미러 — Binance 현물 전용 API)."""
+    return _serve_html_no_cache("app/ui/dashboard_binance_spot_v3.html")
+
 @app.get("/ui/focus.html", include_in_schema=False)
 async def focus_html():
     """FOCUS 대시보드 HTML — 항상 no-cache."""
@@ -935,6 +942,8 @@ app.include_router(focus_router)
 app.include_router(upbit_gazua_router)
 app.include_router(bithumb_gazua_router)
 app.include_router(bybit_spot_gazua_router)
+app.include_router(binance_spot_gazua_router)
+app.include_router(binance_futures_router)
 app.include_router(spot_gazua_cross_router)
 app.include_router(harpoon_router)
 app.include_router(news_sentiment_router)

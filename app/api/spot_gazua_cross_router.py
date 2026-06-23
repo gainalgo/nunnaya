@@ -27,7 +27,7 @@ _EXCHANGES = [
     ("upbit_gazua_manager", "upbit", "업비트", "₩"),
     ("bithumb_gazua_manager", "bithumb", "빗썸", "₩"),
     ("bybit_spot_gazua_manager", "bybit_spot", "바이비트", "USDT"),
-    ("binance_gazua_manager", "binance", "바이낸스", "USDT"),  # 준비중 — manager 없으면 present:false(흐림). 클라이언트+키 연결 시 자동 점등.
+    ("binance_spot_gazua_manager", "binance", "바이낸스", "USDT"),  # 2026-06-23 연결 — BinanceSpotGazuaManager. 미설정 서버엔 present:false(흐림), BINANCE_SPOT_FOCUS_ENABLED+키 시 자동 점등.
 ]
 
 # 통합 응답 캐시 — 3 탭 동시 폴링이 manager near-miss enrich(kline) 를 중복 트리거 않게.

@@ -79,7 +79,12 @@
     if (!market) return;
     const sym = String(market).toUpperCase();
     const symbol = sym.endsWith('USDT') ? sym : sym + 'USDT';
-    try { const w = window.open('https://www.bybit.com/trade/usdt/' + symbol, 'bybit_trade_window'); if (w) w.focus(); } catch (e) { /* noop */ }
+    // ★ [2026-06-23 감사 low] 거래소별 URL — Binance 창(?ex=binance_futures, shim 이 html[data-ex] 세팅)에서
+    //   클릭 시 엉뚱하게 bybit.com 이 열려 수동 오발주하던 것 방지.
+    const _isBnc = document.documentElement.getAttribute('data-ex') === 'binance_futures';
+    const url = _isBnc ? ('https://www.binance.com/en/futures/' + symbol)
+                       : ('https://www.bybit.com/trade/usdt/' + symbol);
+    try { const w = window.open(url, 'ex_trade_window'); if (w) w.focus(); } catch (e) { /* noop */ }
   };
 
   const LABEL = { focus: 'FOCUS', harpoon: 'HARPOON', lightning: 'LIGHTNING', sniper: 'SNIPER', gazua: 'GAZUA', contrarian: 'CONTRARIAN', ladder: 'LADDER', pingpong: 'PINGPONG', autoloop: 'AUTOLOOP', whale: 'WHALE', env: 'Settings (Common)' };
@@ -736,7 +741,7 @@
       '<table class="v3-ltable v3-scantable"><thead><tr><th>Market</th><th>Signal</th><th>PA Pattern</th><th>Trend</th><th>Confidence</th><th>ADX</th><th>Base</th><th>Ded</th><th>Total</th><th>Status (Penalty)</th><th>Manual</th></tr></thead><tbody>' + rows + '</tbody></table>';
   }
   function renderPeerScan(d) {
-    if (!d || !d.servers) return '<div class="v3-widget-h">🛰️ Peer Brief Scanner</div><div class="v3-placeholder">데이터 없음</div>';
+    if (!d || !d.servers) return '<div class="v3-widget-h">🛰️ Peer Brief Scanner</div><div class="v3-placeholder">' + ((d && d.note) ? String(d.note) : '데이터 없음') + '</div>';
     var servers = d.servers || [];
     var html = function (s) {
       return String(s == null ? '' : s).replace(/[&<>"']/g, function (m) {
@@ -1854,7 +1859,7 @@
       '<span class="v3-pos-actions"><button class="v3-btn sm ghost" id="v3-set-refresh" title="새로고침">🔄</button></span></div>' +
       '<div class="v3-cset-grid">' +
       '<section class="v3-cset"><div class="v3-cset-h">🔌 연결 상태</div>' +
-        '<div class="rib-row"><span>거래소</span><b id="v3-set-exch">Bybit Linear</b></div>' +
+        '<div class="rib-row"><span>거래소</span><b id="v3-set-exch">' + (new URLSearchParams(location.search).get('ex') === 'binance_futures' ? 'Binance Linear' : 'Bybit Linear') + '</b></div>' +
         '<div class="rib-row"><span>모드</span><span id="v3-set-mode" class="v3-badge mute">…</span></div>' +
         '<div class="rib-row"><span>거래소 API</span><span id="v3-set-api">…</span></div>' +
         '<div class="rib-row"><span>WS / 가격피드</span><span id="v3-set-ws">…</span></div>' +
@@ -2301,7 +2306,7 @@
     { name: 'gz_upbit',      url: '/ui/dashboard_upbit_v3.html' },
     { name: 'gz_bithumb',    url: '/ui/dashboard_bithumb_v3.html' },
     { name: 'gz_bybit_spot', url: '/ui/dashboard_bybit_spot_v3.html' },
-    // { name: 'gz_binance', url: '/ui/dashboard_binance_v3.html' },   // 새 거래소 생기면 여기에 추가
+    { name: 'gz_binance', url: '/ui/dashboard_binance_spot_v3.html' },   // 2026-06-23 연결
   ];
   function openGazuaDashboards() {
     GAZUA_SPOT_DASHBOARDS.forEach((d) => { try { window.open(d.url, d.name); } catch (e) { /* 팝업 차단 등 무시 */ } });
@@ -2347,7 +2352,7 @@
   // 개별 거래소 점등 클릭 = 그 거래소 현물 대시보드만 (행 클릭 전파 차단)
   document.querySelectorAll('.gz-ex .gzx').forEach((dot) => dot.addEventListener('click', (ev) => {
     ev.stopPropagation();
-    const url = { upbit: '/ui/dashboard_upbit_v3.html', bithumb: '/ui/dashboard_bithumb_v3.html', bybit_spot: '/ui/dashboard_bybit_spot_v3.html' }[dot.dataset.ex];
+    const url = { upbit: '/ui/dashboard_upbit_v3.html', bithumb: '/ui/dashboard_bithumb_v3.html', bybit_spot: '/ui/dashboard_bybit_spot_v3.html', binance: '/ui/dashboard_binance_spot_v3.html' }[dot.dataset.ex];
     if (url) { try { window.open(url, 'gz_' + dot.dataset.ex); } catch (e) { /* 무시 */ } }
   }));
 

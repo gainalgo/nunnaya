@@ -29,14 +29,17 @@ BASELINE_PATH = os.path.join("runtime", "capital_baseline.json")
 class CapitalTracker:
     """입출금 추적 + 순수 트레이딩 ROI 계산."""
 
-    def __init__(self):
+    def __init__(self, events_path: str = None, baseline_path: str = None):
+        # ★ [2026-06-23] path-aware — 거래소별 자본추적 격리(기본=전역 Bybit, 0변화).
+        self._events_path = events_path or EVENTS_PATH
+        self._baseline_path = baseline_path or BASELINE_PATH
         self._baseline = self._load_baseline()
 
     def _load_baseline(self) -> Dict:
         """기준선 로드. 없으면 빈 상태."""
-        if os.path.exists(BASELINE_PATH):
+        if os.path.exists(self._baseline_path):
             try:
-                with open(BASELINE_PATH, "r", encoding="utf-8") as f:
+                with open(self._baseline_path, "r", encoding="utf-8") as f:
                     return json.load(f)
             except (json.JSONDecodeError, OSError):
                 pass
@@ -49,21 +52,21 @@ class CapitalTracker:
         }
 
     def _save_baseline(self):
-        safe_write_json(BASELINE_PATH, self._baseline)
+        safe_write_json(self._baseline_path, self._baseline)
 
     def _append_event(self, event: Dict):
         """이벤트를 JSONL에 추가."""
-        os.makedirs(os.path.dirname(EVENTS_PATH), exist_ok=True)
-        with open(EVENTS_PATH, "a", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(self._events_path), exist_ok=True)
+        with open(self._events_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
     def get_events(self) -> List[Dict]:
         """모든 자본 이벤트 조회."""
         events = []
-        if not os.path.exists(EVENTS_PATH):
+        if not os.path.exists(self._events_path):
             return events
         try:
-            with open(EVENTS_PATH, "r", encoding="utf-8") as f:
+            with open(self._events_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -241,5 +244,22 @@ class CapitalTracker:
         }
 
 
-# Singleton
+# Singleton (전역 Bybit/Harpoon — 0변화)
 capital_tracker = CapitalTracker()
+
+# Per-path 레지스트리 (거래소별 자본추적 격리). get_capital_tracker(None)=전역 singleton.
+import threading as _threading
+_TRACKERS = {None: capital_tracker}
+_TRACKERS_LOCK = _threading.Lock()
+
+
+def get_capital_tracker(events_path: str = None, baseline_path: str = None) -> "CapitalTracker":
+    key = baseline_path or None
+    t = _TRACKERS.get(key)
+    if t is None:
+        with _TRACKERS_LOCK:
+            t = _TRACKERS.get(key)
+            if t is None:
+                t = CapitalTracker(events_path=events_path, baseline_path=baseline_path)
+                _TRACKERS[key] = t
+    return t

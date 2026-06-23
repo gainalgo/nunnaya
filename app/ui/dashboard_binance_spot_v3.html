@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bithumb GAZUA v3 · 현물</title>
+<title>Binance Spot GAZUA v3 · 현물</title>
 <script src="https://s3.tradingview.com/tv.js"></script>
 <style>
   :root{
@@ -64,7 +64,7 @@
   th{text-align:right;color:var(--muted);font-weight:400;padding:5px 7px;border-bottom:1px solid var(--line)}
   th:first-child,td:first-child{text-align:left}
   td{text-align:right;padding:6px 7px;border-bottom:1px solid #1b212a}
-  .pos{color:var(--accent)} .neg{color:var(--danger)} .muted{color:var(--muted)}
+  .pos{color:var(--accent)} .neg{color:var(--danger)} .warn{color:var(--warn)} .muted{color:var(--muted)}
   .pbar{display:inline-block;width:54px;height:7px;border-radius:4px;background:#0d1117;border:1px solid var(--line);position:relative;vertical-align:middle;overflow:hidden}
   .pbar>i{position:absolute;left:0;top:0;bottom:0;display:block}
   .chips span{display:inline-block;background:#0d1117;border:1px solid var(--line);border-radius:6px;padding:3px 8px;margin:0 5px 5px 0;font-size:11px}
@@ -103,7 +103,7 @@
 <body>
   <!-- 상단 -->
   <div class="top">
-    <div class="brand">🟠 Bithumb GAZUA <small>v3 · 현물 long-only (₩)</small></div>
+    <div class="brand">🟡 Binance Spot GAZUA <small>v3 · 현물 long-only (USDT)</small></div>
     <span id="b-enabled" class="badge">enabled: ?</span>
     <span id="b-paper" class="badge paper">paper: ?</span>
     <span id="b-state" class="badge">state: ?</span>
@@ -143,7 +143,7 @@
       <!-- ===== Overall Status ===== -->
       <div class="view" data-view="overall">
         <div class="cards">
-          <div class="stat"><div class="k">총자산 (₩환산)</div><div class="v" id="c-equity">—</div><div class="sub" id="c-equity-sub">가용 + 보유</div></div>
+          <div class="stat"><div class="k">총자산 (USDT)</div><div class="v" id="c-equity">—</div><div class="sub" id="c-equity-sub">가용 + 보유</div></div>
           <div class="stat"><div class="k">오늘 PnL <button class="sm" onclick="resetTodayNote()" title="저널 기준 자동">ⓘ</button></div><div class="v" id="c-today">—</div><div class="sub" id="c-today-sub">실현 (저널)</div></div>
           <div class="stat"><div class="k">ACTIVE 포지션</div><div class="v" id="c-active">0/3</div><div class="sub" id="c-upnl">미실현 —</div></div>
           <div class="stat"><div class="k">누적 PnL · 승률</div><div class="v" id="c-total">—</div><div class="sub" id="c-winrate">— · — trades</div></div>
@@ -153,16 +153,16 @@
         <div class="card" data-widget="quick">
           <div class="sec-title">⚡ 퀵 트레이드 <span class="muted">(즉시 시장가 · 봇 관리와 무관 · LIVE만)</span></div>
           <div class="qt">
-            <label class="f">market<input id="qt-market" placeholder="KRW-BTC"></label>
+            <label class="f">market<input id="qt-market" placeholder="BTCUSDT"></label>
             <label class="f">주문 방식
               <span style="display:flex;gap:10px;padding:5px 0">
                 <label style="display:flex;gap:4px;align-items:center"><input type="radio" name="qt-mode" value="krw" checked onchange="qtMode()" style="width:auto"> 원</label>
                 <label style="display:flex;gap:4px;align-items:center"><input type="radio" name="qt-mode" value="pct" onchange="qtMode()" style="width:auto"> %</label>
               </span>
             </label>
-            <label class="f" id="qt-krw-wrap">매수 금액 (₩)<input id="qt-krw" type="number" step="1000" placeholder="10000"></label>
+            <label class="f" id="qt-krw-wrap">매수 금액 (USDT)<input id="qt-krw" type="number" step="1" placeholder="10"></label>
             <label class="f" id="qt-qty-wrap">매도 수량 (0=전량)<input id="qt-qty" type="number" step="0.0001" placeholder="0"></label>
-            <label class="f hide" id="qt-pct-wrap">비율 % <small class="muted">(매수=가용KRW·매도=보유)</small>
+            <label class="f hide" id="qt-pct-wrap">비율 % <small class="muted">(매수=가용USDT·매도=보유)</small>
               <select id="qt-pct">
                 <option value="10">10%</option><option value="20">20%</option><option value="25">25%</option>
                 <option value="30">30%</option><option value="40">40%</option><option value="50" selected>50%</option>
@@ -178,8 +178,8 @@
 
         <!-- 차트 + 호가 -->
         <div class="card" data-widget="chart">
-          <div class="sec-title">📈 차트 + 호가 <span class="muted">(TradingView · Bithumb 공개 호가)</span>
-            <input id="chart-market" value="KRW-BTC" style="width:110px" onkeydown="if(event.key==='Enter')openChart(this.value)">
+          <div class="sec-title">📈 차트 + 호가 <span class="muted">(TradingView · Binance 공개 호가)</span>
+            <input id="chart-market" value="BTCUSDT" style="width:110px" onkeydown="if(event.key==='Enter')openChart(this.value)">
             <button class="sm" onclick="openChart(document.getElementById('chart-market').value)">열기</button>
             <span class="muted">행 클릭 = 해당 코인</span>
           </div>
@@ -189,7 +189,7 @@
             </div>
             <div style="width:206px;flex-shrink:0;display:flex;flex-direction:column">
               <div id="ob-spread" class="muted" style="text-align:center;font-size:11px;margin-bottom:4px">호가 —</div>
-              <table style="font-size:11px"><thead><tr><th>price ₩</th><th>size</th></tr></thead>
+              <table style="font-size:11px"><thead><tr><th>price $</th><th>size</th></tr></thead>
                 <tbody id="ob-body"><tr><td colspan="2" class="muted">— (열기)</td></tr></tbody></table>
             </div>
           </div>
@@ -205,8 +205,8 @@
           <div class="sec-title">📋 Positions</div>
           <table>
             <thead><tr>
-              <th></th><th>market</th><th>dir</th><th>cost ₩</th><th>entry ₩</th><th>now ₩</th><th>PnL%</th>
-              <th>SL ₩</th><th>TP1 ₩</th><th>TP2 ₩</th><th>Progress</th><th>Hold</th><th>qty</th><th>mode</th>
+              <th></th><th>market</th><th>dir</th><th>cost $</th><th>entry $</th><th>now $</th><th>PnL%</th>
+              <th>SL $</th><th>TP1 $</th><th>TP2 $</th><th>Progress</th><th>Hold</th><th>qty</th><th>mode</th>
             </tr></thead>
             <tbody id="pos-body"><tr><td colspan="14" class="muted">—</td></tr></tbody>
           </table>
@@ -229,7 +229,7 @@
 
         <!-- 🛰️ 현물 교차 관제 (3거래소 통합) — 선물 Peer Brief 미러 · 관측 전용 -->
         <div class="card" data-widget="spotcross">
-          <div class="sec-title">🛰️ 현물 교차 관제 <span class="muted">— 3거래소 통합 차단 판단 (업비트·빗썸·바이비트 · 관측만)</span>
+          <div class="sec-title">🛰️ 현물 교차 관제 <span class="muted">— 3거래소 통합 차단 판단 (업비트·빗썸·바이낸스 · 관측만)</span>
             <button class="sm" onclick="loadSpotCross(true)" title="새로고침">⟳</button>
             <button class="sm" onclick="toggleCollapse('spotcross-collapse', this)" title="접기/펼치기">▲</button>
           </div>
@@ -249,7 +249,7 @@
           <div id="scan-collapse">
             <table>
               <thead><tr>
-                <th></th><th>market</th><th>price ₩</th><th>signal</th><th>PA</th><th>trend</th><th title="PA 신뢰도(0~1) — 신호가 얼마나 또렷한가. guard_score 의 재료 중 하나. /숫자=entry conf 문턱">conf</th><th>room</th><th title="최종 종합 점수 = guard_score (ADX+추세+PA완성+BTC순풍+눌림목+Vol+RSI 합산). /숫자=점수 문턱(넘으면 진입)">score <small>(최종)</small></th><th>status</th>
+                <th></th><th>market</th><th>price $</th><th>signal</th><th>PA</th><th>trend</th><th title="PA 신뢰도(0~1) — 신호가 얼마나 또렷한가. guard_score 의 재료 중 하나. /숫자=entry conf 문턱">conf</th><th>room</th><th title="최종 종합 점수 = guard_score (ADX+추세+PA완성+BTC순풍+눌림목+Vol+RSI 합산). /숫자=점수 문턱(넘으면 진입)">score <small>(최종)</small></th><th>status</th>
               </tr></thead>
               <tbody id="scan-body"><tr><td colspan="10" class="muted">— (스캔 버튼 · GreenPen 분석은 수 초 소요)</td></tr></tbody>
             </table>
@@ -281,12 +281,12 @@
             </select>
             <span class="muted" id="j-stats">—</span>
           </div>
-          <div class="muted" style="font-size:11px;margin-bottom:4px">일별 실현 PnL (₩) · PnL/ROE = 수수료 차감 <b>net</b> (요율 Size 탭)</div>
+          <div class="muted" style="font-size:11px;margin-bottom:4px">일별 실현 PnL (USDT) · PnL/ROE = 수수료 차감 <b>net</b> (요율 Size 탭)</div>
           <div class="daily" id="j-daily"><span class="muted">—</span></div>
           <table style="margin-top:10px">
             <thead><tr>
               <th>시각</th><th>전략</th><th>이벤트</th><th>market</th><th>dir</th>
-              <th>entry</th><th>exit</th><th>PnL ₩</th><th>ROE%</th><th>Hold</th><th>사유</th><th></th>
+              <th>entry</th><th>exit</th><th>PnL $</th><th>ROE%</th><th>Hold</th><th>사유</th><th></th>
             </tr></thead>
             <tbody id="j-body"><tr><td colspan="12" class="muted">— (새로고침)</td></tr></tbody>
           </table>
@@ -318,7 +318,7 @@
             <div class="rib-row"><span>primary tf <small>(분·예 60/240)</small></span><input class="v3-mini" data-cfg="primary_tf"></div>
             <div class="rib-row"><span>top n <small>(1~50·후보수)</small></span><input class="v3-mini" data-cfg="top_n" type="number" min="1" max="50"></div>
             <div class="rib-row"><span>scan interval <small>(s·≥1)</small></span><input class="v3-mini" data-cfg="scan_interval_sec" type="number" min="1"></div>
-            <div class="rib-row"><span>scan exclude <small>(제외, 쉼표)</small></span><input class="v3-mini" style="width:150px;text-align:left" data-cfg="scan_exclude" placeholder="KRW-APENFT"></div>
+            <div class="rib-row"><span>scan exclude <small>(제외, 쉼표)</small></span><input class="v3-mini" style="width:150px;text-align:left" data-cfg="scan_exclude" placeholder="예: BADUSDT"></div>
           </div>
           <div class="ribbon-group">
             <h6>⚠️ 거래소 경고 종목 <small>(배지는 항상 표시·진입만 토글)</small></h6>
@@ -432,10 +432,10 @@
         </div>
 
         <div class="ribbon-panel" data-panel="size">
-          <div class="note">사이징 — 현물은 레버리지 없음(1배). budget 0 = 가용 KRW 잔고 자동.</div>
+          <div class="note">사이징 — 현물은 레버리지 없음(1배). budget 0 = 가용 USDT 잔고 자동.</div>
           <div class="ribbon-group">
             <h6>💰 사이징 <small>(현물 1배)</small></h6>
-            <div class="rib-row"><span>예산 <small>(₩·0=가용잔고 자동)</small></span><input class="v3-mini" style="width:110px" data-cfg="budget" type="number" step="1000" min="0"></div>
+            <div class="rib-row"><span>예산 <small>($·0=가용잔고 자동)</small></span><input class="v3-mini" style="width:110px" data-cfg="budget" type="number" step="1" min="0"></div>
             <div class="rib-row"><span>risk pct <small>(0~100·거래당 %)</small></span><input class="v3-mini" data-cfg="risk_pct" type="number" step="0.5" min="0" max="100"></div>
             <label class="rib-row"><span>점수 비례 사이징 <small>(confidence 가중·OFF=균등 1/N)</small></span><input type="checkbox" class="v3-cfg-chk" data-cfg="conv_sizing_enabled"></label>
             <div class="rib-row"><span>약신호 슬롯 비중 <small>(0~1·통과 하한이 쓰는 몫·1=가중OFF)</small></span><input class="v3-mini" data-cfg="conv_size_floor" type="number" step="0.05" min="0" max="1"></div>
@@ -443,7 +443,7 @@
           <div class="ribbon-group">
             <h6>💵 수수료 <small>(net PnL 계산 반영)</small></h6>
             <div class="rib-row"><span>수수료율 % / 측 <small>(매수·매도 각·왕복=×2·0=gross)</small></span><input class="v3-mini" data-cfg="fee_rate_pct" type="number" step="0.01" min="0" max="5"></div>
-            <div class="rib-note">PnL·ROE·미실현이 이 요율로 <b>매수+매도 왕복 수수료를 뺀 net</b> 으로 표시·기록됩니다. Bithumb KRW 표준 0.05%/측(왕복 0.1%). 쿠폰/이벤트로 요율이 다르면 직접 입력하세요.</div>
+            <div class="rib-note">PnL·ROE·미실현이 이 요율로 <b>매수+매도 왕복 수수료를 뺀 net</b> 으로 표시·기록됩니다. Binance 현물 표준 taker 0.1%/측(왕복 0.2%). 쿠폰/이벤트로 요율이 다르면 직접 입력하세요.</div>
           </div>
           <div class="panel-actions"><button class="go rib-save" data-save-label="Size 설정" onclick="saveCfgPanel(this)">✓ Size 설정 저장</button><span class="cfg-msg"></span></div>
         </div>
@@ -1328,7 +1328,7 @@
           </div>
           <div class="ribbon-group">
             <h6>💰 역행 사이징</h6>
-            <div class="rib-row"><span>역행 예산 <small>(₩·0=equity 비율 / >0=고정 금액)</small></span><input class="v3-mini" style="width:110px" data-cfg="contrarian_budget" type="number" step="1000" min="0"></div>
+            <div class="rib-row"><span>역행 예산 <small>(USDT·0=equity 비율 / >0=고정 금액)</small></span><input class="v3-mini" style="width:110px" data-cfg="contrarian_budget" type="number" step="10" min="0"></div>
             <div class="rib-row"><span>equity 비율 % <small>(예산=0 일 때·equity 대비)</small></span><input class="v3-mini" data-cfg="contrarian_budget_pct" type="number" step="1" min="0" max="100"></div>
           </div>
           <div class="panel-actions"><button class="go rib-save" data-save-label="역행 설정" onclick="saveCfgPanel(this)">✓ 역행 설정 저장</button><span class="cfg-msg"></span></div>
@@ -1341,7 +1341,7 @@
           <div class="note">🕊️ 대사면 — 거래소엔 있지만 봇 밖에 갇힌 코인을 골라 봇 관리로 입양(평단 기준 TP/SL). <span style="color:var(--warn)">봇과 무관한 코인은 누르지 마세요.</span></div>
           <div class="panel-actions" style="margin-top:0"><button onclick="loadOrphans()">갇힌 코인 조회</button><span id="orphan-err" class="err"></span></div>
           <table style="margin-top:10px">
-            <thead><tr><th>market</th><th>보유</th><th>평단 ₩</th><th>현재 ₩</th><th>평가 ₩</th><th>PnL%</th><th></th></tr></thead>
+            <thead><tr><th>market</th><th>보유</th><th>평단 $</th><th>현재 $</th><th>평가 $</th><th>PnL%</th><th></th></tr></thead>
             <tbody id="orphan-body"><tr><td colspan="7" class="muted">— (조회 버튼)</td></tr></tbody>
           </table>
         </div>
@@ -1382,19 +1382,19 @@
   </div>
 
   <div class="foot">
-    ⬡ Autocoin OS · NUNNAYA Engine v4 · Bithumb FOCUS · © 2026 · AI <span class="sig">넌나야 (NUNNAYA)</span>와 함께 빚다 — 「넌 나야」
+    ⬡ Autocoin OS · NUNNAYA Engine v4 · Binance Spot FOCUS · © 2026 · AI <span class="sig">넌나야 (NUNNAYA)</span>와 함께 빚다 — 「넌 나야」
     <span id="foot" class="muted"></span>
   </div>
 
 <script>
-const API = "/api/strategy/bithumb_gazua";
+const API = "/api/strategy/binance_spot_gazua";
 async function api(path, opts={}){
   const ctl = new AbortController();
   const t = setTimeout(()=>ctl.abort(), 20000);   // 20s 타임아웃 — 응답없는 요청이 '저장중 동그라미'로 무한 hang 방지
   try{ const r = await fetch(API+path, {credentials:'include', signal:ctl.signal, ...opts}); return r.json(); }
   finally{ clearTimeout(t); }
 }
-function krw(v){ v=Number(v||0); return (v<0?'-₩':'₩')+Math.abs(v).toLocaleString('ko-KR',{maximumFractionDigits:0}); }
+function krw(v){ v=Number(v||0); return (v<0?'-$':'$')+Math.abs(v).toLocaleString('en-US',{maximumFractionDigits:2}); }
 function num(v,d=8){ return Number(v||0).toLocaleString('en-US',{maximumFractionDigits:d}); }
 function signCls(v){ v=Number(v||0); return v>0?'pos':(v<0?'neg':'muted'); }
 function holdStr(sec){ sec=Number(sec||0); if(sec<3600) return Math.round(sec/60)+'m'; return (sec/3600).toFixed(1)+'h'; }
@@ -1442,7 +1442,7 @@ function toggleCollapse(id, btn){
   btn.textContent = hidden ? '▲' : '▼';
 }
 
-let _cfgFilled = false;
+let _cfgFilled = false, _openPositions = {};
 async function refresh(){
   loadOrphanSummary();   // 🕊️ 미관리 보유 요약 갱신 (메인 Positions 밑)
   try{
@@ -1458,6 +1458,8 @@ async function refresh(){
     document.getElementById('rail-dot').className = 'dot '+(s.enabled?'on':'');
 
     const ps = s.positions||[];
+    _openPositions = {};
+    ps.forEach(p => { if(p && p.market) _openPositions[p.market] = p; });
     const maxpos = cfg.max_positions||0;
     document.getElementById('s-state').textContent = (s.enabled?'Running':'stopped')+' · '+(s.state||'');
     document.getElementById('s-pos').textContent = ps.length;
@@ -1514,6 +1516,7 @@ async function refresh(){
     loadSpotCross();
     document.getElementById('foot').textContent = ' · 갱신 '+new Date().toLocaleTimeString('ko-KR');
     document.getElementById('s-foot').textContent = '갱신 '+new Date().toLocaleTimeString('ko-KR');
+    if(_jrows.length) renderJournalPage();
   }catch(e){ document.getElementById('foot').textContent = ' · 상태 조회 실패: '+e; }
 }
 
@@ -1598,7 +1601,7 @@ async function loadNearMiss(force){
   }catch(e){ body.innerHTML = '<div class="muted" style="font-size:12px;padding:6px">near-miss 조회 실패: '+e+'</div>'; }
 }
 
-// 🛰️ 현물 교차 관제 (선물 Peer Brief 미러) — 한 박스 3거래소(업비트/빗썸/바이비트) 차단판단 통합.
+// 🛰️ 현물 교차 관제 (선물 Peer Brief 미러) — 한 박스 3거래소(업비트/빗썸/바이낸스) 차단판단 통합.
 // ★ Tick 안전: 카드 보일 때만 + 30s throttle(서버 15s 캐시·manager 25s kline 캐시와 정합). 100% 로컬.
 let _scT = 0;
 async function loadSpotCross(force){
@@ -1755,7 +1758,7 @@ async function quickOrder(side){
     const k = document.getElementById('qt-krw').value;
     const q = document.getElementById('qt-qty').value;
     qs = side==='buy' ? `&krw=${k||0}` : `&qty=${q||0}`;
-    label = side==='buy' ? `🟢 ${market} ₩${k||0} 시장가 매수` : `🔴 ${market} ${q||'전량'} 시장가 매도`;
+    label = side==='buy' ? `🟢 ${market} $${k||0} 시장가 매수` : `🔴 ${market} ${q||'전량'} 시장가 매도`;
   }
   if(!confirm(label+'\n\n봇 관리와 무관한 즉시 주문입니다. 진행할까요?')) return;
   msg.className='muted'; msg.textContent='주문 중…';
@@ -1872,6 +1875,25 @@ async function loadJournal(){
 // Trade Journal 페이지네이션 (표시 개수 선택 · 기본 7)
 let _jrows = [], _jpage = 0, _jper = 7;
 function jSetPer(v){ _jper = Math.max(1, +v||7); _jpage = 0; renderJournalPage(); }
+function journalEventBadge(ev){
+  const e = String(ev||'ENTRY').toUpperCase();
+  if(e==='EXIT') return '<span class="muted" title="실현 청산">EXIT</span>';
+  if(e==='ENTRY') return '<span class="pos" title="진입">ENTRY</span>';
+  if(e==='LONGHOLD') return '<span class="warn" title="SL→존버/해제 관찰 이벤트">HOLD</span>';
+  if(e==='LONGHOLD_RELEASE') return '<span class="warn" title="존버 해제 이벤트">RELEASE</span>';
+  return '<span class="muted" title="'+e+'">'+e.replace('LONGHOLD_','')+'</span>';
+}
+function closeEnough(a,b){
+  a = Number(a||0); b = Number(b||0);
+  if(!a || !b) return true;
+  return Math.abs(a-b) <= Math.max(0.00000001, Math.abs(b)*0.0005);
+}
+function openPosForJournal(x){
+  const p = _openPositions[x.market];
+  if(!p) return null;
+  if(!closeEnough(x.entry, p.entry_price)) return null;
+  return p;
+}
 function renderJournalPage(){
   const body = document.getElementById('j-body');
   const pages = Math.max(1, Math.ceil(_jrows.length/_jper));
@@ -1885,14 +1907,21 @@ function renderJournalPage(){
   const slice = _jrows.slice(_jpage*_jper, _jpage*_jper+_jper);
   body.innerHTML = slice.map(x=>{
     const t = new Date((x.ts||0)*1000).toLocaleString('ko-KR',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-    const ev = x.event==='EXIT'?'<span class="muted">EXIT</span>':'<span class="pos">ENTRY</span>';
-    const pk = Number(x.pnl_krw||0); const roe = Number(x.roe_pct||0);
-    const isExit = x.event==='EXIT';
+    const event = String(x.event||'ENTRY').toUpperCase();
+    const ev = journalEventBadge(event);
+    const isExit = event==='EXIT';
+    const openPos = isExit ? null : openPosForJournal(x);
+    const isLive = !!openPos;
+    const exitPrice = isExit ? Number(x.exit||0) : (isLive ? Number(openPos.current_price||0) : Number(x.exit||0));
+    const roe = isExit ? Number(x.roe_pct||0) : (isLive ? Number(openPos.pnl_pct||0) : Number(x.roe_pct||0));
+    const pk = isExit ? Number(x.pnl_krw||0) : (isLive ? Number(openPos.krw_spent||0)*roe/100.0 : Number(x.pnl_krw||0));
+    const showPnL = isExit || isLive;
+    const liveTag = isLive ? ' <small class="muted">now</small>' : '';
     return `<tr><td>${t}</td><td>${x.strategy||'FOCUS'}</td><td>${ev}</td><td>${x.market}</td><td>${x.direction||'LONG'}</td>
-      <td>${num(x.entry,4)}</td><td>${x.exit!=null?num(x.exit,4):'—'}</td>
-      <td class="${isExit?signCls(pk):'muted'}">${isExit?krw(pk):'—'}</td>
-      <td class="${isExit?signCls(roe):'muted'}">${isExit?(roe>0?'+':'')+roe.toFixed(2)+'%':'—'}</td>
-      <td class="muted">${holdStr(x.hold_sec)}</td><td class="muted">${x.reason||''}${x.paper?' ·paper':''}</td>
+      <td>${num(x.entry,4)}</td><td>${exitPrice>0?num(exitPrice,4)+liveTag:'—'}</td>
+      <td class="${showPnL?signCls(pk):'muted'}">${showPnL?krw(pk):'—'}</td>
+      <td class="${showPnL?signCls(roe):'muted'}">${showPnL?(roe>0?'+':'')+roe.toFixed(2)+'%':'—'}</td>
+      <td class="muted">${holdStr(isLive?openPos.hold_sec:x.hold_sec)}</td><td class="muted">${x.reason||''}${isLive?' ·미실현':''}${x.paper?' ·paper':''}</td>
       <td><button class="sm" onclick="deleteJournal(${x.ts})" title="이 기록 삭제 (거래 무관)">✕</button></td></tr>`;
   }).join('');
   document.getElementById('j-page').textContent = `${_jpage+1} / ${pages} · 총 ${_jrows.length}건`;
@@ -1949,7 +1978,7 @@ async function adopt(market){
 
 // 📈 차트 + 호가
 let _tvWidget=null, _obTimer=null, _obMarket='';
-function tvSymbol(m){ return 'BITHUMB:'+String(m||'').replace('KRW-','').toUpperCase()+'KRW'; }
+function tvSymbol(m){ return 'BINANCE:'+String(m||'').toUpperCase(); }
 function loadTV(market){
   const cont=document.getElementById('tv-chart');
   if(!window.TradingView){ cont.innerHTML='<div class="muted" style="padding:14px">TradingView 로드 실패(외부망 차단?). 호가창은 정상.</div>'; return; }
@@ -1983,7 +2012,7 @@ async function loadOrderbook(market){
 }
 function openChart(market){
   market=String(market||'').trim().toUpperCase();
-  if(!market.startsWith('KRW-')) market='KRW-'+market;
+  market=String(market||'').toUpperCase(); if(!market.endsWith('USDT')) market=market+'USDT';
   document.getElementById('chart-market').value=market;
   // 차트 위젯이 꺼져있으면 켜기
   const cb=document.querySelector('[data-wt="chart"]'); if(cb&&!cb.checked){ cb.checked=true; toggleWidget(cb); }
@@ -2020,14 +2049,14 @@ async function loadScoreTimeline(market){
       const x0=PAD+bw*i+1, w=Math.max(1,bw-2);
       const top=Math.min(y0,y1), hh=Math.max(1,Math.abs(y1-y0));
       const kst=new Date(x.ts).toLocaleString('ko-KR',{month:'2-digit',day:'2-digit',hour:'2-digit'});
-      bars+=`<rect x="${x0.toFixed(1)}" y="${top.toFixed(1)}" width="${w.toFixed(1)}" height="${hh.toFixed(1)}" fill="${col}"><title>${kst} · ₩${num(x.close,2)} · 점수 ${g>0?'+':''}${g} · conf ${(x.conf*100).toFixed(0)}% · ${x.trend}${x.pa?' · '+x.pa:''}</title></rect>`;
+      bars+=`<rect x="${x0.toFixed(1)}" y="${top.toFixed(1)}" width="${w.toFixed(1)}" height="${hh.toFixed(1)}" fill="${col}"><title>${kst} · $${num(x.close,2)} · 점수 ${g>0?'+':''}${g} · conf ${(x.conf*100).toFixed(0)}% · ${x.trend}${x.pa?' · '+x.pa:''}</title></rect>`;
     });
     const thrY=gy(gthr);
     const thrLine=gthr>0?`<line x1="${PAD}" y1="${thrY.toFixed(1)}" x2="${(W-PAD).toFixed(1)}" y2="${thrY.toFixed(1)}" stroke="var(--accent)" stroke-dasharray="3 3" stroke-width="1" opacity="0.6"/><text x="${W-PAD-2}" y="${(thrY-2).toFixed(1)}" text-anchor="end" font-size="8" fill="var(--accent)">문턱 ${gthr}</text>`:'';
     const zeroLine=`<line x1="${PAD}" y1="${gZero}" x2="${(W-PAD).toFixed(1)}" y2="${gZero}" stroke="var(--line)" stroke-width="1"/>`;
     wrap.innerHTML=`<div style="overflow-x:auto"><svg width="${W}" height="${H}" style="display:block">
-      <text x="${PAD}" y="9" font-size="8" fill="var(--muted)">가격 ₩${num(pmax,1)}</text>
-      <text x="${PAD}" y="${(PH-2)}" font-size="8" fill="var(--muted)">₩${num(pmin,1)}</text>
+      <text x="${PAD}" y="9" font-size="8" fill="var(--muted)">가격 $${num(pmax,1)}</text>
+      <text x="${PAD}" y="${(PH-2)}" font-size="8" fill="var(--muted)">$${num(pmin,1)}</text>
       <path d="${line}" fill="none" stroke="#5b8def" stroke-width="1.4"/>
       ${zeroLine}${thrLine}${bars}
     </svg></div>
@@ -2080,7 +2109,7 @@ setInterval(refresh, 10000);
 <script>
 /* ── 기본값 리셋 ↺ (Bybit dashboard_v3 미러) ───────────────────────
    각 [data-cfg] 옆에 ↺ 삽입(input+↺ = v3-def-wrap). rib-save 아래에
-   "↺ 이 그룹 전체 기본값으로" 버튼. 소스 = bithumb_focus config/defaults.
+   "↺ 이 그룹 전체 기본값으로" 버튼. 소스 = bybit_spot_focus config/defaults.
 ──────────────────────────────────────────────────────────────────── */
 (function(){
   let _defs = null;

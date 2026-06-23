@@ -68,10 +68,13 @@ class TradeRecord:
 class TradeJournal:
     """FOCUS + Harpoon 전용 장부 매니저."""
 
-    def __init__(self):
+    def __init__(self, path: Optional[str] = None):
+        # ★ [2026-06-23] path-aware — 거래소별 장부 격리(Bybit=기본 JOURNAL_PATH, Binance=별도).
+        #   path 미지정 시 기존 전역 경로(=Bybit/Harpoon, 0변화).
+        self.path = path or JOURNAL_PATH
         self._lock = threading.Lock()
         self._recent_exits: Dict[tuple, float] = {}
-        os.makedirs(os.path.dirname(JOURNAL_PATH), exist_ok=True)
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
         # ★ 인메모리 캐시 (2026-05-15 leak fix) ──
         # 매 5초 dashboard polling이 38MB 파일 풀파싱하던 누수 차단.
         # 첫 호출 시 한 번만 파일→list 로드. 이후 _append/get_*은 메모리만 사용.
@@ -86,8 +89,8 @@ class TradeJournal:
             if self._cache_loaded:
                 return
             try:
-                if os.path.exists(JOURNAL_PATH):
-                    with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
+                if os.path.exists(self.path):
+                    with open(self.path, "r", encoding="utf-8") as f:
                         for line in f:
                             line = line.strip()
                             if not line:
@@ -106,7 +109,7 @@ class TradeJournal:
         with self._lock:
             rec_dict = asdict(record)
             try:
-                with open(JOURNAL_PATH, "a", encoding="utf-8") as f:
+                with open(self.path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(rec_dict, ensure_ascii=False) + "\n")
                     f.flush()
                     os.fsync(f.fileno())
@@ -417,5 +420,23 @@ class TradeJournal:
         return summary
 
 
-# ── Singleton ──
+# ── Singleton (Bybit/Harpoon 전역 장부 — 기존 동작 0변화) ──
 journal = TradeJournal()
+
+# ── Per-path 레지스트리 (거래소별 장부 격리) ──
+#   get_journal(JOURNAL_PATH) 는 위 전역 singleton 을 그대로 반환(같은 인메모리 캐시/dedup/gate_sink 보존).
+#   다른 경로(예: runtime/binance_futures/journal.jsonl)는 전용 인스턴스 1개를 캐시해 공유.
+_JOURNALS: Dict[str, TradeJournal] = {JOURNAL_PATH: journal}
+_JOURNALS_LOCK = threading.Lock()
+
+
+def get_journal(path: Optional[str] = None) -> TradeJournal:
+    p = path or JOURNAL_PATH
+    j = _JOURNALS.get(p)
+    if j is None:
+        with _JOURNALS_LOCK:
+            j = _JOURNALS.get(p)
+            if j is None:
+                j = TradeJournal(p)
+                _JOURNALS[p] = j
+    return j

@@ -91,6 +91,12 @@ class SpotGazuaConfig:
     dca_pyramid_max: float = 2.5        # 추가배율 상한
     dca_max_pos_mult: float = 3.0       # 한 코인 총투입 ≤ 슬롯예산 × 이값 (over-allocation 차단 안전망)
     dca_abs_sl_pct: float = -35.0       # 절대 바닥(최초진입가 기준) — 이하면 존버 무시 강제매도. 0=무제한 존버
+    # ★ 떨어지는 칼 게이트(2026-06-23) — DCA가 freefall 중에도 무조건 물타기 → 2배 사이즈로 SL/존버 깨짐
+    #   (실측 손실: 수동강제청산 평균 -3041/건, DCA후 빠른 SL -7544@roe -1.9%). 진입엔 momentum_reversal 가드가
+    #   있으나 DCA엔 없어 칼받기가 손익비를 역전시킴. → 직전 5M봉이 강하게 하락 중이면 이번 tick 물타기 보류
+    #   (바닥 다질 때까지). 효자 눌림목 DCA(멈춘 칼)는 그대로, 떨어지는 칼받기만 차단.
+    dca_stabilize_gate_enabled: bool = True   # DCA 전 단기 안정화 확인. 0=OFF(옛 무조건 물타기)
+    dca_stabilize_strong_atr: float = 1.0     # 직전 5M봉 하락 ≥ 이값×ATR 이면 칼낙하 판정 → 물타기 보류
     # ── 진입품질 게이트 (§② · 라이브 복귀 게이트 · ★기본 ON, paper로 관측) ─────
     #   부모님 진단: 진입이 천장/끝물 → 컷 더하지 말고 *진입 room*. (feedback_bad_entry_not_fixed_by_cut)
     #   ★ 2026-06-17 부모 "모든 것 ON" — paper라 실주문 0, 매 재시작마다 개선 관측. 0=해당 게이트 OFF.
@@ -1412,7 +1418,7 @@ class SpotGazuaManager:
                 #   부분 체결 평단으로 SL/TP 긋고 나머지 놓치는 것 방지 (부모님 지적).
                 if order_uuid:
                     try:
-                        od2 = self.client.wait_order(uuid=order_uuid, timeout_sec=10.0, poll_interval=0.5)
+                        od2 = self.client.wait_order(uuid=order_uuid, market=market, timeout_sec=10.0, poll_interval=0.5)
                         exec_qty = float(od2.get("executed_volume", 0) or 0) or exec_qty
                         fill_price = float(od2.get("avg_price", 0) or 0) or fill_price
                     except Exception as q_exc:
@@ -1529,7 +1535,7 @@ class SpotGazuaManager:
                 fill_price = float(od.get("avg_price", 0) or 0)
                 if order_uuid:
                     try:
-                        od2 = self.client.wait_order(uuid=order_uuid, timeout_sec=10.0, poll_interval=0.5)
+                        od2 = self.client.wait_order(uuid=order_uuid, market=market, timeout_sec=10.0, poll_interval=0.5)
                         exec_qty = float(od2.get("executed_volume", 0) or 0) or exec_qty
                         fill_price = float(od2.get("avg_price", 0) or 0) or fill_price
                     except Exception as q_exc:
@@ -1627,7 +1633,7 @@ class SpotGazuaManager:
                         for uid in (pos.tp1_order_uuid, pos.tp2_order_uuid):
                             if uid:
                                 try:
-                                    self.client.cancel_order(uuid=uid)
+                                    self.client.cancel_order(uuid=uid, market=pos.market)
                                 except Exception:
                                     pass
                         logger.info("[SPOT_GAZUA] %s 실보유 %.8f(₩%.0f<%.0f) — 외부/수동 청산 감지, 포지션 정리",
@@ -1647,7 +1653,7 @@ class SpotGazuaManager:
                     for uid in (pos.tp1_order_uuid, pos.tp2_order_uuid):
                         if uid:
                             try:
-                                self.client.cancel_order(uuid=uid)
+                                self.client.cancel_order(uuid=uid, market=pos.market)
                             except Exception:
                                 pass
                     pos.tp1_order_uuid = ""
@@ -1672,7 +1678,7 @@ class SpotGazuaManager:
                     for uid in (pos.tp1_order_uuid, pos.tp2_order_uuid):
                         if uid:
                             try:
-                                self.client.cancel_order(uuid=uid)
+                                self.client.cancel_order(uuid=uid, market=pos.market)
                             except Exception:
                                 pass
                     pos.tp1_order_uuid = ""
@@ -1874,6 +1880,16 @@ class SpotGazuaManager:
         min_krw = getattr(self.client, "MIN_ORDER_KRW", 5000.0)
         if add_krw < min_krw:
             return False   # 예산 소진 → 더 못 탐, 존버로 자연 인계
+        # ★ 떨어지는 칼 게이트 — 직전 5M봉 급락 중이면 이번 tick 물타기 보류(바닥 다질 때까지).
+        #   freefall 칼받기로 사이즈만 키워 SL/존버 손익비 역전되던 것 차단(효자 눌림목 DCA는 통과).
+        try:
+            from app.manager.spot_entry_guards import check_dca_stabilized
+            _stab_ok, _stab_why = check_dca_stabilized(self.client, pos.market, cfg)
+            if not _stab_ok:
+                logger.info("[SPOT_GAZUA] %s 물타기 보류 — %s", pos.market, _stab_why)
+                return False
+        except Exception as _stab_exc:
+            logger.debug("[SPOT_GAZUA] dca_stabilize fail-open: %s", _stab_exc)
         return self._book_addbuy(pos, price, add_krw)
 
     def _book_addbuy(self, pos: "SpotGazuaPosition", ref_price: float, add_krw: float) -> bool:
@@ -1894,7 +1910,7 @@ class SpotGazuaManager:
                 fp = float(od.get("avg_price", 0) or 0)
                 if uuid:
                     try:
-                        od2 = self.client.wait_order(uuid=uuid, timeout_sec=10.0, poll_interval=0.5)
+                        od2 = self.client.wait_order(uuid=uuid, market=pos.market, timeout_sec=10.0, poll_interval=0.5)
                         exq = float(od2.get("executed_volume", 0) or 0) or exq
                         fp = float(od2.get("avg_price", 0) or 0) or fp
                     except Exception as q_exc:
@@ -1927,7 +1943,7 @@ class SpotGazuaManager:
             for uid in (pos.tp1_order_uuid, pos.tp2_order_uuid):
                 if uid:
                     try:
-                        self.client.cancel_order(uuid=uid)
+                        self.client.cancel_order(uuid=uid, market=pos.market)
                     except Exception:
                         pass
             pos.tp1_order_uuid = ""
@@ -2215,7 +2231,7 @@ class SpotGazuaManager:
             #   체결이면 장부 반영(_book_partial), 수동취소/병합이면 슬롯만 비움.
             if pos.tp1_order_uuid and not pos.partial_done:
                 try:
-                    od1 = self.client.get_order(uuid=pos.tp1_order_uuid)
+                    od1 = self.client.get_order(uuid=pos.tp1_order_uuid, market=pos.market)
                     if str(od1.get("state", "")).lower() == "done":
                         self._book_partial(pos, pos.tp1, self.config.partial_pct / 100.0,
                                            sold_qty=float(od1.get("executed_volume", 0) or 0))
@@ -2283,7 +2299,7 @@ class SpotGazuaManager:
         # 1) TP1 체결 → 절반 익절 + SL 본전
         if pos.tp1_order_uuid and not pos.partial_done:
             try:
-                od = self.client.get_order(uuid=pos.tp1_order_uuid)
+                od = self.client.get_order(uuid=pos.tp1_order_uuid, market=pos.market)
                 if str(od.get("state", "")).lower() == "done":
                     filled = float(od.get("executed_volume", 0) or 0)
                     self._book_partial(pos, pos.tp1, self.config.partial_pct / 100.0, sold_qty=filled)  # ★저널+원금분할
@@ -2298,7 +2314,7 @@ class SpotGazuaManager:
         # 2) TP2 체결 → 전량 청산 완료
         if pos.tp2_order_uuid:
             try:
-                od = self.client.get_order(uuid=pos.tp2_order_uuid)
+                od = self.client.get_order(uuid=pos.tp2_order_uuid, market=pos.market)
                 if str(od.get("state", "")).lower() == "done":
                     logger.info("[SPOT_GAZUA] TP2 체결 %s — 전량 청산 완료", pos.market)
                     self._record_journal("EXIT", pos, pos.tp2, reason="TP2 체결")
@@ -2314,7 +2330,7 @@ class SpotGazuaManager:
             for uid in (pos.tp1_order_uuid, pos.tp2_order_uuid):
                 if uid:
                     try:
-                        self.client.cancel_order(uuid=uid)
+                        self.client.cancel_order(uuid=uid, market=pos.market)
                     except Exception as c_exc:
                         logger.warning("[SPOT_GAZUA] TP 주문취소 %s 실패: %s", pos.market, c_exc)
             pos.tp1_order_uuid = ""
@@ -2520,6 +2536,16 @@ class SpotGazuaManager:
             q = float(qty if qty is not None else pos.qty)
             entry = float(pos.entry_price or 0)
             is_exit = (event == "EXIT" and entry > 0)
+            # ★★ [2026-06-23 fix] 재진입 쿨다운(v2) 기준시각을 *모든 청산 경로*에서 박는다.
+            #   기존엔 _manage_all_positions(1759)에서만 set → LIVE SL/TP 청산은
+            #   _manage_live_tp_orders/_resolve_sl_exit 경로라 누락 → 45분 쿨다운이 LIVE 청산을
+            #   못 봐 SL 직후 재진입 회전매(LAYER 실측). _record_journal 은 전 청산이 거치는 단일
+            #   funnel 이라 여기서 박으면 paper/live·SL/TP/수동 전부 커버.
+            if event == "EXIT":
+                try:
+                    self._recent_exit[pos.market] = time.time()
+                except Exception:
+                    pass
             # ★ PnL₩ = 원금(krw_spent) × 가격변동률 − 왕복 수수료 (net, 부모님 입력 fee_rate_pct 2026-06-17).
             #   옛 (청산가-평단)×qty 는 거래소 잔고동기화로 qty 오염 시 ₩0/과대값 → 원금 기준이 안정적.
             #   수수료: 매수측 = 원금×율, 매도측 = 매도대금(원금×ratio)×율. 둘 다 차감해야 실제 net.
@@ -2757,7 +2783,7 @@ class SpotGazuaManager:
         # 시장가 매수는 여러 호가 분할 체결 가능 → 전량 체결까지 대기 후 최종 평단/수량 확정.
         if order_uuid:
             try:
-                od2 = self.client.wait_order(uuid=order_uuid, timeout_sec=10.0, poll_interval=0.5)
+                od2 = self.client.wait_order(uuid=order_uuid, market=market, timeout_sec=10.0, poll_interval=0.5)
                 exec_qty = float(od2.get("executed_volume", 0) or 0) or exec_qty
                 fill_price = float(od2.get("avg_price", 0) or 0) or fill_price
             except Exception as q_exc:

@@ -2,6 +2,52 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
+  <!-- ★ [2026-06-23] 거래소 전환 shim — ?ex=binance_futures 면 FOCUS 화면을 그대로 재사용하되
+       모든 /api/strategy/focus 호출을 /api/strategy/binance_futures 로 리라이트(바이낸스 선물).
+       ?ex 없으면(=Bybit 기본) 0영향. 전 UI 가 window.fetch 기반(XHR 0)이라 이 한 블록이 전수 포착.
+       반드시 어떤 fetch 보다 먼저 설치되도록 <head> 최상단 인라인. -->
+  <script>
+  (function () {
+    try {
+      var ex = new URLSearchParams(location.search).get('ex');
+      if (ex === 'binance_futures') {
+        var _origFetch = window.fetch.bind(window);
+        window.fetch = function (url, opts) {
+          if (typeof url === 'string') {
+            if (url.indexOf('/api/strategy/focus') !== -1) {
+              url = url.replace('/api/strategy/focus', '/api/strategy/binance_futures');
+            } else if (url.indexOf('/api/system/status') !== -1) {
+              // Overall Status 카드 총자산/세션PnL → Binance 계좌 값 (거래소별 분류)
+              url = url.replace('/api/system/status', '/api/strategy/binance_futures/system-status');
+            }
+          }
+          return _origFetch(url, opts);
+        };
+        document.documentElement.setAttribute('data-ex', 'binance_futures');
+        document.addEventListener('DOMContentLoaded', function () {
+          try {
+            document.title = 'BINANCE 선물 · ' + document.title;
+            // 거래소 라벨 Bybit→Binance (배너 없이 조용히). #v3-set-exch 는 설정패널 렌더 시 JS 가 처리.
+            document.querySelectorAll('.v3-exch').forEach(function (e) {
+              if (/Bybit/.test(e.textContent)) e.textContent = e.textContent.replace('Bybit', 'Binance');
+            });
+          } catch (e) {}
+        });
+      }
+    } catch (e) {}
+  })();
+  </script>
+  <style>
+    /* 선물 거래소 전환 토글 (FOCUS·HARPOON 그룹) — 기본 Bybit 활성, ?ex=binance_futures 면 Binance 활성 */
+    .v3-exsw { float: right; font-size: 12.5px; font-weight: 500; }
+    .v3-exsw a { color: var(--v3-fg-mute, #8a8f98); text-decoration: none; padding: 1px 6px; border-radius: 3px; }
+    .v3-exsw a + a { border-left: 1px solid var(--v3-border, #333); }
+    html:not([data-ex="binance_futures"]) .v3-exsw a[data-x="bybit"] { color: #4aa3ff; font-weight: 600; }
+    html[data-ex="binance_futures"] .v3-exsw a[data-x="binance"] { color: #f0b90b; font-weight: 600; }
+    /* ★ [2026-06-23 감사 medium#7] HARPOON 은 Bybit 전용(shim 이 harpoon 엔드포인트 미리라이트).
+       Binance 창에서 HARPOON 행을 숨겨 'Binance HARPOON' 으로 오인(=Bybit 데이터) 방지. */
+    html[data-ex="binance_futures"] .v3-strat[data-strat="harpoon"] { display: none !important; }
+  </style>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
@@ -1544,7 +1590,11 @@
       <div class="v3-tree-body" id="v3-tree">
         <small style="display:block;padding:5px 6px 2px;color:var(--v3-fg-mute);font-size:10.5px;">스위치 = 메인에 표시 (다중 선택)</small>
         <div class="v3-strat" data-strat="home" data-engine="home" title="Overall Status — 포지션·추천 후보·퀵트레이드"><span class="ic">🏠</span><span class="nm">Overall Status</span></div>
-        <div class="v3-tree-group">ⓐ FOCUS · HARPOON</div>
+        <div class="v3-tree-group">ⓐ FOCUS · HARPOON
+          <span class="v3-exsw" title="선물 거래소 전환 (기본 Bybit · Binance 선택 시 FOCUS 데이터만 Binance · HARPOON 은 Bybit 전용이라 Binance 창에선 숨김)">
+            <a href="/ui/dashboard_v3.html" data-x="bybit">Bybit</a><a href="/ui/dashboard_v3.html?ex=binance_futures" data-x="binance">Binance</a>
+          </span>
+        </div>
         <div class="v3-strat active" data-strat="focus" data-engine="focus">
           <span class="ic">◎</span><span class="nm">FOCUS</span>
           <label class="v3-toggle"><input type="checkbox" id="v3-tg-focus"><span></span></label>
@@ -1557,8 +1607,8 @@
         <div class="v3-tree-group">ⓑ Strategy Plugins</div>
         <div class="v3-strat" data-strat="lightning" data-engine="plugin"><span class="ic">⚡</span><span class="nm">LIGHTNING</span><label class="v3-toggle"><input type="checkbox"><span></span></label></div>
         <div class="v3-strat" data-strat="sniper" data-engine="plugin"><span class="ic">🎯</span><span class="nm">SNIPER</span><label class="v3-toggle"><input type="checkbox"><span></span></label></div>
-        <div class="v3-strat" data-strat="gazua" data-engine="plugin" title="현물 GAZUA — 클릭 시 3거래소 현물 대시보드 열기 · 점등=가동중"><span class="ic">🚀</span><span class="nm">GAZUA <small>(현물)</small></span><span class="gz-ex" data-gzlights="gazua"><i class="gzx" data-ex="upbit" title="업비트 현물"></i><i class="gzx" data-ex="bithumb" title="빗썸 현물"></i><i class="gzx" data-ex="bybit_spot" title="바이비트 현물"></i><i class="gzx" data-ex="binance" title="바이낸스 현물 (준비중 — API 키 연결 시 가동)"></i></span></div>
-        <div class="v3-strat" data-strat="contrarian" data-engine="plugin" title="현물 역행(CONTRARIAN) — 클릭 시 3거래소 현물 대시보드 열기 · 점등=역행 가동중"><span class="ic">🔄</span><span class="nm">CONTRARIAN <small>(현물 역행)</small></span><span class="gz-ex" data-gzlights="contrarian"><i class="gzx" data-ex="upbit" title="업비트 역행"></i><i class="gzx" data-ex="bithumb" title="빗썸 역행"></i><i class="gzx" data-ex="bybit_spot" title="바이비트 역행"></i><i class="gzx" data-ex="binance" title="바이낸스 역행 (준비중)"></i></span></div>
+        <div class="v3-strat" data-strat="gazua" data-engine="plugin" title="현물 GAZUA — 클릭 시 3거래소 현물 대시보드 열기 · 점등=가동중"><span class="ic">🚀</span><span class="nm">GAZUA <small>(현물)</small></span><span class="gz-ex" data-gzlights="gazua"><i class="gzx" data-ex="upbit" title="업비트 현물"></i><i class="gzx" data-ex="bithumb" title="빗썸 현물"></i><i class="gzx" data-ex="bybit_spot" title="바이비트 현물"></i><i class="gzx" data-ex="binance" title="바이낸스 현물 (BINANCE_SPOT_FOCUS_ENABLED+키 시 가동)"></i></span></div>
+        <div class="v3-strat" data-strat="contrarian" data-engine="plugin" title="현물 역행(CONTRARIAN) — 클릭 시 3거래소 현물 대시보드 열기 · 점등=역행 가동중"><span class="ic">🔄</span><span class="nm">CONTRARIAN <small>(현물 역행)</small></span><span class="gz-ex" data-gzlights="contrarian"><i class="gzx" data-ex="upbit" title="업비트 역행"></i><i class="gzx" data-ex="bithumb" title="빗썸 역행"></i><i class="gzx" data-ex="bybit_spot" title="바이비트 역행"></i><i class="gzx" data-ex="binance" title="바이낸스 역행"></i></span></div>
         <div class="v3-strat" data-strat="ladder" data-engine="plugin"><span class="ic">📐</span><span class="nm">LADDER</span><label class="v3-toggle"><input type="checkbox"><span></span></label></div>
         <div class="v3-strat" data-strat="pingpong" data-engine="plugin"><span class="ic">🏓</span><span class="nm">PINGPONG</span><label class="v3-toggle"><input type="checkbox"><span></span></label></div>
         <div class="v3-strat" data-strat="autoloop" data-engine="plugin"><span class="ic">🔁</span><span class="nm">AUTOLOOP</span><label class="v3-toggle"><input type="checkbox"><span></span></label></div>
@@ -1706,7 +1756,7 @@
 </div>
 
 <script src="/ui/js/v3/ribbon.js?v=20260602be"></script>
-<script src="/ui/js/dashboard_v3.js?v=20260621gz2"></script>
+<script src="/ui/js/dashboard_v3.js?v=20260623audit1"></script>
 <script src="/ui/js/v3/tab_entry.js?v=20260620a"></script>
 <script>
 /* ── 기본값 리셋 (2026-06-04 운영자) ─────────────────────────────────

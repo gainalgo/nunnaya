@@ -362,8 +362,14 @@ def status(request: Request, response: Response) -> Dict[str, Any]:
     snap["server_now_ts"] = now
 
     # API call stats (rate limit monitoring)
+    # ★ [2026-06-23 부모] FOCUS 실호출로 통일 — 기존 system.trade_client(상태폴링만=거의 1)는
+    #   실제 스캔/주문 트래픽을 안 셈(FOCUS 는 별도 클라이언트 인스턴스). FOCUS 클라의 get_api_stats
+    #   를 우선 표시해 진짜 사용량(스캔 시 ~20-25)을 보이게. (표시 전용·거래 무관, Binance 창은 이미 동일.)
     try:
-        if hasattr(system, "trade_client") and hasattr(system.trade_client, "get_api_stats"):
+        _fm = getattr(system, "focus_manager", None)
+        if _fm is not None and hasattr(_fm, "_get_client"):
+            snap["api_stats"] = _fm._get_client().get_api_stats()
+        elif hasattr(system, "trade_client") and hasattr(system.trade_client, "get_api_stats"):
             snap["api_stats"] = system.trade_client.get_api_stats()
     except (KeyError, AttributeError, TypeError):
         report_suppressed_exception(__name__, 'API call stats (rate limit monitoring)')

@@ -1,5 +1,5 @@
 """
-Exchange Factory — Bybit(선물) / Upbit(현물)
+Exchange Factory — Bybit(선물) / Upbit(현물) / Binance(선물+현물)
 """
 
 import os
@@ -28,8 +28,10 @@ def create_exchange_adapter(exchange: str = "BYBIT", **kwargs) -> ExchangeAdapte
         return _create_bybit_adapter(**kwargs)
     elif exchange == "UPBIT":
         return _create_upbit_adapter(**kwargs)
+    elif exchange == "BINANCE":
+        return _create_binance_adapter(**kwargs)
     else:
-        raise ValueError(f"Unsupported exchange: {exchange}. Supported: BYBIT, UPBIT.")
+        raise ValueError(f"Unsupported exchange: {exchange}. Supported: BYBIT, UPBIT, BINANCE.")
 
 
 def _create_bybit_adapter(**kwargs) -> ExchangeAdapter:
@@ -46,8 +48,15 @@ def _create_upbit_adapter(**kwargs) -> ExchangeAdapter:
     return UpbitAdapter(access_key, secret_key)
 
 
+def _create_binance_adapter(**kwargs) -> ExchangeAdapter:
+    from app.integrations.binance_adapter import BinanceAdapter
+    api_key = os.getenv("BINANCE_API_KEY", kwargs.get("api_key", ""))
+    api_secret = os.getenv("BINANCE_API_SECRET", kwargs.get("api_secret", ""))
+    return BinanceAdapter(api_key, api_secret)
+
+
 def get_available_exchanges():
-    return ["BYBIT", "UPBIT"]
+    return ["BYBIT", "UPBIT", "BINANCE"]
 
 
 def create_bybit(**kwargs) -> ExchangeAdapter:
@@ -56,3 +65,7 @@ def create_bybit(**kwargs) -> ExchangeAdapter:
 
 def create_upbit(**kwargs) -> ExchangeAdapter:
     return create_exchange_adapter("UPBIT", **kwargs)
+
+
+def create_binance(**kwargs) -> ExchangeAdapter:
+    return create_exchange_adapter("BINANCE", **kwargs)

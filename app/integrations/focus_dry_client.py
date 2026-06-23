@@ -64,9 +64,22 @@ class FocusDryClient:
         # 가상 — 실제 거래소 leverage 설정 안 함
         return {"ok": True, "_dry": True}
 
+    def switch_position_mode(self, *args, **kwargs) -> Dict[str, Any]:
+        # ★ [2026-06-23 감사] paper 누수 차단 — override 없으면 __getattr__ 로 실계좌
+        #   account-wide 포지션모드(dualSidePosition) 변경 API 가 나감(진입 직전 호출됨).
+        return {"ok": True, "_dry": True}
+
     # ── 거래소 포지션: 빈 list (FOCUS self.positions 가 진실) ──
     def get_positions(self, *args, **kwargs) -> List[Dict[str, Any]]:
         return []
+
+    # ── [2026-06-23 감사] paper 누수 차단 — 아래 둘이 override 안 돼 __getattr__ 로
+    #   실 거래소 인증 API(positionRisk·account)가 나가던 비대칭 누수. 명시 가상값으로 봉인.
+    def list_open_positions(self, *args, **kwargs) -> List[Dict[str, Any]]:
+        return []  # paper = 실계좌 포지션 조회 금지 (self.positions 가 진실)
+
+    def get_available_margin(self, *args, **kwargs) -> float:
+        return self._virtual_usdt  # paper = 가상 잔고 (실 account 조회 금지)
 
     # ── 나머지: 실제 client 위임 ──
     def __getattr__(self, name: str):

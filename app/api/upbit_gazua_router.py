@@ -363,7 +363,7 @@ def upbit_focus_force_close(request: Request, market: str = Query(..., descripti
 def gazua_near_miss(request: Request):
     """guard_score 통과 후 막판 게이트에 막힌 매수의 '차단가 대비 수익률' 사후판정.
     막은 뒤 ↑(아쉬운 차단)=과차단 신호 / 그대로·↓(좋은 차단). kline 사용 →
-    get_near_miss_enriched 의 25s 응답캐시로 묶음(부모 거래소 Tick 걱정 반영, 서버간 Tick 무관)."""
+    get_near_miss_enriched 의 25s 응답캐시로 묶음(운영자 거래소 Tick 걱정 반영, 서버간 Tick 무관)."""
     um = _get_um(request)
     try:
         return {"ok": True, "near_miss": um.get_near_miss_enriched()}
@@ -386,7 +386,7 @@ def upbit_focus_orphans(request: Request):
 
 @router.post("/adopt")
 def upbit_focus_adopt(request: Request, market: str = Query(..., description="사면할 코인 마켓 (예: KRW-WLD)")):
-    """사면 — 부모님이 고른 코인 하나만 봇 관리로 입양(자동 입양 X)."""
+    """사면 — 운영자가 고른 코인 하나만 봇 관리로 입양(자동 입양 X)."""
     um = _get_um(request)
     try:
         res = um.adopt_orphan(market)

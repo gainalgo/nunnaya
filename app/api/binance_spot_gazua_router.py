@@ -1,7 +1,7 @@
 # ============================================================
-# Upbit FOCUS Strategy API Router (현물 long_only)
+# Binance 현물(spot) FOCUS Strategy API Router (USDT long_only)
 # ------------------------------------------------------------
-# BithumbGazuaManager 제어용 REST 엔드포인트. upbit_gazua_router 미러(거래소만 빗썸).
+# BinanceSpotGazuaManager 제어용 REST 엔드포인트. upbit_gazua_router 미러(거래소만 Binance 현물).
 # ============================================================
 from __future__ import annotations
 
@@ -12,33 +12,33 @@ from fastapi import APIRouter, Query, Request
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/strategy/bithumb_gazua", tags=["BITHUMB_GAZUA"])
+router = APIRouter(prefix="/api/strategy/binance_spot_gazua", tags=["BINANCE_SPOT_GAZUA"])
 
 
 def _get_um(request: Request):
-    """Get BithumbGazuaManager from system (없으면 생성)."""
+    """Get BinanceSpotGazuaManager from system (없으면 생성)."""
     system = request.app.state.system
-    um = getattr(system, "bithumb_gazua_manager", None)
+    um = getattr(system, "binance_spot_gazua_manager", None)
     if um is None:
-        from app.manager.bithumb_gazua_manager import BithumbGazuaManager
-        um = BithumbGazuaManager(system=system)
-        system.bithumb_gazua_manager = um
+        from app.manager.binance_spot_gazua_manager import BinanceSpotGazuaManager
+        um = BinanceSpotGazuaManager(system=system)
+        system.binance_spot_gazua_manager = um
     return um
 
 
 # ── Status / Config ─────────────────────────────────────────
 @router.get("/status")
-def upbit_focus_status(request: Request):
+def binance_spot_focus_status(request: Request):
     return {"ok": True, **_get_um(request).get_status()}
 
 
 @router.get("/config")
-def upbit_focus_config_get(request: Request):
+def binance_spot_focus_config_get(request: Request):
     return {"ok": True, "config": _get_um(request).get_status()["config"]}
 
 
 @router.get("/config/defaults")
-def upbit_focus_config_defaults():
+def binance_spot_focus_config_defaults():
     """코드 기본값(SpotGazuaConfig dataclass) — v3 대시보드 ↺ 리셋 소스. focus 미러."""
     from dataclasses import asdict
     from app.manager.spot_gazua_manager import SpotGazuaConfig
@@ -46,7 +46,7 @@ def upbit_focus_config_defaults():
 
 
 @router.post("/config")
-def upbit_focus_config_set(
+def binance_spot_focus_config_set(
     request: Request,
     paper: Optional[bool] = Query(None),
     budget: Optional[float] = Query(None, ge=0),
@@ -60,9 +60,9 @@ def upbit_focus_config_set(
     primary_tf: Optional[str] = Query(None),
     top_n: Optional[int] = Query(None, ge=1, le=50),
     scan_interval_sec: Optional[float] = Query(None, ge=1),
-    scan_exclude: Optional[str] = Query(None, description="스캔 제외 마켓 (쉼표 구분, 예: KRW-APENFT)"),
-    block_warning_coins: Optional[bool] = Query(None, description="거래소 투자유의 종목(상폐위험) 진입 차단(봇+수동)."),
-    block_caution_coins: Optional[bool] = Query(None, description="거래소 주의환기 종목 진입 차단. OFF=배지 표시만."),
+    scan_exclude: Optional[str] = Query(None, description="스캔 제외 마켓 (쉼표 구분, 예: BTCUSDT)"),
+    block_warning_coins: Optional[bool] = Query(None, description="거래소 투자유의 종목 진입 차단(Binance 현물=해당 없음)."),
+    block_caution_coins: Optional[bool] = Query(None, description="거래소 주의환기 종목 진입 차단(Binance 현물=해당 없음)."),
     cooldown_sec: Optional[float] = Query(None, ge=0),
     tp1_mult: Optional[float] = Query(None, ge=0),
     tp2_mult: Optional[float] = Query(None, ge=0),
@@ -93,7 +93,7 @@ def upbit_focus_config_set(
     multi_be_lock_stage3_pct: Optional[float] = Query(None, ge=0, description="3단계 peak%% → SL=entry+1.0%%."),
     multi_be_lock_stage4_pct: Optional[float] = Query(None, ge=0, description="4단계 peak%% → SL=entry+2.0%%."),
     multi_be_lock_fee_cushion_pct: Optional[float] = Query(None, ge=0, description="BE 잠금 수수료 쿠션 %%."),
-    multi_be_lock_atr_adaptive: Optional[bool] = Query(None, description="be_lock ATR 적응 — 메이저(저변동) 노이즈 BE컷 방지(Bybit 회전매 fix). 노이즈 위에서만 잠금 시작."),
+    multi_be_lock_atr_adaptive: Optional[bool] = Query(None, description="be_lock ATR 적응 — 메이저(저변동) 노이즈 BE컷 방지(Binance 회전매 fix). 노이즈 위에서만 잠금 시작."),
     multi_be_lock_atr_mult: Optional[float] = Query(None, ge=0, description="arming floor = ATR%% × 이값."),
     be_stall_enabled: Optional[bool] = Query(None, description="be_stall(peak 정체+모멘텀 꺾임 익절 컷)."),
     be_stall_sec: Optional[float] = Query(None, ge=0, description="peak 정체 최소 초(컷 후보)."),
@@ -101,7 +101,7 @@ def upbit_focus_config_set(
     be_stall_neutral_exit: Optional[bool] = Query(None, description="중립 모멘텀도 시간컷? 기본 False(보수)."),
     be_stall_rsi_strong: Optional[float] = Query(None, ge=0, le=100, description="RSI 우리편 기준."),
     be_stall_rsi_weak: Optional[float] = Query(None, ge=0, le=100, description="RSI 반대편 기준."),
-    fee_rate_pct: Optional[float] = Query(None, ge=0, le=5, description="한쪽 수수료율 %(매수/매도 각). 왕복=×2. net PnL 계산 반영. 0=수수료 무시(gross)."),
+    fee_rate_pct: Optional[float] = Query(None, ge=0, le=5, description="한쪽 수수료율 %(Binance 현물 taker≈0.1). 왕복=×2. net PnL 반영."),
     manual_manage_enabled: Optional[bool] = Query(None, description="수동(퀵트레이드) 매수 포지션을 봇이 SL/TP 자동 관리? OFF=관망(청산 버튼으로 사람 수확)."),
     contrarian_enabled: Optional[bool] = Query(None, description="역행(CONTRARIAN) 2번째 진입원 ON/OFF. 기본 OFF. 상승추세엔 OFF, 중립/하락만."),
     contrarian_max_positions: Optional[int] = Query(None, ge=0, le=10, description="역행 별도 슬롯(FOCUS 슬롯과 분리)."),
@@ -178,16 +178,16 @@ def upbit_focus_config_set(
         if _k not in cfg:
             cfg[_k] = _v
     um.update_config(cfg)
-    logger.info("[BITHUMB_FOCUS_API] config set: %d fields", len(cfg))
+    logger.info("[BINANCE_SPOT_FOCUS_API] config set: %d fields", len(cfg))
     return {"ok": True, "config": um.get_status()["config"]}
 
 
 # ── Enable / Disable ────────────────────────────────────────
 @router.post("/enable")
-def upbit_focus_enable(
+def binance_spot_focus_enable(
     request: Request,
     paper: Optional[bool] = Query(None, description="paper 모드. 생략 시 현재값 유지(기본 True)."),
-    budget: Optional[float] = Query(None, ge=0, description="예산 KRW (0=가용잔고 자동)."),
+    budget: Optional[float] = Query(None, ge=0, description="예산 USDT (0=가용잔고 자동)."),
 ):
     um = _get_um(request)
     cfg: Dict[str, Any] = {"enabled": True}
@@ -196,21 +196,21 @@ def upbit_focus_enable(
     if budget is not None:
         cfg["budget"] = budget
     um.update_config(cfg)
-    logger.info("[BITHUMB_FOCUS_API] Enabled: %s", {k: v for k, v in cfg.items() if k != "enabled"} or "none")
+    logger.info("[BINANCE_SPOT_FOCUS_API] Enabled: %s", {k: v for k, v in cfg.items() if k != "enabled"} or "none")
     return {"ok": True, "enabled": True, **um.get_status()}
 
 
 @router.post("/disable")
-def upbit_focus_disable(request: Request):
+def binance_spot_focus_disable(request: Request):
     um = _get_um(request)
     um.update_config({"enabled": False})
-    logger.info("[BITHUMB_FOCUS_API] Disabled")
+    logger.info("[BINANCE_SPOT_FOCUS_API] Disabled")
     return {"ok": True, "enabled": False}
 
 
 # ── Scan preview ────────────────────────────────────────────
 @router.get("/scan")
-def upbit_focus_scan(request: Request):
+def binance_spot_focus_scan(request: Request):
     """3중 확인 스캔 미리보기 (진입은 안 함)."""
     um = _get_um(request)
     try:
@@ -223,12 +223,12 @@ def upbit_focus_scan(request: Request):
         )
         return {"ok": True, "result": result}
     except Exception as exc:
-        logger.warning("[BITHUMB_FOCUS_API] scan error: %s", exc)
+        logger.warning("[BINANCE_SPOT_FOCUS_API] scan error: %s", exc)
         return {"ok": False, "error": str(exc)}
 
 
 @router.get("/scan-candidates")
-def upbit_focus_scan_candidates(request: Request):
+def binance_spot_focus_scan_candidates(request: Request):
     """예비 후보 현황 — 거래대금 상위를 GreenPen 진단(차단 사유 포함). 진입 안 함."""
     um = _get_um(request)
     try:
@@ -243,19 +243,18 @@ def upbit_focus_scan_candidates(request: Request):
             block_warning=um.config.block_warning_coins,
             block_caution=um.config.block_caution_coins,
         )
-        # 점수 옆 문턱 병기용 — 진입 판정 기준값 동봉(최종점수 guard_score + conf 게이트).
         return {"ok": True, "candidates": rows, "thresholds": {
             "guard_score_threshold": um.config.guard_score_threshold,
             "entry_conf_threshold": um.config.entry_conf_threshold,
             "min_conf": um.config.min_conf,
         }}
     except Exception as exc:
-        logger.warning("[BITHUMB_FOCUS_API] scan-candidates error: %s", exc)
+        logger.warning("[BINANCE_SPOT_FOCUS_API] scan-candidates error: %s", exc)
         return {"ok": False, "error": str(exc)}
 
 
 @router.get("/scan-list")
-def upbit_focus_scan_list(request: Request):
+def binance_spot_focus_scan_list(request: Request):
     """거래대금 상위 후보(Source1) 미리보기."""
     um = _get_um(request)
     try:
@@ -263,15 +262,15 @@ def upbit_focus_scan_list(request: Request):
         markets = _source1_spot_volume(um.client, top_n=um.config.top_n, exclude=um.config.scan_exclude)
         return {"ok": True, "markets": markets}
     except Exception as exc:
-        logger.warning("[BITHUMB_FOCUS_API] scan-list error: %s", exc)
+        logger.warning("[BINANCE_SPOT_FOCUS_API] scan-list error: %s", exc)
         return {"ok": False, "error": str(exc)}
 
 
-# ── 공개 호가창 (차트+호가 위젯용) ───────────────────────────
+# ── 공개 호가창 / 점수 궤적 ──────────────────────────────────
 @router.get("/score-timeline")
-def upbit_focus_score_timeline(request: Request, market: str = Query(..., description="마켓 (예: KRW-WLD)"),
-                               count: int = Query(60, ge=10, le=120)):
-    """과거 시점별 guard_score+conf 궤적 (점수↔차트 정합 검증 — 좋은 자리서 점수 켜졌나)."""
+def binance_spot_focus_score_timeline(request: Request, market: str = Query(..., description="마켓 (예: WLDUSDT)"),
+                                    count: int = Query(60, ge=10, le=120)):
+    """과거 시점별 guard_score+conf 궤적 (점수↔차트 정합 검증)."""
     um = _get_um(request)
     try:
         from app.manager.spot_focus_coin_selector import score_timeline
@@ -284,76 +283,76 @@ def upbit_focus_score_timeline(request: Request, market: str = Query(..., descri
             "entry_conf_threshold": um.config.entry_conf_threshold,
         }}
     except Exception as exc:
-        logger.warning("[BITHUMB_FOCUS_API] score-timeline %s error: %s", market, exc)
+        logger.warning("[BINANCE_SPOT_FOCUS_API] score-timeline %s error: %s", market, exc)
         return {"ok": False, "error": str(exc)}
 
 
 @router.get("/orderbook")
-def upbit_focus_orderbook(request: Request, market: str = Query(..., description="마켓 (예: KRW-BTC)"),
-                          depth: int = Query(15, ge=1, le=30)):
-    """Upbit 공개 호가창 프록시 (인증 불필요, CORS 회피용 서버 경유)."""
+def binance_spot_focus_orderbook(request: Request, market: str = Query(..., description="마켓 (예: BTCUSDT)"),
+                               depth: int = Query(15, ge=1, le=30)):
+    """Binance 현물 공개 호가창 프록시 (서버 경유)."""
     um = _get_um(request)
     try:
         return {"ok": True, **um.client.get_orderbook(market, depth=depth)}
     except Exception as exc:
-        logger.warning("[BITHUMB_FOCUS_API] orderbook %s error: %s", market, exc)
+        logger.warning("[BINANCE_SPOT_FOCUS_API] orderbook %s error: %s", market, exc)
         return {"ok": False, "error": str(exc)}
 
 
 # ── Trade Journal ───────────────────────────────────────────
 @router.get("/journal")
-def upbit_focus_journal(request: Request, limit: int = Query(100, ge=1, le=2000)):
+def binance_spot_focus_journal(request: Request, limit: int = Query(100, ge=1, le=2000)):
     """거래기록(최신순) + 집계(누적/오늘 PnL, 승률, 일별)."""
     um = _get_um(request)
     try:
         return {"ok": True, "rows": um.read_journal(limit=limit), "summary": um.journal_summary()}
     except Exception as exc:
-        logger.warning("[BITHUMB_FOCUS_API] journal error: %s", exc)
+        logger.warning("[BINANCE_SPOT_FOCUS_API] journal error: %s", exc)
         return {"ok": False, "error": str(exc)}
 
 
 @router.post("/journal/delete")
-def upbit_focus_journal_delete(request: Request, ts: float = Query(..., description="삭제할 저널 기록의 ts (행 고유값)")):
+def binance_spot_focus_journal_delete(request: Request, ts: float = Query(..., description="삭제할 저널 기록의 ts (행 고유값)")):
     """저널 기록 1건 삭제 (ts 매칭). 기록만 삭제 — 거래·포지션 무관."""
     um = _get_um(request)
     try:
         return um.delete_journal(ts)
     except Exception as exc:
-        logger.warning("[BITHUMB_FOCUS_API] journal delete error: %s", exc)
+        logger.warning("[BINANCE_SPOT_FOCUS_API] journal delete error: %s", exc)
         return {"ok": False, "error": str(exc)}
 
 
-# ── 퀵 트레이드 (수동 즉시 시장가, 봇 관리와 무관) ─────────────
+# ── 퀵 트레이드 (수동 즉시 시장가, LIVE 전용) ─────────────────
 @router.post("/order")
-def upbit_focus_order(
+def binance_spot_focus_order(
     request: Request,
-    market: str = Query(..., description="마켓 (예: KRW-BTC 또는 BTC)"),
+    market: str = Query(..., description="마켓 (예: BTCUSDT 또는 BTC)"),
     side: str = Query(..., description="buy(매수) 또는 sell(매도)"),
-    krw: float = Query(0.0, ge=0, description="매수 금액(KRW) — 원 모드"),
+    krw: float = Query(0.0, ge=0, description="매수 금액(USDT) — 원 모드"),
     qty: float = Query(0.0, ge=0, description="매도 수량(0=실보유 전량) — 원 모드"),
-    pct: float = Query(0.0, ge=0, le=100, description="비율 % — 매수=가용KRW×%, 매도=보유×%. >0이면 krw/qty 무시(% 모드)."),
+    pct: float = Query(0.0, ge=0, le=100, description="비율 % — 매수=가용USDT×%, 매도=보유×%. >0이면 krw/qty 무시(% 모드)."),
 ):
     """대시보드 퀵트레이드 — 즉시 시장가 주문. paper 모드 차단."""
     um = _get_um(request)
     try:
         res = um.quick_order(market, side, krw=krw, qty=qty, pct=pct)
-        logger.info("[BITHUMB_FOCUS_API] quick_order %s %s -> %s", market, side, res.get("ok"))
+        logger.info("[BINANCE_SPOT_FOCUS_API] quick_order %s %s -> %s", market, side, res.get("ok"))
         return res
     except Exception as exc:
-        logger.warning("[BITHUMB_FOCUS_API] order %s %s error: %s", market, side, exc)
+        logger.warning("[BINANCE_SPOT_FOCUS_API] order %s %s error: %s", market, side, exc)
         return {"ok": False, "error": str(exc)}
 
 
 @router.post("/force-close")
-def upbit_focus_force_close(request: Request, market: str = Query(..., description="강제청산할 봇 관리 포지션 마켓 (예: KRW-KERNEL)")):
-    """봇 관리 포지션 1개 강제청산 (사람 수확). paper/live 공통 — 퀵트레이드와 달리 paper도 마감 가능."""
+def binance_spot_focus_force_close(request: Request, market: str = Query(..., description="강제청산할 봇 관리 포지션 마켓 (예: BTCUSDT)")):
+    """봇 관리 포지션 1개 강제청산 (사람 수확). paper/live 공통."""
     um = _get_um(request)
     try:
         res = um.force_close(market)
-        logger.info("[BITHUMB_FOCUS_API] force_close %s -> %s", market, res.get("ok"))
+        logger.info("[BINANCE_SPOT_FOCUS_API] force_close %s -> %s", market, res.get("ok"))
         return res
     except Exception as exc:
-        logger.warning("[BITHUMB_FOCUS_API] force_close %s error: %s", market, exc)
+        logger.warning("[BINANCE_SPOT_FOCUS_API] force_close %s error: %s", market, exc)
         return {"ok": False, "error": str(exc)}
 
 
@@ -373,24 +372,24 @@ def gazua_near_miss(request: Request):
 
 # ── 🕊️ 대사면(amnesty) — 유치장 코인 입양 ────────────────────
 @router.get("/orphans")
-def upbit_focus_orphans(request: Request):
+def binance_spot_focus_orphans(request: Request):
     """거래소 보유 중 봇 밖에 갇힌 코인(사면 후보) 조회. 정보만."""
     um = _get_um(request)
     try:
         return {"ok": True, "orphans": um.list_orphans()}
     except Exception as exc:
-        logger.warning("[BITHUMB_FOCUS_API] orphans error: %s", exc)
+        logger.warning("[BINANCE_SPOT_FOCUS_API] orphans error: %s", exc)
         return {"ok": False, "error": str(exc)}
 
 
 @router.post("/adopt")
-def upbit_focus_adopt(request: Request, market: str = Query(..., description="사면할 코인 마켓 (예: KRW-WLD)")):
+def binance_spot_focus_adopt(request: Request, market: str = Query(..., description="사면할 코인 마켓 (예: WLDUSDT)")):
     """사면 — 운영자가 고른 코인 하나만 봇 관리로 입양(자동 입양 X)."""
     um = _get_um(request)
     try:
         res = um.adopt_orphan(market)
-        logger.info("[BITHUMB_FOCUS_API] 🕊️ adopt %s -> %s", market, res.get("ok"))
+        logger.info("[BINANCE_SPOT_FOCUS_API] 🕊️ adopt %s -> %s", market, res.get("ok"))
         return res
     except Exception as exc:
-        logger.warning("[BITHUMB_FOCUS_API] adopt %s error: %s", market, exc)
+        logger.warning("[BINANCE_SPOT_FOCUS_API] adopt %s error: %s", market, exc)
         return {"ok": False, "error": str(exc)}

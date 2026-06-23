@@ -185,18 +185,20 @@ def _empty_snapshot(reset_ts: float, config: Optional[Dict] = None) -> Dict[str,
     }
 
 
-def save_snapshot(snapshot: Dict[str, Any]) -> str:
-    """스냅샷을 파일에 저장. 반환: 파일 경로."""
+def save_snapshot(snapshot: Dict[str, Any], snap_dir: Optional[str] = None) -> str:
+    """스냅샷을 파일에 저장. 반환: 파일 경로. (snap_dir 미지정=기본 Bybit 디렉터리, 0변화)"""
+    _dir = snap_dir or SNAPSHOT_DIR
+    os.makedirs(_dir, exist_ok=True)
     date_str = snapshot.get("date", "unknown")
-    path = os.path.join(SNAPSHOT_DIR, f"{date_str}.json")
+    path = os.path.join(_dir, f"{date_str}.json")
     safe_write_json(path, snapshot)
     logger.info("[DailySnapshot] Saved: %s (PnL=$%.2f, %d trades)", date_str, snapshot.get("total_pnl", 0), snapshot.get("total_trades", 0))
     return path
 
 
-def load_snapshot(date_str: str) -> Optional[Dict]:
+def load_snapshot(date_str: str, snap_dir: Optional[str] = None) -> Optional[Dict]:
     """특정 날짜 스냅샷 로드."""
-    path = os.path.join(SNAPSHOT_DIR, f"{date_str}.json")
+    path = os.path.join(snap_dir or SNAPSHOT_DIR, f"{date_str}.json")
     if not os.path.exists(path):
         return None
     try:
@@ -206,38 +208,41 @@ def load_snapshot(date_str: str) -> Optional[Dict]:
         return None
 
 
-def list_snapshots() -> List[str]:
+def list_snapshots(snap_dir: Optional[str] = None) -> List[str]:
     """저장된 스냅샷 날짜 목록 (최신순)."""
-    if not os.path.isdir(SNAPSHOT_DIR):
+    _dir = snap_dir or SNAPSHOT_DIR
+    if not os.path.isdir(_dir):
         return []
     dates = []
-    for fn in os.listdir(SNAPSHOT_DIR):
+    for fn in os.listdir(_dir):
         if fn.endswith(".json"):
             dates.append(fn.replace(".json", ""))
     return sorted(dates, reverse=True)
 
 
-def get_all_snapshots() -> List[Dict]:
+def get_all_snapshots(snap_dir: Optional[str] = None) -> List[Dict]:
     """전체 스냅샷 로드 (날짜순)."""
     snapshots = []
-    for date_str in sorted(list_snapshots()):
-        snap = load_snapshot(date_str)
+    for date_str in sorted(list_snapshots(snap_dir)):
+        snap = load_snapshot(date_str, snap_dir)
         if snap:
             snapshots.append(snap)
     return snapshots
 
 
-def backfill_from_journal(config: Optional[Dict] = None) -> int:
+def backfill_from_journal(config: Optional[Dict] = None, journal_path: Optional[str] = None,
+                          snap_dir: Optional[str] = None) -> int:
     """journal에서 과거 일별 스냅샷 일괄 생성 (빠진 날짜만).
-    반환: 생성된 스냅샷 수."""
+    반환: 생성된 스냅샷 수. (journal_path/snap_dir 미지정=전역 Bybit, 0변화)"""
     from app.manager.trade_journal import JOURNAL_PATH
+    _jp = journal_path or JOURNAL_PATH
 
-    if not os.path.exists(JOURNAL_PATH):
+    if not os.path.exists(_jp):
         return 0
 
     # 전체 EXIT 거래 로드
     exits = []
-    with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
+    with open(_jp, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -260,7 +265,7 @@ def backfill_from_journal(config: Optional[Dict] = None) -> int:
     first_dt = _dt.datetime.fromtimestamp(min_ts, tz=_dt.timezone.utc)
     boundary = _reset_boundary(first_dt)
 
-    existing = set(list_snapshots())
+    existing = set(list_snapshots(snap_dir))
     count = 0
     now_ts = time.time()
 
@@ -275,7 +280,7 @@ def backfill_from_journal(config: Optional[Dict] = None) -> int:
         if date_label not in existing:
             snap = build_snapshot(exits, boundary.timestamp(), next_boundary.timestamp(), config)
             if snap.get("total_trades", 0) > 0:
-                save_snapshot(snap)
+                save_snapshot(snap, snap_dir)
                 count += 1
 
         boundary = next_boundary

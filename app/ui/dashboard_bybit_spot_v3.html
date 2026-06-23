@@ -1194,13 +1194,16 @@
             <label class="rib-row"><span>adaptive_cooldown <small>(연패 횟수별 쿨다운 증가)</small></span><input type="checkbox" class="v3-cfg-chk" data-cfg="adaptive_cooldown"></label>
             <div class="panel-actions"><button class="go rib-save" onclick="saveCfgPanel(this)">✓ Sizing 저장</button><span class="cfg-msg"></span></div>
           </details>
-          <details class="cfg-auto-grp ribbon-group"><summary>🧩 Advanced (86)</summary>
+          <details class="cfg-auto-grp ribbon-group"><summary>🧩 Advanced (88)</summary>
             <div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);font-weight:600;margin:14px 0 5px">dca_max <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">· 2</span></div>
             <div class="rib-row"><span>dca_max_depth_pct <small>(이 깊이까지만 물타기 (자동 단계수 = depth/step = 8). 이후엔 존버)</small></span><input class="v3-mini" data-cfg="dca_max_depth_pct" type="number" step="0.1" min="0"></div>
             <div class="rib-row"><span>dca_max_pos_mult <small>(한 코인 총투입 ≤ 슬롯예산 × 이값 (over-allocation 차단 안전망))</small></span><input class="v3-mini" data-cfg="dca_max_pos_mult" type="number" step="0.1" min="0"></div>
             <div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);font-weight:600;margin:14px 0 5px">dca_pyramid <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">· 2</span></div>
             <div class="rib-row"><span>dca_pyramid_step <small>(횟수마다 추가배율 +0.20 (완만))</small></span><input class="v3-mini" data-cfg="dca_pyramid_step" type="number" step="0.01" min="0"></div>
             <div class="rib-row"><span>dca_pyramid_max <small>(추가배율 상한)</small></span><input class="v3-mini" data-cfg="dca_pyramid_max" type="number" step="0.1" min="0"></div>
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);font-weight:600;margin:14px 0 5px">dca_stabilize <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">· 2</span></div>
+            <label class="rib-row"><span>dca_stabilize_gate_enabled <small>(★ 떨어지는 칼 게이트(2026-06-23) — DCA가 freefall 중에도 무조건 물타기 → 2배 사이즈로 SL/존버 깨짐 (실측 손실: 수동강제청산 평균 -3041/건, DCA후 빠른 SL -7544@roe -1.9%). 진입엔 momentum_reversal 가드가 있으나 DCA엔 없어 칼받기가 손익비를 역전시킴. → 직전 5M봉이 강하게 하락 중이면 이번 tick 물타기 보류 (바닥 다질 때까지). 효자 눌림목 DCA(멈춘 칼)는 그대로, 떨어지는 칼받기만 차단. · DCA 전 단기 안정화 확인. 0=OFF(옛 무조건 물타기))</small></span><input type="checkbox" class="v3-cfg-chk" data-cfg="dca_stabilize_gate_enabled"></label>
+            <div class="rib-row"><span>dca_stabilize_strong_atr <small>(직전 5M봉 하락 ≥ 이값×ATR 이면 칼낙하 판정 → 물타기 보류)</small></span><input class="v3-mini" data-cfg="dca_stabilize_strong_atr" type="number" step="0.1" min="0"></div>
             <div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);font-weight:600;margin:14px 0 5px">adx_entry <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">· 3</span></div>
             <div class="rib-row"><span>adx_entry_tf <small>(★ [2026-06-19 운영자] ADX 진입게이트 전용 TF — primary_tf(H4=240)는 5일 박스라 변동성 코인이 영영 SIDEWAYS/저ADX. 점수(base conviction)는 이미 6-TF라 단기추세 봄 → 게이트만 짧은 TF로. · ADX 진입게이트 TF (H1). &quot;30&quot;/&quot;15&quot; 로 더 짧게 가능. &quot;&quot;=primary_tf 사용)</small></span><input class="v3-mini" style="width:150px;text-align:left" data-cfg="adx_entry_tf" type="text"></div>
             <label class="rib-row"><span>adx_entry_breakout_exempt <small>(저ADX여도 직전 닫힌봉이 최근 N봉 고가 돌파면 통과(박스 회복 진입))</small></span><input type="checkbox" class="v3-cfg-chk" data-cfg="adx_entry_breakout_exempt"></label>
@@ -1702,7 +1705,7 @@ async function saveConfig(scope){
   const msgs = root.querySelectorAll('.cfg-msg');
   try{
     let ok=true, err='';
-    for(let i=0;i<parts.length;i+=80){           // ★ stride=slice=80 일치. 옛 stride250+slice80 = 81번째~필드 영영 안 보내짐(Regime 197필드 중 index80+ 저장 누락 버그, 2026-06-23)
+    for(let i=0;i<parts.length;i+=80){           // ★ stride=slice=80 일치. 옛 stride250+slice80 = 81번째~필드 영영 안 보내짐(Regime 197필드 중 reentry 등 index80+ 저장 누락 버그, 2026-06-23)
       const r = await api('/config?'+parts.slice(i,i+80).join('&'), {method:'POST'});
       if(!r || !r.ok){ ok=false; err=(r&&r.error)||''; break; }
     }

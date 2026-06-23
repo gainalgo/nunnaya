@@ -555,3 +555,47 @@ class BybitTradeClient:
         if ttl > 0.0 and data:
             self._kline_cache[ck] = (time.time(), data)
         return data
+
+    # ── 거래소 추상화 시드 (FocusManager 가 직접 bybit_get 하던 것을 client 경유로) ──
+    #   반환 키 = Bybit 네이티브(symbol/lastPrice/turnover24h/price24hPcnt/highPrice/lowPrice).
+    #   Binance 클라이언트가 같은 키로 매핑해 FocusManager 소비코드 0변화.
+    def get_market_tickers(self, *, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """linear/spot 24h 티커 목록 (거래대금 스캔용). symbol 지정 시 1종목만."""
+        from app.core.constants import BYBIT_MARKET_TICKERS, parse_bybit_list
+        params: Dict[str, Any] = {"category": self._category}
+        if symbol:
+            params["symbol"] = self._normalize_symbol(symbol)
+        resp = bybit_get(BYBIT_MARKET_TICKERS, params=params, timeout=self.timeout)
+        resp.raise_for_status()
+        return parse_bybit_list(resp.json())
+
+    def get_instrument_info(self, symbol: str) -> Dict[str, float]:
+        """심볼 거래규칙 (qty_step/min_qty/max_qty) — 주문 qty 정밀도·폭발가드용."""
+        from app.core.constants import BYBIT_MARKET_INSTRUMENTS
+        resp = self._request("GET", BYBIT_MARKET_INSTRUMENTS,
+                             params={"category": self._category, "symbol": self._normalize_symbol(symbol)})
+        lst = resp.get("list", []) if isinstance(resp, dict) else []
+        if not lst:
+            return {"qty_step": 0.0, "min_qty": 0.0, "max_qty": 0.0}
+        lot = lst[0].get("lotSizeFilter", {}) or {}
+        return {"qty_step": float(lot.get("qtyStep", 0) or 0),
+                "min_qty": float(lot.get("minOrderQty", 0) or 0),
+                "max_qty": float(lot.get("maxOrderQty", 0) or 0)}
+
+    def get_available_margin(self) -> float:
+        """UNIFIED 계좌 가용 마진(USDT). 실패 시 0.0."""
+        try:
+            from app.core.constants import BYBIT_ACCOUNT_WALLET
+            resp = self._request("GET", BYBIT_ACCOUNT_WALLET, params={"accountType": "UNIFIED"})
+            lst = resp.get("list", []) if isinstance(resp, dict) else []
+            if not lst:
+                return 0.0
+            return float(lst[0].get("totalAvailableBalance", 0) or 0)
+        except Exception as exc:
+            logger.debug("[BybitTrade] get_available_margin failed: %s", exc)
+            return 0.0
+
+    def list_open_positions(self, *, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """보유 포지션 목록 — 키 symbol/size/side(Buy|Sell)/avgPrice (FocusManager sync 소비).
+        Bybit get_positions() 가 이미 네이티브 키로 반환 → 그대로. (_linear_last_price 는 위에 정의됨.)"""
+        return self.get_positions(symbol=symbol)

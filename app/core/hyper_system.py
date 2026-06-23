@@ -1465,6 +1465,36 @@ class HyperSystem(StateIOMixin, UISettingsMixin, ReconcileMixin, GuardsMixin, Bu
         except Exception as exc:
             logger.warning("[BOOT] Bybit SPOT FOCUS manager init failed: %s", exc)
 
+        # ── Binance 현물 FOCUS (Upbit 미러·완전 격리). BINANCE_SPOT_FOCUS_ENABLED 미설정 서버엔 0 영향. ──
+        try:
+            from app.core.constants import env_bool
+            if env_bool("BINANCE_SPOT_FOCUS_ENABLED", default=False):
+                from app.manager.binance_spot_gazua_manager import BinanceSpotGazuaManager
+                if not hasattr(self, 'binance_spot_gazua_manager'):
+                    self.binance_spot_gazua_manager = BinanceSpotGazuaManager(system=self)
+                if getattr(self, '_binance_spot_gazua_task', None) is None:
+                    self._binance_spot_gazua_task = asyncio.create_task(self._binance_spot_gazua_loop())
+                logger.info("[BOOT] Binance SPOT FOCUS manager initialized (paper=%s, enabled=%s)",
+                            getattr(self.binance_spot_gazua_manager.config, 'paper', True),
+                            getattr(self.binance_spot_gazua_manager.config, 'enabled', False))
+        except Exception as exc:
+            logger.warning("[BOOT] Binance SPOT FOCUS manager init failed: %s", exc)
+
+        # ── Binance USDT-M 선물 FOCUS (Bybit FOCUS 미러·완전 격리). BINANCE_FUTURES_ENABLED 미설정 서버엔 0 영향. ──
+        try:
+            from app.core.constants import env_bool
+            if env_bool("BINANCE_FUTURES_ENABLED", default=False):
+                from app.manager.binance_futures_manager import BinanceFuturesManager
+                if not hasattr(self, 'binance_futures_manager'):
+                    self.binance_futures_manager = BinanceFuturesManager(system=self)
+                if getattr(self, '_binance_futures_task', None) is None:
+                    self._binance_futures_task = asyncio.create_task(self._binance_futures_loop())
+                logger.info("[BOOT] Binance FUTURES FOCUS manager initialized (force_paper=%s, enabled=%s)",
+                            getattr(self.binance_futures_manager, '_force_paper', True),
+                            getattr(self.binance_futures_manager.config, 'enabled', False))
+        except Exception as exc:
+            logger.warning("[BOOT] Binance FUTURES FOCUS manager init failed: %s", exc)
+
         # 9) Contrarian auto-scan loop
         if getattr(self, '_contrarian_task', None) is None:
             self._contrarian_task = asyncio.create_task(self._contrarian_loop())

@@ -155,6 +155,40 @@ def check_momentum_reversal(client: Any, market: str, direction: str, cfg: Any) 
         return True, "mom_error"
 
 
+def check_dca_stabilized(client: Any, market: str, cfg: Any) -> Tuple[bool, str]:
+    """DCA(물타기) 전용 떨어지는 칼 게이트 — 직전 5M봉이 강하게 하락 중이면 물타기 보류.
+    진입의 check_momentum_reversal 코어를 DCA 자체 플래그(dca_stabilize_gate_enabled)로 재사용.
+    현물=long_only → 하락만 본다. 반환 True=안정(물타기 OK) / False=칼낙하 중(보류). fail-open.
+    ★ 효자 눌림목 DCA(멈춘 칼)는 통과, freefall 칼받기만 차단해 손익비 역전 방지."""
+    if not getattr(cfg, "dca_stabilize_gate_enabled", False):
+        return True, ""
+    try:
+        raw = client.get_kline(market, interval="5", limit=20)
+        if not raw or len(raw) < 5:
+            return True, "no-data"
+        highs = [float(r[2]) for r in raw[-15:] if len(r) >= 5]
+        lows = [float(r[3]) for r in raw[-15:] if len(r) >= 5]
+        closes = [float(r[4]) for r in raw[-15:] if len(r) >= 5]
+        if len(closes) < 3:
+            return True, "no-data"
+        trs, pc = [], None
+        for h, l, c in zip(highs, lows, closes):
+            tr = (h - l) if pc is None else max(h - l, abs(h - pc), abs(l - pc))
+            trs.append(tr)
+            pc = c
+        atr_val = sum(trs[-14:]) / min(len(trs), 14) if trs else 0.0
+        if not atr_val or atr_val <= 0:
+            return True, "no-atr"
+        drop_1bar = closes[-2] - closes[-1]   # 양수 = 직전봉 하락폭
+        strong_thr = float(getattr(cfg, "dca_stabilize_strong_atr", 1.0)) * atr_val
+        if drop_1bar >= strong_thr:
+            return False, f"칼낙하 ({drop_1bar / atr_val:.1f}ATR 직전봉 급락) → 물타기 보류"
+        return True, "stable"
+    except Exception as exc:
+        logger.debug("[SPOT_GUARD] dca_stabilized fail-open: %s", exc)
+        return True, "dca_stab_error"
+
+
 def check_raw_body(client: Any, market: str, direction: str, cfg: Any) -> Tuple[bool, str]:
     """직전 5M N봉 시가→종가 net(raw 에너지)이 진입 반대면 차단 — RSI/MACD 가공값 통과해도
     raw price action 이 반대인 자리 거름. 원본 focus_manager.py:11205-11246.

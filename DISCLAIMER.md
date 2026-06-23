@@ -1,5 +1,7 @@
 ﻿# ⚠️ DISCLAIMER / 면책
 
+## 한국어
+
 이 소프트웨어는 실험용 자동매매 프레임워크입니다. 투자 조언이 아닙니다.
 
 - 돈 버는 기계가 아닙니다. 봇 단독으로는 본전 수준이며, 손실이 날 수 있습니다.
@@ -8,5 +10,14 @@
 - 거래소 API 키는 출금 권한 없이 발급하길 권장합니다.
 - 저자/기여자는 어떤 손실에도 책임지지 않습니다 (MIT, 무보증).
 
-EXPERIMENTAL trading framework, NOT financial advice. Trading is risky and
-may lose money. Test in paper mode first. Use at your own risk.
+## English
+
+This is an EXPERIMENTAL automated-trading framework. It is NOT financial advice.
+
+- It is not a money machine. On its own the bot is roughly break-even and can lose money.
+- Always validate in paper (simulation) mode first. The default is dry/paper.
+- Live trading is entirely your own responsibility (API keys, funds, and settings).
+- Issue exchange API keys WITHOUT withdrawal permission.
+- The authors/contributors are not liable for any loss whatsoever (MIT, no warranty).
+
+Trading is risky and may lose money. Test in paper mode first. Use at your own risk.

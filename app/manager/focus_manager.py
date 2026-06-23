@@ -1673,6 +1673,10 @@ class FocusManager:
 
         # Config
         self.config = FocusConfig()
+        # ★ [2026-06-23] 거래소 격리 — config/state 파일 경로. 서브클래스(BinanceFutures)가
+        #   super().__init__() *전에* self._config_path 를 세팅하면 그 값 보존(getattr or).
+        #   기본=Bybit 선물(기존 동작). _save_config/_load_config 가 이 경로 사용.
+        self._config_path = getattr(self, "_config_path", None) or CONFIG_PATH
 
         # 점수 합격인데 막판 차단된 near-miss 링버퍼 (peer brief 노출용, 2026-06-07 부모)
         self._recent_near_miss = deque(maxlen=20)
@@ -1691,6 +1695,12 @@ class FocusManager:
         # API status 에 노출 → dashboard 표시.
         self.recent_skips: List[Dict] = []   # [{ts, market, direction, conviction, pa, reason}]
         self.recent_skips_max: int = 50
+        # ★ [2026-06-23] 거래소별 장부 격리 — self._journal/self._journal_path 로 일원화.
+        #   Bybit(기본)=전역 singleton·self._journal_path 그대로(get_journal 이 동일 인스턴스 반환=0변화).
+        #   서브클래스(BinanceFutures)가 super() 전에 self._journal_path 세팅하면 전용 장부 사용.
+        from app.manager.trade_journal import get_journal as _get_journal, JOURNAL_PATH as _DEFAULT_JOURNAL_PATH
+        self._journal_path = getattr(self, "_journal_path", None) or _DEFAULT_JOURNAL_PATH
+        self._journal = _get_journal(self._journal_path)
         # ★ [2026-06-15 해결안 B / master §9.2-B] GateLedger — "오늘 왜 침묵했나" 가시화(F3).
         #   진입 로직 불침(관측만). 장부 객체는 항상 생성(in-memory, 저렴) → 기록은 config.gate_ledger_enabled
         #   일 때만 (UI 토글 = 재시작 불필요). reject/entry 지점에서 record() 1줄 호출.
@@ -1698,7 +1708,11 @@ class FocusManager:
         try:
             from app.manager.focus_gate_ledger import GateLedger
             _gl_flush = float(os.getenv("FOCUS_GATE_LEDGER_FLUSH_SEC", "60") or "60")
-            self._gate_ledger = GateLedger(flush_sec=_gl_flush)
+            # ★ [2026-06-23 감사 medium#5] flush_path 를 journal 디렉터리에서 파생 — Bybit/Binance
+            #   선물이 같은 runtime/focus_gate_stats.json 을 60초마다 덮어쓰던 격리 누락 fix(현물과 동일
+            #   패턴). Bybit=dirname(runtime/focus_harpoon_journal.jsonl)=runtime → 기존 경로 0변화.
+            _gl_path = os.path.join(os.path.dirname(self._journal_path) or "runtime", "focus_gate_stats.json")
+            self._gate_ledger = GateLedger(flush_path=_gl_path, flush_sec=_gl_flush)
             # ★ journal BLOCKED 단일 funnel 에 sink 등록 — 본체 게이트(BB_REGIME/guard_score/
             #   auto_flip/micro_1m/pair_block) 전부 집계. config.gate_ledger_enabled 일 때만 기록.
             from app.manager.trade_journal import journal as _jnl
@@ -1708,7 +1722,7 @@ class FocusManager:
                         and self._gate_ledger is not None
                         and self.config.gate_ledger_enabled):
                     self._gate_ledger.record(market, str(reason or "-"), passed=False, direction=str(direction or "-"))
-            _jnl._gate_sink = _gate_sink
+            self._journal._gate_sink = _gate_sink
         except Exception as _gl_exc:  # noqa: BLE001 — 장부 생성 실패해도 FocusManager 정상 구동
             logger.debug("[FOCUS] GateLedger init skipped: %s", _gl_exc)
         # ★ [2026-06-15 해결안 C / master §9.2-C] 약서버 등급 1회 감지(RAM, INV-7) → 캐시.
@@ -1866,8 +1880,25 @@ class FocusManager:
         return (os.getenv("TRADING_MODE", "PAPER").upper() == "LIVE"
                 and os.getenv("AUTOBOT_LIVE", "0") == "1")
 
+    def _live_active(self) -> bool:
+        """실거래 client 가 *실제로* 활성인지 — env LIVE 판정 + 서브클래스 paper opt-out 반영.
+
+        [2026-06-23 감사] _is_live_mode()(env: TRADING_MODE+AUTOBOT_LIVE)는 전역 판정이라
+        서브클래스(BinanceFutures)의 _force_paper(거래소별 paper-first)를 반영 못 함.
+        실계좌를 건드리는 게이트(포지션 sync / 진입검증 / 마진조회)는 이 메서드를 써야
+        paper 의도일 때 실 API 호출·가상포지션 phantom 삭제·DORMANT 사고를 막는다.
+        Bybit FocusManager 엔 _force_paper 없음 → getattr False → _is_live_mode() 와 동일(0변화).
+        """
+        return self._is_live_mode() and not getattr(self, "_force_paper", False)
+
+    def _make_real_client(self):
+        """실거래 client 생성 — 거래소 swap seam. 서브클래스(BinanceFutures)가 override.
+        기본=Bybit 선물(linear). paper 래핑(FocusDryClient)은 _get_client 가 담당."""
+        from app.integrations.bybit_trade import BybitTradeClient
+        return BybitTradeClient(category="linear")
+
     def _get_client(self):
-        """Lazy-init separate BybitTradeClient for linear perpetual.
+        """Lazy-init separate trade client for linear perpetual (거래소=_make_real_client).
 
         [2026-05-25 부모] paper/dry 모드 (TRADING_MODE=PAPER 또는 AUTOBOT_LIVE=0) 시
         FocusDryClient 로 감쌈 — 시세는 실제 Bybit, 주문/잔고는 가상.
@@ -1875,10 +1906,11 @@ class FocusManager:
         """
         if self._client is None:
             import os
-            from app.integrations.bybit_trade import BybitTradeClient
-            _real = BybitTradeClient(category="linear")
-            logger.info("[FOCUS] Linear perpetual client initialized")
-            if self._is_live_mode():
+            _real = self._make_real_client()
+            logger.info("[FOCUS] Linear perpetual client initialized (%s)", getattr(_real, "EXCHANGE_TYPE", "bybit"))
+            # ★ [감사 bug#1] _force_paper = 서브클래스(BinanceFutures)가 명시 opt-in 전 실주문 차단.
+            #   Bybit FocusManager 엔 이 attr 없음 → getattr False → 기존 동작 0변화.
+            if self._is_live_mode() and not getattr(self, "_force_paper", False):
                 self._client = _real
             else:
                 from app.integrations.focus_dry_client import FocusDryClient
@@ -3635,12 +3667,7 @@ class FocusManager:
         if hit and (now - hit[0]) < 30.0:
             return hit[1]
         try:
-            from app.core.constants import BYBIT_MARKET_TICKERS, parse_bybit_list
-            from app.core.rate_limiter import bybit_get
-            resp = bybit_get(BYBIT_MARKET_TICKERS,
-                             params={"category": "linear", "symbol": mk}, timeout=5)
-            resp.raise_for_status()
-            rows = parse_bybit_list(resp.json())
+            rows = self._get_client().get_market_tickers(symbol=mk)
             t = rows[0] if rows else {}
             self._ticker24h_cache[mk] = (now, t)
             return t
@@ -7098,7 +7125,7 @@ class FocusManager:
                     _peak = (1 - pos.peak_profit_price / pos.entry_price) * 100
 
             from app.manager.trade_journal import journal
-            journal.record_exit(
+            self._journal.record_exit(
                 strategy="FOCUS", market=pos.market, direction=pos.direction,
                 entry_price=pos.entry_price, exit_price=_exit_price, qty=pos.qty,
                 reason=_exit_reason, leverage=pos.leverage, hold_sec=_hold,
@@ -7175,10 +7202,7 @@ class FocusManager:
             return None
         try:
             client = self._get_client()
-            from app.core.constants import BYBIT_POSITION_LIST
-            resp = client._request("GET", BYBIT_POSITION_LIST,
-                                   params={"category": "linear", "symbol": market})
-            lst = resp.get("list", []) if isinstance(resp, dict) else []
+            lst = client.list_open_positions(symbol=market)
             total = 0.0
             for bp in lst:
                 try:
@@ -7240,7 +7264,7 @@ class FocusManager:
                                 _peak = (pos.peak_profit_price / pos.entry_price - 1) * 100
                             else:
                                 _peak = (1 - pos.peak_profit_price / pos.entry_price) * 100
-                        journal.record_exit(
+                        self._journal.record_exit(
                             strategy="FOCUS", market=pos.market, direction=pos.direction,
                             entry_price=pos.entry_price, exit_price=_price, qty=_orig_qty,
                             reason=reason, leverage=pos.leverage, hold_sec=_hold,
@@ -7250,7 +7274,7 @@ class FocusManager:
                             peak_profit_pct=_peak,
                         )
                     except Exception as exc:
-                        logger.warning("[FOCUS] journal.record_exit failed (%s %s): %s", pos.market, reason, exc)
+                        logger.warning("[FOCUS] self._journal.record_exit failed (%s %s): %s", pos.market, reason, exc)
                     # ── v2: 퇴장 정보 기록 (재진입 차단용) ──
                     self._last_exit_direction = pos.direction
                     self._last_exit_price = _exit_fill
@@ -7299,7 +7323,7 @@ class FocusManager:
                                 else:
                                     _peak = (1 - pos.peak_profit_price / pos.entry_price) * 100
                             # dedup 가드가 SYNC 경로와의 경쟁을 막아주므로 안전하게 기록
-                            journal.record_exit(
+                            self._journal.record_exit(
                                 strategy="FOCUS", market=pos.market, direction=pos.direction,
                                 entry_price=pos.entry_price, exit_price=_exit_price, qty=pos.qty,
                                 reason=_exit_reason, leverage=pos.leverage, hold_sec=_hold,
@@ -7319,7 +7343,7 @@ class FocusManager:
                             logger.warning("[FOCUS] %s ZERO-POS EXIT RECORDED — %s @ $%.4f (entry=$%.4f, hold=%.0fs)",
                                            pos.market, _exit_reason, _exit_price, pos.entry_price, _hold)
                         except Exception as _rec_exc:
-                            logger.error("[FOCUS] journal.record_exit failed (%s 110017 path): %s", pos.market, _rec_exc)
+                            logger.error("[FOCUS] self._journal.record_exit failed (%s 110017 path): %s", pos.market, _rec_exc)
                         # 로컬 state 정리 — positions 목록에서 이 포지션 제거
                         try:
                             self.positions = [p for p in self.positions if p.market != pos.market]
@@ -10286,9 +10310,9 @@ class FocusManager:
             dir_upper = direction.upper() if direction else ""
             count = 0
             last_ts = 0.0
-            if not os.path.exists(JOURNAL_PATH):
+            if not os.path.exists(self._journal_path):
                 return (0, 0.0)
-            with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
+            with open(self._journal_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -10322,7 +10346,7 @@ class FocusManager:
         """
         try:
             from app.manager.trade_journal import JOURNAL_PATH
-            if not os.path.exists(JOURNAL_PATH):
+            if not os.path.exists(self._journal_path):
                 return (0.0, "", 0.0, 0.0)
             mkt_upper = market.upper()
             dir_upper = direction.upper()
@@ -10330,7 +10354,7 @@ class FocusManager:
             last_reason = ""
             last_pnl = 0.0
             last_pct = 0.0
-            with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
+            with open(self._journal_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -10416,12 +10440,12 @@ class FocusManager:
             return (False, "")
         try:
             from app.manager.trade_journal import JOURNAL_PATH
-            if not os.path.exists(JOURNAL_PATH):
+            if not os.path.exists(self._journal_path):
                 return (False, "")
             now = time.time()
             # 최근 EXIT 만 (모든 코인). 최대 50건 본다.
             exits = []
-            with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
+            with open(self._journal_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -10486,7 +10510,7 @@ class FocusManager:
             return (False, "")
         try:
             from app.manager.trade_journal import JOURNAL_PATH
-            if not os.path.exists(JOURNAL_PATH):
+            if not os.path.exists(self._journal_path):
                 return (False, "")
             window_hours = float(getattr(cfg, "regime_direction_fail_window_hours", 4.0))
             fail_max     = int(getattr(cfg, "regime_direction_fail_max", 3))
@@ -10496,7 +10520,7 @@ class FocusManager:
             dir_upper    = (direction or "").upper()
             fail_count   = 0
             last_fail_ts = 0.0
-            with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
+            with open(self._journal_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -10535,7 +10559,7 @@ class FocusManager:
         (dir_fail_window 는 코인 무관 '방향' 누적이고, 이건 코인별. 함대 합산용.)"""
         try:
             from app.manager.trade_journal import JOURNAL_PATH
-            if not os.path.exists(JOURNAL_PATH):
+            if not os.path.exists(self._journal_path):
                 return 0
             now = time.time()
             cutoff = now - max(0.1, float(window_hours)) * 3600.0
@@ -10543,7 +10567,7 @@ class FocusManager:
             dr = (direction or "").upper()
             manual_exit = {"manual_close_one", "manual_close_all", "ZERO_POSITION"}
             cnt = 0
-            with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
+            with open(self._journal_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -10635,7 +10659,7 @@ class FocusManager:
             return (False, "")
         try:
             from app.manager.trade_journal import JOURNAL_PATH
-            if not os.path.exists(JOURNAL_PATH):
+            if not os.path.exists(self._journal_path):
                 return (False, "")
             window = getattr(cfg, "direction_exhaustion_window_sec", 900.0)
             threshold = getattr(cfg, "direction_exhaustion_profit_count", 2)
@@ -10646,7 +10670,7 @@ class FocusManager:
             cutoff = now - window
             profit_count = 0
             last_profit_ts = 0.0
-            with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
+            with open(self._journal_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -10694,7 +10718,7 @@ class FocusManager:
             return (False, "")
         try:
             from app.manager.trade_journal import JOURNAL_PATH
-            if not os.path.exists(JOURNAL_PATH):
+            if not os.path.exists(self._journal_path):
                 return (False, "")
             block_sec = getattr(cfg, "profit_exit_block_hours", 12.0) * 3600.0
             min_pnl = getattr(cfg, "profit_exit_block_min_pnl", 0.5)
@@ -10706,7 +10730,7 @@ class FocusManager:
             cutoff = now - block_sec
             # 해당 코인의 EXIT 수집
             exits = []
-            with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
+            with open(self._journal_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -10973,13 +10997,13 @@ class FocusManager:
             #   raw open + 전 줄 json.loads 풀파싱하던 것을 인메모리 캐시(write-through) 순회로 교체.
             #   feedback_journal_cache_leak_fix(2026-05-15) 의 재발: b12 만 캐시를 우회하고 있었음.
             #   결과 동일 (BLOCKED/ENTRY 의 ts/market/direction 추출), 호출당 0.6~4.7초 → ~ms.
-            journal._ensure_cache()
-            if journal._cache:
+            self._journal._ensure_cache()
+            if self._journal._cache:
                 # 캐시 순회 — 모든 윈도우 동시 평가 (파일 I/O 없음). get_trades/get_markets 와 동일 패턴.
                 all_records = []
                 # ★ 대사면 필터 — amnesty_ts 이전 이벤트는 B12 투표에서 제외
                 amnesty_cutoff = float(getattr(self, "_amnesty_ts", 0.0))
-                for rec in journal._cache:
+                for rec in self._journal._cache:
                     try:
                         ts = rec.get("ts", 0)
                         if ts < amnesty_cutoff:   # 사면 전 기록 무시
@@ -11192,7 +11216,7 @@ class FocusManager:
             return (False, "")
         try:
             from app.manager.trade_journal import JOURNAL_PATH
-            if not os.path.exists(JOURNAL_PATH):
+            if not os.path.exists(self._journal_path):
                 return (False, "")
             mkt_upper = (market or "").upper()
             dir_upper = (direction or "").upper()
@@ -11200,7 +11224,7 @@ class FocusManager:
             # 가장 최근 EXIT 만 찾으면 충분 (역순)
             last_exit_dir = ""
             last_exit_ts = 0.0
-            with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
+            with open(self._journal_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
             for line in reversed(lines[-500:]):  # 최근 500줄로 cap
                 line = line.strip()
@@ -11820,7 +11844,7 @@ class FocusManager:
             return 0.0
         try:
             from app.manager.trade_journal import JOURNAL_PATH
-            if not os.path.exists(JOURNAL_PATH):
+            if not os.path.exists(self._journal_path):
                 return 0.0
             window = getattr(cfg, "coin_reentry_penalty_window_sec", 900.0)
             per_count = float(getattr(cfg, "coin_reentry_penalty_per_count", 10.0))  # [100점 ×10]
@@ -11829,7 +11853,7 @@ class FocusManager:
             now = time.time()
             cutoff = now - window
             entry_count = 0
-            with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
+            with open(self._journal_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -11866,9 +11890,9 @@ class FocusManager:
             mkt_upper = market.upper()
             dir_upper = direction.upper() if direction else ""
             total_loss = 0.0
-            if not os.path.exists(JOURNAL_PATH):
+            if not os.path.exists(self._journal_path):
                 return 0.0
-            with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
+            with open(self._journal_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -11942,9 +11966,9 @@ class FocusManager:
             cutoff = time.time() - window_sec
             mkt_upper = market.upper()
             total = 0.0
-            if not os.path.exists(JOURNAL_PATH):
+            if not os.path.exists(self._journal_path):
                 return 0.0
-            with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
+            with open(self._journal_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -12469,7 +12493,7 @@ class FocusManager:
 
         Returns: (allow: bool, reason: str, stats: dict)
           - allow=True  : 진입 허용 (paper_mode 시 가상 카운터만 증가)
-          - allow=False : 차단 (live mode 만 실효, journal.record_blocked)
+          - allow=False : 차단 (live mode 만 실효, self._journal.record_blocked)
           - reason      : "[S3_GATE] ..." 표준 포맷
           - stats       : 측정 dict (영속화용)
 
@@ -12569,10 +12593,10 @@ class FocusManager:
         else:
             # Live mode: 실차단
             logger.warning("%s [LIVE BLOCKED]", reason)
-            # 검수 기준 #4: journal.record_blocked
+            # 검수 기준 #4: self._journal.record_blocked
             try:
                 from app.manager.trade_journal import journal
-                journal.record_blocked(
+                self._journal.record_blocked(
                     "FOCUS", market, direction,
                     reason="s3_fee_gate",
                     detail=f"net_ev={net_ev:.4f} th={threshold:.4f} fee={fee_total:.4f}"
@@ -12837,7 +12861,7 @@ class FocusManager:
             logger.info("[FOCUS] ⛔ %s", consec_reason)
             try:
                 from app.manager.trade_journal import journal
-                journal.record_blocked(
+                self._journal.record_blocked(
                     "FOCUS", market, direction,
                     reason="consecutive_loss_pause",
                     detail=consec_reason,
@@ -12853,7 +12877,7 @@ class FocusManager:
             logger.info("[FOCUS] ⛔ %s", dir_fail_reason)
             try:
                 from app.manager.trade_journal import journal
-                journal.record_blocked(
+                self._journal.record_blocked(
                     "FOCUS", market, direction,
                     reason="dir_fail_window",
                     detail=dir_fail_reason,
@@ -12876,7 +12900,7 @@ class FocusManager:
                 logger.info("[FOCUS] ⛔ %s", _fleet_src)
                 try:
                     from app.manager.trade_journal import journal
-                    journal.record_blocked(
+                    self._journal.record_blocked(
                         "FOCUS", market, direction,
                         reason="peer_fleet_dirfail", detail=_fleet_src,
                     )
@@ -12898,8 +12922,8 @@ class FocusManager:
                 cd_sec = cd_min * 60.0
                 _now = time.time()
                 # 최근 EXIT 중 SL/Fast-Reject 계열 + 같은 (market, direction) 검사
-                # journal.get_trades 사용 (get_recent_exits 미존재)
-                _resp = journal.get_trades(
+                # self._journal.get_trades 사용 (get_recent_exits 미존재)
+                _resp = self._journal.get_trades(
                     limit=20, strategy="FOCUS", market=mkt_upper, include_blocked=False, page=1
                 ) or {}
                 recent = _resp.get("trades", [])
@@ -12920,7 +12944,7 @@ class FocusManager:
                             mkt_upper, direction, remain_min, age/60.0, cd_min
                         )
                         try:
-                            journal.record_blocked(
+                            self._journal.record_blocked(
                                 "FOCUS", market, direction,
                                 reason="reentry_cooldown_v2",
                                 detail=f"SL {age/60:.1f}min ago, cd {cd_min:.0f}min",
@@ -12944,7 +12968,7 @@ class FocusManager:
                 logger.info("[FOCUS] ⛔ Post-Trade Pause: %s %s — %s", market, direction, pause_reason)
                 try:
                     from app.manager.trade_journal import journal
-                    journal.record_blocked(
+                    self._journal.record_blocked(
                         "FOCUS", market, direction,
                         reason="post_trade_pause",
                         detail=pause_reason,
@@ -12963,7 +12987,7 @@ class FocusManager:
                 logger.info("[FOCUS] ⛔ Direction Exhaustion: %s %s — %s", market, direction, exh_reason)
                 try:
                     from app.manager.trade_journal import journal
-                    journal.record_blocked(
+                    self._journal.record_blocked(
                         "FOCUS", market, direction,
                         reason="direction_exhaustion",
                         detail=exh_reason,
@@ -12981,7 +13005,7 @@ class FocusManager:
                 logger.info("[FOCUS] ⛔ Profit-Exit Block: %s %s — %s", market, direction, peb_reason)
                 try:
                     from app.manager.trade_journal import journal
-                    journal.record_blocked(
+                    self._journal.record_blocked(
                         "FOCUS", market, direction,
                         reason="profit_exit_block",
                         detail=peb_reason,
@@ -13000,7 +13024,7 @@ class FocusManager:
                 logger.info("[FOCUS] ⛔ Regime Lock: %s %s — %s", market, direction, rdl_reason)
                 try:
                     from app.manager.trade_journal import journal
-                    journal.record_blocked(
+                    self._journal.record_blocked(
                         "FOCUS", market, direction,
                         reason="regime_direction_lock",
                         detail=rdl_reason,
@@ -13048,7 +13072,7 @@ class FocusManager:
                     # ★ 원장 기록 — 차단 사유 영구 보존
                     try:
                         from app.manager.trade_journal import journal
-                        journal.record_blocked(
+                        self._journal.record_blocked(
                             "FOCUS", market, direction,
                             reason="repeat_brake",
                             detail=f"count={repeat_count},cooldown={required_cd:.0f}s,remaining={remaining:.0f}s",
@@ -13074,7 +13098,7 @@ class FocusManager:
             )
             try:
                 from app.manager.trade_journal import journal
-                journal.record_blocked(
+                self._journal.record_blocked(
                     "FOCUS", market, direction,
                     reason="direction_block",
                     detail=_dir_reason,
@@ -13095,7 +13119,7 @@ class FocusManager:
                 )
                 try:
                     from app.manager.trade_journal import journal
-                    journal.record_blocked(
+                    self._journal.record_blocked(
                         "FOCUS", market, direction,
                         reason="coin_loss_cap",
                         detail=f"24h_loss=${total_loss:.2f},cap=${cap:.2f}",
@@ -13112,7 +13136,7 @@ class FocusManager:
             logger.info("[FOCUS] ⛔ Pair Block: %s %s — %s", market, direction, _pair_reason)
             try:
                 from app.manager.trade_journal import journal
-                journal.record_blocked(
+                self._journal.record_blocked(
                     "FOCUS", market, direction,
                     reason="pair_block",
                     detail=_pair_reason,
@@ -13975,13 +13999,9 @@ class FocusManager:
         try:
             from app.strategy.greenpen import full_analysis
             from app.strategy.greenpen.pa_detector import OHLCV
-            from app.core.constants import BYBIT_MARKET_TICKERS, parse_bybit_list
-            from app.core.rate_limiter import bybit_get
             from app.strategy.indicators import adx as _adx_fn
 
-            resp = bybit_get(BYBIT_MARKET_TICKERS, params={"category": "linear"}, timeout=10)
-            resp.raise_for_status()
-            tickers = parse_bybit_list(resp.json())
+            tickers = self._get_client().get_market_tickers()
 
             # ★ [2026-04-25 universe 확장] config 로 조정 가능
             min_turnover = float(getattr(self.config, "scanner_min_turnover_24h", 1_000_000.0))
@@ -14298,7 +14318,7 @@ class FocusManager:
 
         entered = []
         _scan_log = []  # [2026-04-09] 디버그: 스캐너 차단 추적
-        _pipeline_syms = set()  # ★ [2026-06-15 해결안 B] _execute_entry 거쳐 journal.record_blocked 로 이미 집계된 심볼 (gate_ledger 중복 방지)
+        _pipeline_syms = set()  # ★ [2026-06-15 해결안 B] _execute_entry 거쳐 self._journal.record_blocked 로 이미 집계된 심볼 (gate_ledger 중복 방지)
         # ★ [2026-05-17] Scanner 적용 최종 conviction 캐싱 (UI CONV 칼럼 통일용)
         self._last_scan_conviction = {}
         if not hasattr(self, '_last_guard_score'):
@@ -15740,26 +15760,12 @@ class FocusManager:
         [2026-05-25 부모] paper/dry 모드 시 가상 잔고 반환 (실제 Bybit API 우회).
         _get_client() wrapper 와 별개로 직접 requests 호출하므로 여기도 paper 분기 필요.
         """
-        _live = (os.getenv("TRADING_MODE", "PAPER").upper() == "LIVE"
-                 and os.getenv("AUTOBOT_LIVE", "0") == "1")
+        _live = self._live_active()  # ★ [2026-06-23 감사] _force_paper 반영(서브클래스 paper 누수 차단)
         if not _live:
             return float(os.getenv("DRY_INITIAL_USDT", "1000") or "1000")
         try:
-            import requests as _req, time as _t, hashlib, hmac
-            key = os.environ.get('BYBIT_API_KEY', '')
-            secret = os.environ.get('BYBIT_API_SECRET', '')
-            ts = str(int(_t.time() * 1000))
-            recv = '5000'
-            params = 'accountType=UNIFIED'
-            sign_str = ts + key + recv + params
-            sig = hmac.new(secret.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
-            headers = {'X-BAPI-API-KEY': key, 'X-BAPI-TIMESTAMP': ts,
-                       'X-BAPI-RECV-WINDOW': recv, 'X-BAPI-SIGN': sig}
-            r = _req.get('https://api.bybit.com/v5/account/wallet-balance',
-                         params={'accountType': 'UNIFIED'}, headers=headers, timeout=5)
-            d = r.json()
-            avail = float(d.get('result', {}).get('list', [{}])[0].get('totalAvailableBalance', 0) or 0)
-            return avail
+            # ★ [2026-06-23] 거래소 추상화 — client.get_available_margin() 경유 (live=실client).
+            return float(self._get_client().get_available_margin() or 0.0)
         except Exception as exc:
             logger.debug("[FOCUS] available margin check failed: %s", exc)
             return 0.0
@@ -15848,7 +15854,7 @@ class FocusManager:
             #   scripts/guard_accuracy.py 가 이 로그 + 저널 EXIT 를 조인해 가드별 적중률 산출.
             try:
                 from app.manager.trade_journal import JOURNAL_PATH as _JP
-                _ge_path = os.path.join(os.path.dirname(_JP), "guard_eval.jsonl")
+                _ge_path = os.path.join(os.path.dirname(self._journal_path), "guard_eval.jsonl")
                 _ge_rec = {
                     "ts": round(time.time(), 1), "market": market.upper(), "direction": direction,
                     "base": round(_base_conv, 1), "guards": round(_gs_total, 1),
@@ -15862,7 +15868,7 @@ class FocusManager:
             if _final_conv < _gs_threshold:
                 try:
                     from app.manager.trade_journal import journal as _jnl
-                    _jnl.record_blocked("FOCUS", market, direction,
+                    self._journal.record_blocked("FOCUS", market, direction,
                                         reason="guard_score_below_threshold",
                                         detail=("final=%.1f<%.0f | %s" % (_final_conv, _gs_threshold, _gs_breakdown))[:300])
                 except Exception as exc:
@@ -15889,7 +15895,7 @@ class FocusManager:
                                    market, direction, _fd1_reason)
                     try:
                         from app.manager.trade_journal import journal as _jnl
-                        _jnl.record_blocked("FOCUS", market, direction, reason="final_d1_alignment", detail=_fd1_reason)
+                        self._journal.record_blocked("FOCUS", market, direction, reason="final_d1_alignment", detail=_fd1_reason)
                     except Exception:
                         pass
                     self._record_near_miss(market, direction, _final_conv, "final_d1: " + _fd1_reason)
@@ -15912,7 +15918,7 @@ class FocusManager:
                                 market, direction, _f30_reason)
                     try:
                         from app.manager.trade_journal import journal as _jnl
-                        _jnl.record_blocked("FOCUS", market, direction, reason="final_30m15m", detail=_f30_reason)
+                        self._journal.record_blocked("FOCUS", market, direction, reason="final_30m15m", detail=_f30_reason)
                     except Exception:
                         pass
                     self._record_near_miss(market, direction, _final_conv, "final_30m15m: " + _f30_reason)
@@ -15923,7 +15929,7 @@ class FocusManager:
                             market, direction, _f5_reason)
                 try:
                     from app.manager.trade_journal import journal as _jnl
-                    _jnl.record_blocked("FOCUS", market, direction, reason="final_5m_simple", detail=_f5_reason)
+                    self._journal.record_blocked("FOCUS", market, direction, reason="final_5m_simple", detail=_f5_reason)
                 except Exception:
                     pass
                 self._record_near_miss(market, direction, _final_conv, "final_5m: " + _f5_reason)
@@ -15948,7 +15954,7 @@ class FocusManager:
                 logger.info("[FOCUS] %s — %s %s", _flip_reason, market, direction)
                 try:
                     from app.manager.trade_journal import journal as _jnl
-                    _jnl.record_blocked("FOCUS", market, direction, reason="same_coin_flip_cooldown", detail=_flip_reason)
+                    self._journal.record_blocked("FOCUS", market, direction, reason="same_coin_flip_cooldown", detail=_flip_reason)
                 except Exception as exc:
                     logger.debug("[FOCUS] same_coin_flip_cooldown journal failed: %s", exc)
                 return {"state": "HUNT", "error": "same_coin_flip_cooldown"}
@@ -15959,7 +15965,7 @@ class FocusManager:
                 logger.info("[FOCUS] %s — %s %s", _raw_reason, market, direction)
                 try:
                     from app.manager.trade_journal import journal as _jnl
-                    _jnl.record_blocked("FOCUS", market, direction, reason="raw_body_guard", detail=_raw_reason)
+                    self._journal.record_blocked("FOCUS", market, direction, reason="raw_body_guard", detail=_raw_reason)
                 except Exception as exc:
                     logger.debug("[FOCUS] raw_body_guard journal failed: %s", exc)
                 return {"state": "HUNT", "error": "raw_body_guard"}
@@ -15986,7 +15992,7 @@ class FocusManager:
                     self._frame_guard_cooldown[_fg_key] = time.time() + _cd_sec
                 try:
                     from app.manager.trade_journal import journal as _jnl
-                    _jnl.record_blocked("FOCUS", market, direction, reason="frame_guard", detail=_fg_reason)
+                    self._journal.record_blocked("FOCUS", market, direction, reason="frame_guard", detail=_fg_reason)
                 except Exception as exc:
                     logger.debug("[FOCUS] frame_guard journal failed: %s", exc)
                 return {"state": "HUNT", "error": "frame_guard"}
@@ -16014,7 +16020,7 @@ class FocusManager:
                     logger.info("[FOCUS] %s — %s %s", _box_reason, market, direction)
                     try:
                         from app.manager.trade_journal import journal as _jnl
-                        _jnl.record_blocked("FOCUS", market, direction, reason="day_box", detail=_box_reason)
+                        self._journal.record_blocked("FOCUS", market, direction, reason="day_box", detail=_box_reason)
                     except Exception as exc:
                         logger.debug("[FOCUS] day_box journal failed: %s", exc)
                     return {"state": "HUNT", "error": "day_box"}
@@ -16051,7 +16057,7 @@ class FocusManager:
                     logger.info("[FOCUS] %s — %s %s 차단", _block_detail, market, direction)
                     try:
                         from app.manager.trade_journal import journal as _jnl
-                        _jnl.record_blocked("FOCUS", market, direction, reason="h4_pulse_only", detail=_block_detail)
+                        self._journal.record_blocked("FOCUS", market, direction, reason="h4_pulse_only", detail=_block_detail)
                     except Exception as exc:
                         logger.debug("[FOCUS] h4_pulse journal failed: %s", exc)
                     return {"state": "HUNT", "error": "h4_pulse_only"}
@@ -16081,7 +16087,7 @@ class FocusManager:
                             market, direction, _pa_block_detail)
                 try:
                     from app.manager.trade_journal import journal as _jnl
-                    _jnl.record_blocked("FOCUS", market, direction,
+                    self._journal.record_blocked("FOCUS", market, direction,
                                         reason="pa_completion", detail=_pa_block_detail[:300])
                 except Exception as exc:
                     logger.debug("[FOCUS] pa_completion journal failed: %s", exc)
@@ -16103,7 +16109,7 @@ class FocusManager:
                     logger.info("[FOCUS] %s — %s %s", _md_reason, market, direction)
                     try:
                         from app.manager.trade_journal import journal as _jnl
-                        _jnl.record_blocked("FOCUS", market, direction, reason="momentum_deriv_guard", detail=_md_reason)
+                        self._journal.record_blocked("FOCUS", market, direction, reason="momentum_deriv_guard", detail=_md_reason)
                     except Exception as exc:
                         logger.debug("[FOCUS] momentum_deriv_guard journal failed: %s", exc)
                     return {"state": "HUNT", "error": "momentum_deriv_guard"}
@@ -16124,7 +16130,7 @@ class FocusManager:
                     logger.info("[FOCUS] %s — %s %s", _mtf_reason, market, direction)
                     try:
                         from app.manager.trade_journal import journal as _jnl
-                        _jnl.record_blocked("FOCUS", market, direction, reason="mtf_momentum_align", detail=_mtf_reason[:300])
+                        self._journal.record_blocked("FOCUS", market, direction, reason="mtf_momentum_align", detail=_mtf_reason[:300])
                     except Exception as exc:
                         logger.debug("[FOCUS] mtf_momentum_align journal failed: %s", exc)
                     return {"state": "HUNT", "error": "mtf_momentum_align"}
@@ -16200,7 +16206,7 @@ class FocusManager:
                     logger.info("[FOCUS] ⛔ 1M 마이크로: %s %s → %s", direction, market, _1m_reason)
                     try:
                         from app.manager.trade_journal import journal
-                        journal.record_blocked("FOCUS", market, direction,
+                        self._journal.record_blocked("FOCUS", market, direction,
                                                reason="micro_1m", detail=_1m_reason)
                     except Exception:
                         pass
@@ -16261,9 +16267,7 @@ class FocusManager:
             if not self._is_live_mode():
                 _bybit_pos = []
             else:
-                from app.integrations.bybit_trade import BybitTradeClient
-                _sync_client = BybitTradeClient(category="linear")
-                _bybit_pos = _sync_client.get_positions()
+                _bybit_pos = self._get_client().list_open_positions()
             for _bp in (_bybit_pos or []):
                 _bp_market = (_bp.get("symbol") or _bp.get("market") or "").upper()
                 _bp_size = abs(float(_bp.get("size", 0) or 0))
@@ -16320,7 +16324,7 @@ class FocusManager:
                         direction, _same_dir, _same_cap_final, _opp_tmp, _opp_dir_count, _opp_cap_final)
             try:
                 from app.manager.trade_journal import journal
-                journal.record_blocked("FOCUS", market, direction,
+                self._journal.record_blocked("FOCUS", market, direction,
                                        reason="direction_limit_both",
                                        detail=f"{direction}={_same_dir}/{_same_cap_final},{_opp_tmp}={_opp_dir_count}/{_opp_cap_final}")
             except Exception as exc:
@@ -16384,7 +16388,7 @@ class FocusManager:
                                market, direction, _fail_reason)
                 try:
                     from app.manager.trade_journal import journal
-                    journal.record_blocked("FOCUS", market, direction,
+                    self._journal.record_blocked("FOCUS", market, direction,
                                            reason="manual_mtf_fail",
                                            detail=f"manual {direction} mtf fail: {_fail_reason} (FLIP blocked)")
                 except Exception as exc:
@@ -16399,7 +16403,7 @@ class FocusManager:
                                market, direction, _fail_reason)
                 try:
                     from app.manager.trade_journal import journal
-                    journal.record_blocked("FOCUS", market, direction,
+                    self._journal.record_blocked("FOCUS", market, direction,
                                            reason="auto_flip_disabled",
                                            detail=f"auto {direction} mtf fail: {_fail_reason}; FLIP off (ICP 사고 fix)")
                 except Exception as exc:
@@ -16414,7 +16418,7 @@ class FocusManager:
                             direction, _fail_reason, _opp, _opp_same, _opp_cap_mtf)
                 try:
                     from app.manager.trade_journal import journal
-                    journal.record_blocked("FOCUS", market, direction,
+                    self._journal.record_blocked("FOCUS", market, direction,
                                            reason="mtf_both_blocked",
                                            detail=f"orig={_fail_reason};opp_saturated")
                 except Exception as exc:
@@ -16440,7 +16444,7 @@ class FocusManager:
                                 market, _opp, direction)
                     try:
                         from app.manager.trade_journal import journal
-                        journal.record_blocked("FOCUS", market, _opp,
+                        self._journal.record_blocked("FOCUS", market, _opp,
                                                reason="flip_blocked",
                                                detail=f"flip {direction}->{_opp} denied by reentry/regime gate")
                     except Exception as exc:
@@ -16477,7 +16481,7 @@ class FocusManager:
                                         market, direction, _opp, _fl_h1, _fl_m30)
                             try:
                                 from app.manager.trade_journal import journal
-                                journal.record_blocked("FOCUS", market, _opp,
+                                self._journal.record_blocked("FOCUS", market, _opp,
                                                        reason="flip_alignment_blocked",
                                                        detail=f"flip {direction}->{_opp} blocked: H1={_fl_h1} 30M={_fl_m30}")
                             except Exception as exc:
@@ -16495,7 +16499,7 @@ class FocusManager:
                             market, _fail_reason, _opp_fail)
                 try:
                     from app.manager.trade_journal import journal
-                    journal.record_blocked("FOCUS", market, direction,
+                    self._journal.record_blocked("FOCUS", market, direction,
                                            reason="mtf_both_blocked",
                                            detail=f"orig={_fail_reason};opp={_opp_fail}")
                 except Exception as exc:
@@ -16514,7 +16518,7 @@ class FocusManager:
                             direction, market, price, eq_reason)
                 try:
                     from app.manager.trade_journal import journal
-                    journal.record_blocked("FOCUS", market, direction,
+                    self._journal.record_blocked("FOCUS", market, direction,
                                            reason="entry_quality", detail=eq_reason)
                 except Exception as exc:
                     logger.debug("[FOCUS] import journal failed: %s", exc)
@@ -16694,7 +16698,7 @@ class FocusManager:
                                         direction, market, _exp.rr_ratio, _min_rr)
                             try:
                                 from app.manager.trade_journal import journal
-                                journal.record_blocked("FOCUS", market, direction,
+                                self._journal.record_blocked("FOCUS", market, direction,
                                                        reason="ee_gate_rr_low",
                                                        detail=f"RR={_exp.rr_ratio:.2f}<{_min_rr:.2f}")
                             except Exception as exc:
@@ -16706,7 +16710,7 @@ class FocusManager:
                                         direction, market, _exp.reward_pct, _min_reward)
                             try:
                                 from app.manager.trade_journal import journal
-                                journal.record_blocked("FOCUS", market, direction,
+                                self._journal.record_blocked("FOCUS", market, direction,
                                                        reason="ee_gate_reward_low",
                                                        detail=f"reward={_exp.reward_pct:.2f}%<{_min_reward:.2f}%")
                             except Exception as exc:
@@ -16717,7 +16721,7 @@ class FocusManager:
                                         direction, market, _exp.risk_pct, _max_risk)
                             try:
                                 from app.manager.trade_journal import journal
-                                journal.record_blocked("FOCUS", market, direction,
+                                self._journal.record_blocked("FOCUS", market, direction,
                                                        reason="ee_gate_risk_high",
                                                        detail=f"risk={_exp.risk_pct:.2f}%>{_max_risk:.2f}%")
                             except Exception as exc:
@@ -16758,7 +16762,7 @@ class FocusManager:
                                     )
                                     try:
                                         from app.manager.trade_journal import journal
-                                        journal.record_blocked(
+                                        self._journal.record_blocked(
                                             "FOCUS", market, direction,
                                             reason="gap_check",
                                             detail=f"gap={_gc_gap:.2f}%<{_gc_eff:.2f}%(min{_gc_min:.2f}/ATR적응,{_gc_tf}M×{_gc_bars}봉,wall={_gc_wall:.4f})",
@@ -16795,7 +16799,7 @@ class FocusManager:
                                         )
                                         try:
                                             from app.manager.trade_journal import journal
-                                            journal.record_blocked(
+                                            self._journal.record_blocked(
                                                 "FOCUS", market, direction,
                                                 reason="volatility_gate",
                                                 detail=f"reach={_reach_ratio:.2f}<{_vol_min_ratio:.2f}(range={_recent_range_pct:.2f}%/rw={_exp.reward_pct:.2f}%)",
@@ -17050,17 +17054,13 @@ class FocusManager:
             order_qty = safe_qty
             logger.info("[FOCUS] Safe qty fallback: %.4f (notional=$%.2f)", order_qty, order_qty * price)
 
-        # Adjust qty precision for Bybit linear — fetch instrument info directly
+        # Adjust qty precision — fetch instrument info via client (거래소 추상화)
         try:
-            from app.core.constants import BYBIT_MARKET_INSTRUMENTS
-            resp = client._request("GET", BYBIT_MARKET_INSTRUMENTS,
-                                   params={"category": "linear", "symbol": market})
-            inst_list = resp.get("list", []) if isinstance(resp, dict) else []
-            if inst_list:
-                lot_filter = inst_list[0].get("lotSizeFilter", {})
-                qty_step = float(lot_filter.get("qtyStep", 0.01) or 0.01)
-                min_qty = float(lot_filter.get("minOrderQty", 0.01) or 0.01)
-                max_order_qty = float(lot_filter.get("maxOrderQty", 0) or 0)
+            _inst = client.get_instrument_info(market)
+            if _inst and (_inst.get("qty_step") or _inst.get("min_qty")):
+                qty_step = float(_inst.get("qty_step", 0.01) or 0.01)
+                min_qty = float(_inst.get("min_qty", 0.01) or 0.01)
+                max_order_qty = float(_inst.get("max_qty", 0) or 0)
                 # Round down to qtyStep
                 import math
                 if qty_step > 0:
@@ -17232,13 +17232,10 @@ class FocusManager:
         _position_found = False   # ★ [2026-06-11] cowork ② — 진입 후 실제 포지션 존재 확인(미체결 판정)
         _verify_ok = False        # 조회 자체가 성공했는지 (실패 시 미체결 단정 금지)
         try:
-            if self._is_live_mode():
+            if self._live_active():  # ★ [2026-06-23 감사] paper 면 거래소 검증 skip(가상포지션 폐기·DORMANT 방지)
                 import time as _vt; _vt.sleep(0.5)  # 체결 반영 대기
-                from app.core.constants import BYBIT_POSITION_LIST
-                pos_resp = client._request("GET", BYBIT_POSITION_LIST,
-                                            params={"category": "linear", "symbol": market})
+                pos_list = client.list_open_positions(symbol=market)
                 _verify_ok = True
-                pos_list = pos_resp.get("list", []) if isinstance(pos_resp, dict) else []
                 for bp in pos_list:
                     if float(bp.get("size", 0)) > 0:
                         _position_found = True
@@ -17269,7 +17266,7 @@ class FocusManager:
             logger.debug("[FOCUS] Post-entry position verify failed (non-critical): %s", vexc)
         # ★ [2026-06-11] cowork ② — 조회 성공했는데 포지션이 없으면 미체결 확정 → 유령 방지로 포지션 미생성.
         #   (조회 실패 _verify_ok=False 시엔 단정 금지 — 기존대로 진행, 다음 tick SYNC 가 정리.)
-        if self._is_live_mode() and _verify_ok and not _position_found:
+        if self._live_active() and _verify_ok and not _position_found:
             logger.error("[FOCUS] ⚠ 진입 후 거래소에 포지션 없음 %s — 미체결 확정, 포지션 미생성(유령 방지)", market)
             fail_count = getattr(self, '_entry_fail_count', 0) + 1
             self._entry_fail_count = fail_count
@@ -17441,14 +17438,14 @@ class FocusManager:
             # ★ Anchor Fast-Track 도 같이 마킹 (microtiming 우회 진입 식별)
             if entry.get("_anchor_fasttrack"):
                 _phase += ",fasttrack=1"
-            journal.record_entry(
+            self._journal.record_entry(
                 strategy="FOCUS", market=market, direction=direction,
                 price=_entry_price_actual, qty=_entry_qty_actual,  # ★ 실제 체결가/량 (주문전 추정 price/order_qty 대체)
                 leverage=_pos_leverage,   # ★ [2026-06-11] 거래소 실제 leverage
                 phase=_phase,
             )
         except Exception as exc:
-            logger.debug("[FOCUS] journal.record_entry failed: %s", exc)
+            logger.debug("[FOCUS] self._journal.record_entry failed: %s", exc)
 
         # ★ [해결안 B] GateLedger — 진입 성사 = ENTRY pass (관측만, 진입 불침) — UI 토글
         if getattr(self, "_gate_ledger", None) is not None and self.config.gate_ledger_enabled:
@@ -17837,8 +17834,8 @@ class FocusManager:
                 import json as _json2
                 prev_reset = today_reset - datetime.timedelta(days=1)
                 exits = []
-                if os.path.exists(JOURNAL_PATH):
-                    with open(JOURNAL_PATH, "r", encoding="utf-8") as _f:
+                if os.path.exists(self._journal_path):
+                    with open(self._journal_path, "r", encoding="utf-8") as _f:
                         for _line in _f:
                             _line = _line.strip()
                             if not _line:
@@ -17853,7 +17850,10 @@ class FocusManager:
                 _equity = self._get_available_margin() or 0
                 snap = build_snapshot(exits, prev_reset.timestamp(), reset_ts, asdict(self.config), equity_start=_equity)
                 if snap.get("total_trades", 0) > 0:
-                    save_snapshot(snap)
+                    # ★ [2026-06-23 감사 high#4] snap_dir 격리 — 미지정 시 Bybit/Binance 선물이 같은
+                    #   runtime/focus_daily_snapshots/{date}.json 을 서로 덮어써 일별 PnL 손상.
+                    #   Bybit=_snap_dir 없음→None→글로벌 default(0변화), Binance=runtime/binance_futures/daily_snapshots.
+                    save_snapshot(snap, getattr(self, "_snap_dir", None))
             except Exception as exc:
                 logger.warning("[FOCUS] Daily snapshot save failed: %s", exc)
 
@@ -17902,8 +17902,8 @@ class FocusManager:
             # ★ [2026-06-05] dashboard freeze fix — 47MB 저널 풀파싱 → 인메모리 캐시(write-through)
             #   순회로 교체 (b12 와 동일 패턴, feedback_journal_cache_leak_fix). 30초 result 캐시는 유지.
             total = 0.0
-            journal._ensure_cache()
-            for rec in journal._cache:
+            self._journal._ensure_cache()
+            for rec in self._journal._cache:
                 try:
                     if rec.get("event") != "EXIT":
                         continue
@@ -17964,7 +17964,7 @@ class FocusManager:
         _MAX_RETRY = 5   # 2026-06-06: 3→5. WinError 5 race 가 3회로 못 잡은 잔여(server-a 관측) 보강.
         for _attempt in range(_MAX_RETRY):
             try:
-                safe_write_json(CONFIG_PATH, data)
+                safe_write_json(getattr(self, "_config_path", None) or CONFIG_PATH, data)
                 if _attempt > 0:
                     logger.debug("[FOCUS] save config recovered on retry #%d", _attempt + 1)
                 return
@@ -17979,10 +17979,11 @@ class FocusManager:
 
     def _load_config(self):
         """Load config + state from runtime/focus_config.json."""
-        if not os.path.exists(CONFIG_PATH):
+        _cfg_path = getattr(self, "_config_path", None) or CONFIG_PATH
+        if not os.path.exists(_cfg_path):
             return
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            with open(_cfg_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
             # Config — ★ M19 FIX: bool 필드 특별 처리 (bool("false")==True 방지)
@@ -18145,15 +18146,12 @@ class FocusManager:
         """★ 운영 중 60초마다 Bybit 실잔고 확인 — 고스트 제거 + 역방향 복구."""
         # ★ [2026-05-25 부모] paper/dry 모드: 실거래소 동기화 불필요 — 가상 포지션을
         #   ghost 로 오인해 제거하는 사고 방지. paper 청산은 _manage_all_positions 가 담당.
-        if not self._is_live_mode():
+        if not self._live_active():  # ★ [2026-06-23 감사] _force_paper 반영(Binance paper 60초 phantom 삭제 방지)
             return
         try:
             client = self._get_client()
-            from app.core.constants import BYBIT_POSITION_LIST
-            resp = client._request("GET", BYBIT_POSITION_LIST,
-                                   params={"category": "linear", "settleCoin": "USDT"})
-            bybit_list = resp.get("list", []) if isinstance(resp, dict) else []
-            # Bybit에 실제 포지션 있는 심볼 셋
+            bybit_list = client.list_open_positions()
+            # 거래소에 실제 포지션 있는 심볼 셋
             bybit_alive = set()
             for bp in bybit_list:
                 if float(bp.get("size", 0)) > 0:
@@ -18188,7 +18186,7 @@ class FocusManager:
                     is_sl = "SL" in _reason
                     if is_sl:
                         self.daily_sl_count += 1
-                    journal.record_exit(
+                    self._journal.record_exit(
                         strategy="FOCUS", market=ghost.market, direction=ghost.direction,
                         entry_price=ghost.entry_price, exit_price=_price, qty=ghost.qty,
                         reason=_reason, leverage=ghost.leverage, hold_sec=_hold,
@@ -18197,7 +18195,7 @@ class FocusManager:
                         breakeven_locked=ghost.breakeven_locked,
                     )
                 except Exception as exc:
-                    logger.warning("[FOCUS] journal.record_exit failed (ghost %s): %s", ghost.market, exc)
+                    logger.warning("[FOCUS] self._journal.record_exit failed (ghost %s): %s", ghost.market, exc)
                 self._last_exit_direction = ghost.direction
                 self._last_exit_price = self._get_current_price(ghost.market) or ghost.entry_price
                 self._last_exit_ts = time.time()
@@ -18279,7 +18277,7 @@ class FocusManager:
         # ★ [2026-05-25 부모] paper/dry 모드: 실거래소에 포지션이 없음 → 실제 Bybit 조회 시
         #   가상 포지션을 phantom 으로 오인 → 즉시 강제청산 사고 (6연패 정지 유발).
         #   paper 는 self.positions 가 진실, 청산은 _manage_all_positions(가격 vs TP/SL)가 담당.
-        if not self._is_live_mode():
+        if not self._live_active():  # ★ [2026-06-23 감사] _force_paper 반영(Binance paper 부팅 sync 강제청산 방지)
             return
         # ★ 최소 간격 가드: 5초 미만이면 건너뜀
         now = time.time()
@@ -18437,7 +18435,7 @@ class FocusManager:
                                 _peak = (1 - pos.peak_profit_price / pos.entry_price) * 100
 
                         from app.manager.trade_journal import journal
-                        journal.record_exit(
+                        self._journal.record_exit(
                             strategy="FOCUS", market=pos.market, direction=pos.direction,
                             entry_price=pos.entry_price, exit_price=_exit_price, qty=pos.qty,
                             reason=_exit_reason, leverage=pos.leverage, hold_sec=_hold,
@@ -18507,11 +18505,8 @@ class FocusManager:
             logger.warning("[FOCUS] Bybit sync connection error, retrying once: %s", exc)
             try:
                 import time as _t2; _t2.sleep(3)
-                from app.core.constants import BYBIT_POSITION_LIST
                 client = self._get_client()
-                resp = client._request("GET", BYBIT_POSITION_LIST,
-                                       params={"category": "linear", "settleCoin": "USDT"})
-                pos_list = resp.get("list", []) if isinstance(resp, dict) else []
+                pos_list = client.list_open_positions()
                 # 간이 동기화: 포지션이 없으면 IDLE로
                 has_position = any(float(p.get('size', 0)) > 0 for p in pos_list)
                 if not has_position and self.positions:
@@ -18780,7 +18775,7 @@ class FocusManager:
                 if _f_total < _f_min:
                     try:
                         from app.manager.trade_journal import journal
-                        journal.record_blocked("FOCUS", market, direction,
+                        self._journal.record_blocked("FOCUS", market, direction,
                                                reason="manual_combo_f_fail",
                                                detail=f"manual {direction} combo F {_f_total}<{_f_min}: {'|'.join(_f_parts) if _f_parts else 'X'}")
                     except Exception as exc:

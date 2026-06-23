@@ -264,6 +264,70 @@ class BackgroundLoopsMixin:
                 logger.warning("[BYBIT_SPOT_FOCUS_LOOP] error: %s", exc)
                 await asyncio.sleep(10.0)
 
+    async def _binance_spot_gazua_loop(self):
+        """Binance 현물 FOCUS background loop — Bybit 현물 loop 미러, 완전 격리.
+        warmup 50s (Upbit 35·Bybit선물 30·Bithumb 40·Bybit현물 45 와 어긋나게 — 부하 분산). E-STOP 시 자동 비활성화."""
+        await asyncio.sleep(50)
+        while True:
+            try:
+                if bool(getattr(self, 'emergency_stop', False)):
+                    um_check = getattr(self, "binance_spot_gazua_manager", None)
+                    if um_check and um_check.enabled:
+                        um_check.update_config(enabled=False)
+                        logger.warning("[BINANCE_SPOT_FOCUS_LOOP] E-STOP → disabled")
+                    await asyncio.sleep(30.0)
+                    continue
+                um = getattr(self, "binance_spot_gazua_manager", None)
+                if um and um.enabled:
+                    await asyncio.get_running_loop().run_in_executor(
+                        self._bg_executor, um.tick, 0.0,
+                    )
+                await asyncio.sleep(5.0)
+            except asyncio.CancelledError:
+                logger.info("[BINANCE_SPOT_FOCUS_LOOP] shutdown")
+                return
+            except Exception as exc:
+                logger.warning("[BINANCE_SPOT_FOCUS_LOOP] error: %s", exc)
+                await asyncio.sleep(10.0)
+
+    async def _binance_futures_loop(self):
+        """Binance USDT-M 선물 FOCUS background loop — Bybit FOCUS(_focus_loop) 미러, 완전 격리.
+        warmup 55s (부하분산). E-STOP 시 자동 비활성화."""
+        await asyncio.sleep(55)
+        while True:
+            try:
+                if bool(getattr(self, 'emergency_stop', False)):
+                    fm_check = getattr(self, "binance_futures_manager", None)
+                    if fm_check and fm_check.enabled:
+                        fm_check.update_config({"enabled": False})
+                        logger.warning("[BINANCE_FUTURES_LOOP] E-STOP → disabled")
+                    await asyncio.sleep(30.0)
+                    continue
+                fm = getattr(self, "binance_futures_manager", None)
+                if fm and fm.enabled:
+                    from app.core.hyper_price_store import price_store
+                    btc_price = price_store.get_price("BTCUSDT") or 0
+                    try:
+                        feed = getattr(self, "price_feed", None)
+                        if feed and hasattr(feed, "add_symbol"):
+                            for pos in (fm.positions or []):
+                                if pos.market:
+                                    feed.add_symbol(pos.market)
+                            if fm.selected_market:
+                                feed.add_symbol(fm.selected_market)
+                    except Exception:
+                        pass
+                    await asyncio.get_running_loop().run_in_executor(
+                        self._bg_executor, fm.tick, float(btc_price),
+                    )
+                await asyncio.sleep(5.0)
+            except asyncio.CancelledError:
+                logger.info("[BINANCE_FUTURES_LOOP] shutdown")
+                return
+            except Exception as exc:
+                logger.warning("[BINANCE_FUTURES_LOOP] error: %s", exc)
+                await asyncio.sleep(10.0)
+
     async def _contrarian_loop(self):
         """Periodic Contrarian auto-scan (역행 코인 자동 감지 및 알림)."""
         from app.core.contrarian_scanner import get_contrarian_scanner

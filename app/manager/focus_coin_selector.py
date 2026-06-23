@@ -74,11 +74,8 @@ def select_focus_coin(
 def _source1_volume_momentum(client: Any, top_n: int = 10) -> List[str]:
     """Fetch top-N linear perp symbols by 24h turnover."""
     try:
-        from app.core.constants import BYBIT_MARKET_TICKERS, parse_bybit_list
-        from app.core.rate_limiter import bybit_get
-        resp = bybit_get(BYBIT_MARKET_TICKERS, params={"category": "linear"}, timeout=10)
-        resp.raise_for_status()
-        tickers = parse_bybit_list(resp.json())
+        # ★ [2026-06-23] 거래소 추상화 — 직접 bybit_get 대신 client 경유 (client 파라미터 존중).
+        tickers = client.get_market_tickers()
 
         scored = []
         for t in tickers:
