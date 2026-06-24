@@ -2,13 +2,13 @@
 # File: app/manager/order_state_machine.py
 # Autocoin OS v3-H — Order State Machine (LIVE safety layer)
 # ------------------------------------------------------------
-# 목표:
-# - 부분체결/지연/네트워크 오류에서도 "중복 주문"을 막고
-#   "pending" 상태를 일관되게 유지/복구할 수 있게 한다.
-# - 타임아웃 시: cancel → 잔량 재시도 → 실패시 RECOVERY/EMERGENCY
-# - 슬리피지(체결가 이탈) 탐지 시:
-#     * soft: 경고/원장 기록
-#     * hard: (기본) exit는 전역 EMERGENCY, entry는 시장 단위 COOLDOWN
+# Goals:
+# - Prevent "duplicate orders" even under partial fills / delays / network errors,
+#   and keep the "pending" state consistent and recoverable.
+# - On timeout: cancel -> retry remaining qty -> on failure RECOVERY/EMERGENCY
+# - On slippage (fill price deviation) detection:
+#     * soft: warn / record in ledger
+#     * hard: (default) exit -> global EMERGENCY, entry -> per-market COOLDOWN
 # ============================================================
 
 from __future__ import annotations
@@ -68,11 +68,11 @@ def _now() -> float:
 
 
 def _slippage_bps(expected: float, actual: float, *, side: str) -> float:
-    """슬리피지 bps.
+    """Slippage in bps.
 
     side:
-      - 'bid'(buy): actual이 expected보다 높으면 슬리피지 +
-      - 'ask'(sell): actual이 expected보다 낮으면 슬리피지 +
+      - 'bid'(buy): slippage is + when actual is higher than expected
+      - 'ask'(sell): slippage is + when actual is lower than expected
     """
     if expected <= 0 or actual <= 0:
         return 0.0
@@ -172,18 +172,18 @@ class PendingOrder:
 
 
 class OrderStateMachine:
-    """시장별 1개 주문만 pending을 허용하는 FSM.
+    """FSM that allows only one pending order per market.
 
-    시스템 설계 관점:
-    - ctx.order_state (dict)에 저장해서 리셋 복구 가능
-    - 정상 상황에서는 거의 '개입'하지 않는다.
-    - 비정상(지연/부분체결/오류)일 때만 보호 동작을 한다.
+    Design perspective:
+    - Stored in ctx.order_state (dict) so it survives a reset/recovery.
+    - In normal conditions it almost never 'intervenes'.
+    - It only takes protective action on abnormal cases (delay/partial fill/error).
 
-    정책(중요):
-    - hard slippage는 "항상 전역 정지"가 되면 진입의 방벽이 될 수 있다.
-      따라서 기본값은:
-        * sell(exit) hard slippage → EMERGENCY(전역)
-        * buy(entry) hard slippage → 해당 market만 ENTRY COOLDOWN
+    Policy (important):
+    - If hard slippage "always triggers a global stop" it can become a barrier to entry.
+      So the defaults are:
+        * sell(exit) hard slippage -> EMERGENCY (global)
+        * buy(entry) hard slippage -> ENTRY COOLDOWN for that market only
     """
 
     def __init__(
@@ -198,29 +198,29 @@ class OrderStateMachine:
         self.exchange_type = exchange_type
         self.quote_currency = self._detect_quote_currency(client=client, exchange_type=exchange_type)
 
-        # 환경 튜닝 (Quote Currency 기준)
+        # Environment tuning (based on Quote Currency)
         self.min_order_usdt = _env_float("OMA_MIN_ORDER_USDT", Q.min_order)
 
-        # "주문 가능한 금액이 부족합니다." 대응: 실제 주문가능 USDT를 보수적으로 사용
-        # (수수료/라운딩/잠김(locked) 등을 감안하여 일부 버퍼를 둠)
+        # Handling "insufficient funds": use the actually-available USDT conservatively
+        # (leave some buffer for fees / rounding / locked balance, etc.)
         self.buy_available_fraction = _env_float("OMA_BUY_AVAILABLE_FRACTION", 0.995)
 
-        # "주문 가능한 금액/수량이 부족합니다."를 시스템 에러로 보지 않고, 조용히 대기하는 시간
+        # Time to quietly wait when "insufficient funds/qty" occurs, instead of treating it as a system error
         self.insufficient_funds_pause_sec = _env_float("OMA_INSUFFICIENT_FUNDS_PAUSE_SEC", 60.0)
         self.insufficient_funds_max_pause_sec = _env_float("OMA_INSUFFICIENT_FUNDS_MAX_PAUSE_SEC", 600.0)
         self.insufficient_qty_pause_sec = _env_float("OMA_INSUFFICIENT_QTY_PAUSE_SEC", 60.0)
 
-        # 부족금액 발생 시 재시도 방식
-        # - MIN: 최소 주문금액(min_order_usdt)으로 1회 시도
-        # - MAX: 주문가능 USDT 범위 내에서 가능한 큰 금액으로 1회 시도
+        # Retry strategy when funds are insufficient
+        # - MIN: try once with the minimum order amount (min_order_usdt)
+        # - MAX: try once with the largest amount possible within available USDT
         self.insufficient_funds_fallback = str(os.getenv("OMA_INSUFFICIENT_FUNDS_FALLBACK", "MIN")).upper()
         self.order_timeout_sec = _env_float("OMA_ORDER_TIMEOUT_SEC", 9.0)
         self.poll_interval = _env_float("OMA_ORDER_POLL_SEC", 0.25)
         self.max_retries = _env_int("OMA_ORDER_MAX_RETRIES", 2)
 
         # per-side overrides (entry/exit separated)
-        # - entry(buy): 과도한 retry는 진입의 방벽/중복 위험을 키울 수 있으므로 보수적으로
-        # - exit(sell): 미청산은 치명적이므로 필요 시 더 강하게
+        # - entry(buy): be conservative, since excessive retries raise the risk of entry barriers/duplicates
+        # - exit(sell): unliquidated positions are critical, so be more aggressive when needed
         self.order_timeout_sec_buy = _env_float("OMA_ORDER_TIMEOUT_SEC_BUY", self.order_timeout_sec)
         self.order_timeout_sec_sell = _env_float("OMA_ORDER_TIMEOUT_SEC_SELL", self.order_timeout_sec)
         self.max_retries_buy = _env_int("OMA_ORDER_MAX_RETRIES_BUY", self.max_retries)
@@ -232,7 +232,7 @@ class OrderStateMachine:
 
         self.exit_fail_to_recovery = _env_bool("OMA_EXIT_FAIL_TO_RECOVERY", True)
 
-        # entry hard slippage / entry unresolved → 시장 단위 재진입 쿨다운
+        # entry hard slippage / entry unresolved -> per-market re-entry cooldown
         self.entry_slippage_hard_cooldown_sec = _env_float("OMA_ENTRY_COOLDOWN_AFTER_SLIPPAGE_SEC", 60.0)
         self.entry_unresolved_cooldown_sec = _env_float("OMA_ENTRY_COOLDOWN_AFTER_UNRESOLVED_SEC", 60.0)
 
@@ -304,7 +304,7 @@ class OrderStateMachine:
         return "USDT"
 
     def _client_market_buy_usdt(self, market: str, usdt_amount: float) -> Dict[str, Any]:
-        """TradeClient 구현 차이를 흡수 (quote amount 기준)."""
+        """Absorb TradeClient implementation differences (based on quote amount)."""
         amount = float(usdt_amount)
 
         # 1) Bybit-style explicit method
@@ -337,14 +337,14 @@ class OrderStateMachine:
         raise AttributeError("trade_client_missing_market_buy_api")
 
     def _client_market_sell_qty(self, market: str, qty: float) -> Dict[str, Any]:
-        """TradeClient 구현 차이를 흡수한다 (Bybit 기준).
+        """Absorb TradeClient implementation differences (Bybit baseline).
 
-        BybitTradeClient.market_sell_qty(market, qty, **kw) 시그니처 기준.
-        TypeError 발생 시 숨기지 않고 로깅 후 대체 경로 시도.
+        Based on the BybitTradeClient.market_sell_qty(market, qty, **kw) signature.
+        On TypeError, log it (do not hide) and try fallback paths.
         """
         qtyf = float(qty)
 
-        # 1) market_sell_qty — Bybit 표준 시그니처: positional(market, qty)
+        # 1) market_sell_qty — Bybit standard signature: positional(market, qty)
         fn_sell_qty = getattr(self.client, "market_sell_qty", None)
         if callable(fn_sell_qty):
             try:
@@ -400,7 +400,7 @@ class OrderStateMachine:
     ) -> Tuple[str, float, float, Optional[float], float]:
         """order(dict) -> (state, executed_volume, funds, avg_price, paid_fee)
 
-        * Bybit 응답 기준으로 funds/avg_price를 계산한다.
+        * Computes funds/avg_price based on the Bybit response.
         """
 
         def _f(x: Any) -> float:
@@ -410,7 +410,7 @@ class OrderStateMachine:
                 logger.warning("OrderStateMachine._f suppressed exception", exc_info=True)
                 return 0.0
 
-        # 0) client-side summarize_order 지원(호환)
+        # 0) client-side summarize_order support (compatibility)
         fn = getattr(self.client, "summarize_order", None)
         if callable(fn):
             try:
@@ -419,8 +419,8 @@ class OrderStateMachine:
                 logger.warning("OrderStateMachine._f suppressed exception", exc_info=True)
                 s = None
 
-            # summarize_order가 문자열을 반환하는 구현도 있어서(디버그용),
-            # 그런 경우에는 여기서 무시하고 직접 파싱한다.
+            # Some implementations return a string from summarize_order (for debugging);
+            # in that case ignore it here and parse directly.
             if s is not None and not isinstance(s, str):
                 if isinstance(s, dict):
                     state = str(s.get("state") or "").lower()
@@ -461,12 +461,12 @@ class OrderStateMachine:
             price = order.get("price")
 
             if ord_type == "price":
-                # market buy (USDT). Bybit 응답에서 price는 총 USDT인 경우가 많다.
+                # market buy (USDT). In Bybit responses, price is often the total USDT.
                 funds = _f(price)
                 if executed_volume > 0 and funds > 0:
                     avg_price = funds / executed_volume
             else:
-                # limit order 등: price가 "단가"일 수 있다.
+                # limit order etc.: price may be the "unit price".
                 unit = _f(price)
                 if unit > 0 and executed_volume > 0:
                     funds = unit * executed_volume
@@ -592,17 +592,17 @@ class OrderStateMachine:
         a = max(1, int(attempts))
         return float(base_timeout) * (1.0 + 0.5 * float(a - 1))
 
-    # ---------- soft-fail helpers (에러 해석 / 잔고 조회 / 라운딩) ----------
+    # ---------- soft-fail helpers (error parsing / balance lookup / rounding) ----------
 
     def _client_get_balance(self, currency: str, *, include_locked: bool = False) -> float:
-        """거래 클라이언트의 get_balance 시그니처가 달라도 동작하도록 래핑."""
+        """Wrap get_balance so it works even if the trade client's signature differs."""
         if not hasattr(self.client, "get_balance"):
             return 0.0
         try:
             return float(self.client.get_balance(currency, include_locked=include_locked))
         except TypeError:
             logger.warning("OrderStateMachine._client_get_balance suppressed exception", exc_info=True)
-            # 구버전 시그니처: include_locked 인자를 지원하지 않을 수 있음
+            # Legacy signature: may not support the include_locked argument
             return float(self.client.get_balance(currency))
 
     @staticmethod
@@ -631,10 +631,10 @@ class OrderStateMachine:
     def _is_insufficient_funds(self, exc: Exception) -> bool:
         name, msg, raw = self._extract_api_error(exc)
         hay = " ".join([str(name or ""), str(msg or ""), raw])
-        # 업비트 에러 문구 변형 대응:
-        # - "주문 가능한 금액이 부족합니다."
+        # Handle variants of the Upbit error message (Korean text matched verbatim):
+        # - "주문 가능한 금액이 부족합니다." (insufficient orderable funds)
         # - "주문 가능한 금액(USDT)이 부족합니다."
-        # 공백/괄호 유무와 상관없이 판별하기 위해 normalize 문자열도 함께 확인한다.
+        # Also check a normalized string so spaces/parentheses don't affect matching.
         hay_norm = hay.replace(" ", "").replace("(", "").replace(")", "")
         return (
             ("주문 가능한 금액이 부족합니다" in hay)
@@ -666,12 +666,12 @@ class OrderStateMachine:
             return float(value)
 
     def _retry_buy_usdt(self, *, requested_usdt: float, available_usdt: float) -> Optional[float]:
-        """부족한 경우 재시도 금액 산출.
+        """Compute the retry amount when funds are insufficient.
 
         - OMA_INSUFFICIENT_FUNDS_FALLBACK=MIN:
-            최소 주문금액(min_order_usdt)으로 1회 시도
+            try once with the minimum order amount (min_order_usdt)
         - OMA_INSUFFICIENT_FUNDS_FALLBACK=MAX:
-            주문가능 USDT 범위 내에서 가능한 큰 금액으로 1회 시도(버퍼 포함)
+            try once with the largest amount possible within available USDT (incl. buffer)
         """
         avail = max(0.0, float(available_usdt))
 
@@ -684,7 +684,7 @@ class OrderStateMachine:
         # mode == "MAX"
         avail_eff = avail * float(self.buy_available_fraction)
         usdt = min(float(requested_usdt), avail_eff)
-        # 소수점 방지
+        # Avoid fractional amounts
         usdt = self._floor_to_unit(usdt, 1.0)
         if usdt >= float(self.min_order_usdt):
             return float(usdt)
@@ -692,9 +692,9 @@ class OrderStateMachine:
 
     @staticmethod
     def _retry_sell_qty(*, requested_qty: float, available_qty: float) -> Optional[float]:
-        """부족한 경우, 가능한 수량 내에서 재시도 수량 산출."""
+        """Compute the retry qty within what's available when qty is insufficient."""
         qty = min(float(requested_qty), max(0.0, float(available_qty)))
-        # Bybit는 통상 8dp 이내로 안전
+        # Bybit is generally safe within 8 decimal places
         qty = round(qty, 8)
         if qty > 0:
             return float(qty)
@@ -711,14 +711,14 @@ class OrderStateMachine:
         max_retries: Optional[int] = None,
     ) -> Tuple[bool, str]:
         """
-        시장가 매수(=ord_type=price) 제출.
+        Submit a market buy (=ord_type=price).
 
-        주의:
-        - client.market_buy_usdt(...)는 dict(order)를 반환하는 구현(Bybit 기본)을 기준으로 uuid를 추출한다.
-        - expected_price는 주문 API로 전달하지 않고, 내부 슬리피지/로그 기준값으로만 사용한다.
+        Notes:
+        - Extracts uuid assuming client.market_buy_usdt(...) returns a dict(order) (Bybit default).
+        - expected_price is NOT sent to the order API; used only as an internal slippage/log baseline.
         """
 
-        # 이미 pending 이면 중복 제출 방지
+        # If already pending, prevent duplicate submission
         if getattr(ctx, "order_state", None) is not None:
             return False, "order_pending"
 
@@ -736,7 +736,7 @@ class OrderStateMachine:
                 return str(resp.get("uuid") or resp.get("id") or "").strip()
             return ""
 
-        # 1차 제출
+        # First submission
         try:
             obmeta = self._orderbook_meta(market)
             self.ledger.append(
@@ -758,13 +758,13 @@ class OrderStateMachine:
 
         except (TypeError, ValueError) as exc:
             logger.warning("OrderStateMachine._uuid_from except: %s", exc, exc_info=True)
-            # 부족한 USDT는 soft-fail 처리
+            # Treat insufficient USDT as a soft-fail
             if self._is_insufficient_funds(exc):
                 quote_ccy = str(getattr(self, "quote_currency", "USDT") or "USDT").upper()
                 avail_quote = self._client_get_balance(quote_ccy, include_locked=False)
                 retry_usdt = self._retry_buy_usdt(requested_usdt=float(usdt_amount), available_usdt=avail_quote)
 
-                # 가능한 범위가 있다면 1회 축소 제출
+                # If there's an available range, submit once with a reduced amount
                 if retry_usdt is not None and retry_usdt + 1e-9 < float(usdt_amount):
                     try:
                         obmeta = self._orderbook_meta(market)
@@ -809,7 +809,7 @@ class OrderStateMachine:
                         setattr(ctx, "order_state", po.to_dict())
                         setattr(ctx, "last_order_ts", now)
 
-                        # 부족 상황에서는 이후 엔트리를 잠시 멈춘다(조용히 대기)
+                        # On insufficiency, pause further entries for a while (quiet wait)
                         if hasattr(ctx, "entry_block_until_ts"):
                             prev = float(getattr(ctx, "entry_block_until_ts") or 0.0)
                             _n_insuf = int(getattr(ctx, "_insufficient_funds_streak", 0)) + 1
@@ -843,7 +843,7 @@ class OrderStateMachine:
                                 f"min_order_usdt={float(self.min_order_usdt):.0f}"
                             )
 
-                        # 다른 오류는 기존대로 에러로 처리
+                        # Handle other errors as errors, as before
                         self.ledger.append(
                             "ORDER_SUBMIT_ERROR",
                             market=market,
@@ -853,7 +853,7 @@ class OrderStateMachine:
                         )
                         return False, str(exc2)
 
-                # 축소도 불가능(최소 주문금액 미만) → 조용히 대기
+                # Reduction also impossible (below minimum order amount) -> quiet wait
                 if hasattr(ctx, "entry_block_until_ts"):
                     prev = float(getattr(ctx, "entry_block_until_ts") or 0.0)
                     _n_insuf = int(getattr(ctx, "_insufficient_funds_streak", 0)) + 1
@@ -869,7 +869,7 @@ class OrderStateMachine:
                     f"min_order_usdt={float(self.min_order_usdt):.0f}"
                 )
 
-            # 그 외 오류는 기존대로
+            # Other errors handled as before
             self.ledger.append(
                 "ORDER_SUBMIT_ERROR",
                 market=market,
@@ -879,7 +879,7 @@ class OrderStateMachine:
             )
             return False, str(exc)
 
-        # ACK 성공
+        # ACK success
         po = PendingOrder(
             uuid=str(oid),
             market=str(market),
@@ -916,10 +916,10 @@ class OrderStateMachine:
         max_retries: Optional[int] = None,
     ) -> Tuple[bool, str]:
         """
-        시장가 매도(=ord_type=market) 제출.
+        Submit a market sell (=ord_type=market).
 
-        - client.market_sell_qty(...)는 dict(order)를 반환하는 구현(Bybit 기본)을 기준으로 uuid를 추출한다.
-        - expected_price는 주문 API로 전달하지 않고, 내부 슬리피지/로그 기준값으로만 사용한다.
+        - Extracts uuid assuming client.market_sell_qty(...) returns a dict(order) (Bybit default).
+        - expected_price is NOT sent to the order API; used only as an internal slippage/log baseline.
         """
 
         if getattr(ctx, "order_state", None) is not None:
@@ -928,8 +928,8 @@ class OrderStateMachine:
         if qty <= 0:
             return False, "qty<=0"
 
-        # [FIX] 전량 매도 시 업비트 실잔고로 교체 (dust 방지)
-        # position.qty와 실잔고가 미세하게 다를 수 있으므로, 실잔고를 사용
+        # [FIX] On full sell, use the exchange's real balance (avoid dust)
+        # position.qty may differ slightly from the real balance, so use the real balance
         try:
             from decimal import Decimal, ROUND_DOWN
             currency = Q.extract_base(market)
@@ -943,11 +943,11 @@ class OrderStateMachine:
                 except (KeyError, AttributeError, TypeError, ValueError) as e:
                     logger.warning("[recovered] pos_qty read for dust-fix market=%s: %s", market, e)
                 
-                # 요청 qty가 position qty의 99% 이상이면 전량 매도로 간주
+                # If requested qty is >= 99% of position qty, treat it as a full sell
                 if pos_qty > 0 and qty >= pos_qty * 0.99:
-                    # [FIX] Decimal로 정밀하게 처리하여 먼지 방지
+                    # [FIX] Use Decimal for precision to avoid dust
                     qty_decimal = Decimal(str(real_balance)).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
-                    qty = float(qty_decimal)  # 실잔고 전량 사용
+                    qty = float(qty_decimal)  # use the entire real balance
         except (KeyError, AttributeError, TypeError, ValueError) as e:
             logger.warning("[recovered] sell qty dust-fix market=%s: %s", market, e)
 
@@ -968,7 +968,7 @@ class OrderStateMachine:
                 return str(resp.get("uuid") or resp.get("id") or "").strip()
             return ""
 
-        # 1차 제출
+        # First submission
         try:
             obmeta = self._orderbook_meta(market)
             self.ledger.append(
@@ -995,7 +995,7 @@ class OrderStateMachine:
                 total_qty = self._client_get_balance(currency, include_locked=True)
                 avail_qty = self._client_get_balance(currency, include_locked=False)
 
-                # 컨텍스트 position이 과대(예: reconcile/orphan + fill 중복)인 경우, 계정 기준으로 먼저 정정
+                # If the context position is overstated (e.g., reconcile/orphan + duplicate fill), correct it to the account balance first
                 try:
                     pos = getattr(ctx, "position", None)
                     if isinstance(pos, dict):
@@ -1004,7 +1004,7 @@ class OrderStateMachine:
                 except (KeyError, AttributeError, TypeError, ValueError) as e:
                     logger.warning("[recovered] position qty correction market=%s: %s", market, e)
 
-                # 계정에 보유 수량이 없으면 "이미 청산된 것"으로 간주하고 position을 제거
+                # If the account holds no qty, treat it as "already liquidated" and clear the position
                 if float(total_qty) <= 1e-12:
                     try:
                         ctx.position = None
@@ -1094,7 +1094,7 @@ class OrderStateMachine:
                         )
                         return False, str(exc2)
 
-                # 재시도할 수량이 없거나(0) 최소단위 이슈 등 → 조용히 대기
+                # No qty to retry (0), min-unit issues, etc. -> quiet wait
                 if hasattr(ctx, "exit_block_until_ts"):
                     prev = float(getattr(ctx, "exit_block_until_ts") or 0.0)
                     setattr(ctx, "exit_block_until_ts", max(prev, now + float(self.insufficient_qty_pause_sec)))
@@ -1115,7 +1115,7 @@ class OrderStateMachine:
             )
             return False, str(exc)
 
-        # ACK 성공
+        # ACK success
         po = PendingOrder(
             uuid=str(oid),
             market=str(market),
@@ -1248,9 +1248,9 @@ class OrderStateMachine:
 
     # ====================================================================
     # PATCH 2025-01-15
-    # Quick SELL (IOC) - 즉시 체결 안 되면 자동 취소
-    # - 슬리피지 방지, 원하는 가격에만 매도
-    # - 익절/일반 청산용 (긴급 손절은 market_sell 사용)
+    # Quick SELL (IOC) - auto-cancel if not filled immediately
+    # - Prevents slippage; sells only at the desired price
+    # - For take-profit / normal exits (use market_sell for emergency stop-loss)
     # ====================================================================
     def submit_quick_sell(
         self,
@@ -1262,33 +1262,33 @@ class OrderStateMachine:
         reason: str = "",
         fallback_to_market: bool = False,
     ) -> Tuple[bool, str]:
-        """빠른 지정가 매도 (IOC) - 미체결 시 자동 취소.
-        
+        """Fast limit sell (IOC) - auto-cancel if not filled.
+
         Args:
-            ctx: 엔진 컨텍스트
-            market: 마켓 심볼
-            qty: 매도 수량
-            price: 매도 희망가 (보통 best_bid)
-            reason: 매도 사유
-            fallback_to_market: True면 미체결 시 시장가로 재시도 (손절용)
-            
+            ctx: engine context
+            market: market symbol
+            qty: sell quantity
+            price: desired sell price (usually best_bid)
+            reason: sell reason
+            fallback_to_market: if True, retry with a market order when unfilled (for stop-loss)
+
         Returns:
             (success, message)
-            - success=True: 전량 또는 일부 체결
-            - success=False: 미체결 (다음 기회 대기)
+            - success=True: fully or partially filled
+            - success=False: unfilled (wait for next opportunity)
         """
         qty = float(qty)
         price = float(price)
         if qty <= 0 or price <= 0:
             return False, "invalid_qty_or_price"
 
-        # 최소 주문금액 체크
+        # Minimum order amount check
         if (qty * price) < self.min_order_usdt:
             return False, f"min_value_blocked:{(qty*price):.0f}<{self.min_order_usdt:.0f}"
 
-        # quick_sell 메서드 확인
+        # Check for the quick_sell method
         if not hasattr(self.client, "quick_sell"):
-            # fallback: 일반 limit_sell 사용
+            # fallback: use the regular limit_sell
             return self.submit_limit_sell(
                 ctx=ctx,
                 market=market,
@@ -1317,7 +1317,7 @@ class OrderStateMachine:
         avg_price = float(result.get("avg_price", 0) or 0)
         message = result.get("message", "")
 
-        # 원장 기록
+        # Record in ledger
         self.ledger.append(
             "QUICK_SELL",
             market=market,
@@ -1344,7 +1344,7 @@ class OrderStateMachine:
             except (KeyError, AttributeError, TypeError, ValueError) as e:
                 logger.warning("[recovered] quick_sell entry extraction market=%s: %s", market, e)
 
-            # 전량 체결 - 포지션 청산
+            # Full fill - liquidate the position
             self._update_position_after_sell(ctx=ctx, market=market, qty=filled_qty, avg_price=avg_price)
             self._send_quick_sell_telegram(ctx, market, filled_qty, avg_price, "filled")
 
@@ -1361,11 +1361,11 @@ class OrderStateMachine:
             return True, f"filled:{filled_qty}@{avg_price}"
 
         elif action == "partial":
-            # 부분 체결 - 포지션 일부 청산
+            # Partial fill - liquidate part of the position
             self._update_position_after_sell(ctx=ctx, market=market, qty=filled_qty, avg_price=avg_price)
             self._send_quick_sell_telegram(ctx, market, filled_qty, avg_price, "partial", remaining_qty)
-            
-            # fallback_to_market이면 나머지 시장가 매도
+
+            # If fallback_to_market, sell the remainder at market
             if fallback_to_market and remaining_qty > 0:
                 return self.submit_market_sell(
                     ctx=ctx,
@@ -1377,7 +1377,7 @@ class OrderStateMachine:
             return True, f"partial:{filled_qty}/{qty}@{avg_price}"
 
         elif action == "cancelled":
-            # 미체결 - 다음 기회 대기
+            # Unfilled - wait for the next opportunity
             self._send_quick_sell_telegram(ctx, market, 0, price, "cancelled")
             if fallback_to_market:
                 return self.submit_market_sell(
@@ -1409,14 +1409,14 @@ class OrderStateMachine:
         qty: float,
         avg_price: float,
     ) -> None:
-        """매도 후 포지션 업데이트."""
+        """Update the position after a sell."""
         try:
             pos = getattr(ctx, "position", None)
             if pos and isinstance(pos, dict):
                 old_qty = float(pos.get("qty", 0) or 0)
                 new_qty = max(0.0, old_qty - qty)
                 if new_qty <= 0:
-                    # 포지션 청산
+                    # Liquidate the position
                     ctx.position = {}
                     ctx.exit_pending = False
                 else:
@@ -1433,12 +1433,12 @@ class OrderStateMachine:
         action: str,
         remaining_qty: float = 0.0,
     ) -> None:
-        """Quick Sell 결과 텔레그램 알림."""
+        """Telegram notification for Quick Sell results."""
         try:
             coin = Q.extract_base(market)
-            
+
             if action == "filled":
-                # 수익 계산
+                # Profit calculation
                 entry_price = 0.0
                 profit_usdt = 0.0
                 profit_pct = 0.0
@@ -1469,51 +1469,51 @@ class OrderStateMachine:
                 profit_emoji = "🟢" if net_profit >= 0 else "🔴"
                 msg = (
                     f"⚡ [QUICK SELL] {market}\n"
-                    f"• 수량: {filled_qty:.6g} {coin}\n"
-                    f"• 금액: {Q.format(funds)}\n"
-                    f"• 매입가: {Q.format(entry_price, with_suffix=False)} → 체결가: {Q.format(avg_price, with_suffix=False)}"
+                    f"• Qty: {filled_qty:.6g} {coin}\n"
+                    f"• Amount: {Q.format(funds)}\n"
+                    f"• Entry: {Q.format(entry_price, with_suffix=False)} → Fill: {Q.format(avg_price, with_suffix=False)}"
                 )
                 if entry_price > 0:
                     total_fee = sell_fee_est + buy_fee_est
                     msg += (
-                        f"\n💹 총 이윤: {profit_sign}{Q.format(profit_usdt)} ({profit_sign}{profit_pct:.2f}%)"
-                        f"\n{profit_emoji} 순이익: {profit_sign}{Q.format(net_profit)}"
-                        f"\n💰 수수료: {Q.format(total_fee)}"
+                        f"\n💹 Gross PnL: {profit_sign}{Q.format(profit_usdt)} ({profit_sign}{profit_pct:.2f}%)"
+                        f"\n{profit_emoji} Net PnL: {profit_sign}{Q.format(net_profit)}"
+                        f"\n💰 Fee: {Q.format(total_fee)}"
                     )
                 else:
-                    msg += "\n⚠️ 매입가 미상 — 수익 계산 불가"
+                    msg += "\n⚠️ Entry price unknown — cannot compute PnL"
                 if _qs_entry_ts_local > 0:
                     _hold = time.time() - _qs_entry_ts_local
                     if _hold >= 3600:
-                        msg += f"\n⏱️ 보유: {_hold / 3600:.1f}시간"
+                        msg += f"\n⏱️ Hold: {_hold / 3600:.1f}h"
                     else:
-                        msg += f"\n⏱️ 보유: {_hold / 60:.0f}분"
+                        msg += f"\n⏱️ Hold: {_hold / 60:.0f}m"
                 if _qs_strategy_local:
-                    msg += f"\n📋 전략: {_qs_strategy_local}"
+                    msg += f"\n📋 Strategy: {_qs_strategy_local}"
                 send_telegram(msg)
-                
+
             elif action == "partial":
                 funds = filled_qty * avg_price
                 send_telegram(
-                    f"⚡ [QUICK SELL] {market} 부분체결\n"
-                    f"• 체결: {filled_qty:.6g} {coin}\n"
-                    f"• 미체결: {remaining_qty:.6g} {coin}\n"
-                    f"• 금액: {Q.format(funds)}\n"
-                    f"• 체결가: {Q.format(avg_price, with_suffix=False)}"
+                    f"⚡ [QUICK SELL] {market} partial fill\n"
+                    f"• Filled: {filled_qty:.6g} {coin}\n"
+                    f"• Unfilled: {remaining_qty:.6g} {coin}\n"
+                    f"• Amount: {Q.format(funds)}\n"
+                    f"• Fill price: {Q.format(avg_price, with_suffix=False)}"
                 )
-                
+
             elif action == "cancelled":
                 send_telegram(
-                    f"⏸️ [QUICK SELL] {market} 미체결\n"
-                    f"• 희망가: {Q.format(avg_price, with_suffix=False)}\n"
-                    f"• 상태: 다음 기회 대기 중..."
+                    f"⏸️ [QUICK SELL] {market} unfilled\n"
+                    f"• Desired price: {Q.format(avg_price, with_suffix=False)}\n"
+                    f"• Status: waiting for next opportunity..."
                 )
         except (OSError, KeyError, AttributeError, TypeError, ValueError, OverflowError):
             logger.warning("[OSM] telegram buy notification failed", exc_info=True)
 
     def _apply_fill_and_log(self, *, ctx: Any, po: PendingOrder, market: str) -> Optional[float]:
         """
-        최종 체결(done/cancel) 시점에 ctx 포지션을 반영하고, FILL_* 이벤트를 기록한다.
+        At final settlement (done/cancel), apply the fill to the ctx position and log FILL_* events.
 
         Returns:
             slippage_bps (float) if calculable else None
@@ -1524,8 +1524,8 @@ class OrderStateMachine:
         if avg is None and po.executed_volume and po.funds and po.executed_volume > 0 and po.funds > 0:
             avg = float(po.funds) / float(po.executed_volume)
 
-        # ask 시장가 매도 fallback — Bybit가 funds=0 반환 시 expected_price로 보정
-        # (FILL_NONE 오탐 → 포지션 미청산 → 이중 매도 신호 방지)
+        # ask market-sell fallback — if Bybit returns funds=0, correct with expected_price
+        # (prevents FILL_NONE false positive → unliquidated position → double sell signal)
         if avg is None and side in ("ask", "sell") and (po.executed_volume or 0.0) > 0.0 and po.expected_price:
             avg = float(po.expected_price)
 
@@ -1552,8 +1552,8 @@ class OrderStateMachine:
                 slippage_bps=slippage_bps,
                 reason=po.reason,
             )
-            # [FIX 2026-02-19] 매수 미체결 시 쿨다운 (무한 재시도 방지)
-            # [2026-03-22] 연속 실패 시 에스컬레이팅: 2분→4분→8분→10분
+            # [FIX 2026-02-19] Cooldown on unfilled buy (prevent infinite retries)
+            # [2026-03-22] Escalate on consecutive failures: 2m→4m→8m→10m
             if side in ("bid", "buy"):
                 import time as _t
                 now = _t.time()
@@ -1570,14 +1570,14 @@ class OrderStateMachine:
         fee = float(po.paid_fee or 0.0)
 
         if side in ("bid", "buy"):
-            # ctx 포지션 반영
+            # Apply to the ctx position
             adopted = False
             ctx._insufficient_funds_streak = 0
-            ctx._fill_none_streak = 0  # 매수 성공 → FILL_NONE 연속 실패 카운터 리셋
+            ctx._fill_none_streak = 0  # buy success → reset the FILL_NONE consecutive-failure counter
 
-            # Reconcile(orphan)로 이미 계정 보유량을 position에 세팅한 뒤,
-            # 같은 주문의 fill을 다시 apply하면 qty가 "2배"로 누적될 수 있다.
-            # → orphan position과 fill이 사실상 동일하면 "adopt"만 하고 누적은 하지 않는다.
+            # After reconcile(orphan) has already set the account holding into position,
+            # re-applying the same order's fill can accumulate qty to "2x".
+            # → if the orphan position and the fill are effectively identical, only "adopt" without accumulating.
             try:
                 pos = getattr(ctx, "position", None)
                 if isinstance(pos, dict) and str(pos.get("source") or "").lower() == "orphan":
@@ -1590,7 +1590,7 @@ class OrderStateMachine:
                             pos["source"] = "bybit"
                             pos["entry"] = float(avg)
                             pos["usdt"] = float(funds) if float(funds) > 0.0 else (float(avg) * float(old_qty))
-                            # [FIX 2026-02-19] orphan adopt 시 entry_ts 설정 (Grace Period 작동 보장)
+                            # [FIX 2026-02-19] Set entry_ts on orphan adopt (ensures the Grace Period works)
                             import time as _t
                             pos["entry_ts"] = _t.time()
                             setattr(ctx, "position", pos)
@@ -1616,7 +1616,7 @@ class OrderStateMachine:
                     fn(avg_price=float(avg), qty=float(qty), funds=float(funds), fee=float(fee), source="bybit")
                 except TypeError:
                     logger.warning("OrderStateMachine._apply_fill_and_log suppressed exception", exc_info=True)
-                    # 구버전 시그니처 대비
+                    # Fallback for legacy signature
                     fn(float(avg), float(qty), float(funds), float(fee))
 
             _buy_strategy = str(getattr(ctx, "selected_strategy", "") or "").strip().upper()
@@ -1636,7 +1636,7 @@ class OrderStateMachine:
                 strategy=_buy_strategy or None,
             )
             
-            # Buy-fill callback (triage DCA 체결 확인 등)
+            # Buy-fill callback (e.g., triage DCA fill confirmation)
             if self._buy_fill_callbacks and _buy_strategy:
                 self._notify_buy_filled(
                     ctx=ctx, market=market, strategy=_buy_strategy,
@@ -1645,7 +1645,7 @@ class OrderStateMachine:
                     reason=str(getattr(po, "reason", "") or ""),
                 )
 
-            # 텔레그램 알림 - 매수 체결 (UUID별 중복 방지)
+            # Telegram notification - buy fill (dedup per UUID)
             try:
                 notified_key = f"fill_notified_{po.uuid}"
                 already_notified = getattr(ctx, notified_key, False)
@@ -1654,9 +1654,9 @@ class OrderStateMachine:
                     coin = Q.extract_base(market)
                     send_telegram(
                         f"📈 [BUY] {market}\n"
-                        f"• 수량: {qty:.6g} {coin}\n"
-                        f"• 금액: {Q.format(funds)}\n"
-                        f"• 체결가: {Q.format(avg, with_suffix=False)}"
+                        f"• Qty: {qty:.6g} {coin}\n"
+                        f"• Amount: {Q.format(funds)}\n"
+                        f"• Fill price: {Q.format(avg, with_suffix=False)}"
                     )
             except (KeyError, AttributeError, TypeError):
                 logger.warning("[OSM] telegram buy-fill notification failed", exc_info=True)
@@ -1688,11 +1688,11 @@ class OrderStateMachine:
                     logger.warning("OrderStateMachine._apply_fill_and_log suppressed exception", exc_info=True)
                     fn(float(avg), float(qty), float(funds), float(fee))
 
-            # 수익 계산 (pre-extracted entry_price 사용)
+            # Profit calculation (using pre-extracted entry_price)
             entry_price = _entry_price
             profit_usdt = 0.0
             profit_pct = 0.0
-            # 매수 시 수수료 추정 (entry_price 기반)
+            # Estimate buy-side fee (based on entry_price)
             buy_fee_est = entry_price * qty * 0.0005 if entry_price > 0 else 0.0
             net_profit_usdt = 0.0
             if entry_price > 0:
@@ -1717,7 +1717,7 @@ class OrderStateMachine:
                 strategy=(_strategy or "").strip().upper() or None,
             )
             
-            # 텔레그램 알림 - 매도 체결 (UUID별 중복 방지)
+            # Telegram notification - sell fill (dedup per UUID)
             try:
                 notified_key = f"fill_notified_{po.uuid}"
                 already_notified = getattr(ctx, notified_key, False)
@@ -1728,29 +1728,29 @@ class OrderStateMachine:
                     profit_emoji = "🟢" if net_profit_usdt >= 0 else "🔴"
                     msg = (
                         f"📉 [SELL] {market}\n"
-                        f"• 수량: {qty:.6g} {coin}\n"
-                        f"• 금액: {Q.format(funds)}\n"
-                        f"• 매입가: {Q.format(entry_price, with_suffix=False)} → 체결가: {Q.format(avg, with_suffix=False)}"
+                        f"• Qty: {qty:.6g} {coin}\n"
+                        f"• Amount: {Q.format(funds)}\n"
+                        f"• Entry: {Q.format(entry_price, with_suffix=False)} → Fill: {Q.format(avg, with_suffix=False)}"
                     )
                     if entry_price > 0:
                         total_fee = float(fee) + buy_fee_est
                         msg += (
-                            f"\n💹 총 이윤: {profit_sign}{Q.format(profit_usdt)} ({profit_sign}{profit_pct:.2f}%)"
-                            f"\n{profit_emoji} 순이익: {profit_sign}{Q.format(net_profit_usdt)}"
-                            f"\n💰 수수료: {Q.format(total_fee)}"
+                            f"\n💹 Gross PnL: {profit_sign}{Q.format(profit_usdt)} ({profit_sign}{profit_pct:.2f}%)"
+                            f"\n{profit_emoji} Net PnL: {profit_sign}{Q.format(net_profit_usdt)}"
+                            f"\n💰 Fee: {Q.format(total_fee)}"
                         )
                     else:
-                        msg += "\n⚠️ 매입가 미상 — 수익 계산 불가"
-                    # 보유 시간
+                        msg += "\n⚠️ Entry price unknown — cannot compute PnL"
+                    # Hold time
                     if _entry_ts > 0:
                         _hold = time.time() - _entry_ts
                         if _hold >= 3600:
-                            msg += f"\n⏱️ 보유: {_hold / 3600:.1f}시간"
+                            msg += f"\n⏱️ Hold: {_hold / 3600:.1f}h"
                         else:
-                            msg += f"\n⏱️ 보유: {_hold / 60:.0f}분"
-                    # 전략 표시
+                            msg += f"\n⏱️ Hold: {_hold / 60:.0f}m"
+                    # Strategy label
                     if _strategy:
-                        msg += f"\n📋 전략: {_strategy}"
+                        msg += f"\n📋 Strategy: {_strategy}"
                     send_telegram(msg)
             except (OSError, KeyError, AttributeError, TypeError, ValueError, OverflowError):
                 logger.warning("[OSM] telegram sell-fill notification failed", exc_info=True)
@@ -1778,7 +1778,7 @@ class OrderStateMachine:
         max_retries: Optional[int] = None,
         timeout_sec: Optional[float] = None,
     ) -> Tuple[bool, str]:
-        """지정가 매수(Limit Buy) 제출."""
+        """Submit a limit buy."""
         if getattr(ctx, "order_state", None) is not None:
             return False, "order_pending"
 
@@ -1860,14 +1860,14 @@ class OrderStateMachine:
 
         return True, oid
     def force_cancel_pending(self, *, ctx: Any, market: str, reason: str = "force_cancel") -> Dict[str, Any]:
-        """강제 취소(베스트-에포트).
+        """Force cancel (best-effort).
 
-        - ctx.order_state 에 pending(uuid)가 있으면 cancel을 시도하고 state를 비운다.
-        - 목적: TP limit-exit 등으로 pending 상태인 경우에도, 손절/강제청산/pp_exit를 즉시 실행할 수 있게 한다.
+        - If ctx.order_state has a pending(uuid), attempt cancel and clear the state.
+        - Purpose: even when pending due to a TP limit-exit etc., allow stop-loss/force-exit/pp_exit to run immediately.
 
-        주의:
-        - 이미 체결 완료된 주문은 cancel이 실패할 수 있다. 이 경우 state를 비우지 않고,
-          다음 process_pending()에서 정상 정리되도록 남겨둔다.
+        Note:
+        - Cancel may fail for an already-filled order. In that case do not clear the state;
+          leave it so the next process_pending() cleans it up normally.
         """
         d = getattr(ctx, "order_state", None)
         if not isinstance(d, dict) or not d.get("uuid"):
@@ -1912,7 +1912,7 @@ class OrderStateMachine:
 
 
     def process_pending(self, *, ctx: Any, market: str, current_price: Optional[float] = None, current_bid: Optional[float] = None) -> Dict[str, Any]:
-        """pending order가 있으면 상태를 진행시킨다."""
+        """If there is a pending order, advance its state."""
 
         d = getattr(ctx, "order_state", None)
         if not isinstance(d, dict) or not d.get("uuid"):
@@ -1926,7 +1926,7 @@ class OrderStateMachine:
 
         po.last_check_ts = now
 
-        # 1) 조회
+        # 1) Poll
         try:
             order = self.client.get_order(uuid=po.uuid, market=market)
             st, ev, funds, ap, fee = self._summarize_order_fields(order)
@@ -1944,14 +1944,14 @@ class OrderStateMachine:
             po.last_error = str(exc)
             ctx.order_state = po.to_dict()
             self.ledger.append("ORDER_POLL_ERROR", market=market, uuid=po.uuid, error=str(exc), side=po.side)
-            # 폴링 오류는 즉시 stop하지 않는다.
+            # Do not stop immediately on polling errors.
             return {"progressed": True, "done": False, "needs_emergency_stop": False, "reason": "poll_error"}
 
-        # 2) done/cancel 이면 fill 적용
+        # 2) If done/cancel, apply the fill
         if po.state in ("done", "cancel"):
             slip = self._apply_fill_and_log(ctx=ctx, po=po, market=market)
 
-            # 원장: 주문 종료 요약(체결 0 포함)
+            # Ledger: order-close summary (including 0 fill)
             try:
                 age_sec = max(0.0, float(now) - float(po.created_ts or 0.0))
             except (TypeError, ValueError):
@@ -1989,10 +1989,10 @@ class OrderStateMachine:
                     slippage_bps=slip,
                 )
 
-                # order는 끝났으므로 pending 제거
+                # The order is finished, so remove pending
                 ctx.order_state = None
 
-                # exit는 전역 정지(+회수 승격) / entry는 시장 단위 진입 쿨다운
+                # exit -> global stop (+escalate to recovery) / entry -> per-market entry cooldown
                 if po.side == "ask":
                     return {
                         "progressed": True,
@@ -2023,11 +2023,11 @@ class OrderStateMachine:
                     "reason": "slippage_hard_entry",
                 }
 
-            # pending 제거
+            # Remove pending
             ctx.order_state = None
             return {"progressed": True, "done": True, "needs_emergency_stop": False}
 
-        # 3) wait 상태인데 timeout 초과 → cancel/재시도
+        # 3) In wait state but timeout exceeded → cancel/retry
         age = now - po.created_ts
         if age >= po.timeout_sec:
             self.ledger.append(
@@ -2041,7 +2041,7 @@ class OrderStateMachine:
                 timeout_sec=po.timeout_sec,
             )
 
-            # cancel 시도
+            # Attempt cancel
             cancel_sent = False
             try:
                 self.client.cancel_order(uuid=po.uuid)
@@ -2052,7 +2052,7 @@ class OrderStateMachine:
                 po.last_error = f"cancel_failed:{exc}"
                 self.ledger.append("ORDER_CANCEL_ERROR", market=market, uuid=po.uuid, side=po.side, error=str(exc))
 
-            # cancel 이후 재조회
+            # Re-poll after cancel
             try:
                 order = self.client.get_order(uuid=po.uuid, market=market)
                 st, ev, funds, ap, fee = self._summarize_order_fields(order)
@@ -2065,18 +2065,18 @@ class OrderStateMachine:
                 logger.warning("OrderStateMachine.process_pending except: %s", exc, exc_info=True)
                 po.last_error = f"post_cancel_poll_failed:{exc}"
 
-            # cancel 요청을 보냈지만 아직 wait이면: 중복 주문 방지 위해 pending 유지
+            # Cancel was sent but still wait: keep pending to prevent duplicate orders
             if po.state not in ("done", "cancel"):
                 if cancel_sent:
-                    # 다음 timeout까지 대기(취소 반영 시간)
+                    # Wait until the next timeout (time for the cancel to take effect)
                     po.created_ts = _now()
                 ctx.order_state = po.to_dict()
                 return {"progressed": True, "done": False, "needs_emergency_stop": False, "reason": "wait_after_cancel"}
 
-            # 여기부터는 order가 끝났다고 판단 → fill 반영 후 잔량 retry
+            # From here the order is considered finished → apply fill, then retry the remainder
             slip = self._apply_fill_and_log(ctx=ctx, po=po, market=market)
 
-            # 원장: 주문 종료 요약(체결 0 포함)
+            # Ledger: order-close summary (including 0 fill)
             try:
                 age_sec = max(0.0, float(now) - float(po.created_ts or 0.0))
             except (TypeError, ValueError):
@@ -2102,7 +2102,7 @@ class OrderStateMachine:
                 reason=po.reason,
             )
 
-            # 남은 잔량 계산
+            # Compute the remaining amount
             remaining_usdt = 0.0
             remaining_qty = 0.0
             if po.side == "bid":
@@ -2110,7 +2110,7 @@ class OrderStateMachine:
             else:
                 remaining_qty = max(0.0, float(po.requested_qty) - float(po.executed_volume))
 
-            # hard slippage 처리(Timeout finalize에서도 동일)
+            # Handle hard slippage (same as in the timeout finalize path)
             if slip is not None and slip >= po.max_slippage_bps_hard:
                 self.ledger.append(
                     "SLIPPAGE_HARD_BREACH",
@@ -2153,10 +2153,10 @@ class OrderStateMachine:
                     "reason": "slippage_hard_entry",
                 }
 
-            # 이전 pending 제거 (중복 주문 방지)
+            # Remove the previous pending (prevent duplicate orders)
             ctx.order_state = None
 
-            # 재시도 조건
+            # Retry condition
             if po.attempts < po.max_retries:
                 next_attempt = int(po.attempts) + 1
 
@@ -2206,7 +2206,7 @@ class OrderStateMachine:
                             logger.warning("[recovered] limit_buy cooldown set market=%s: %s", market, e)
                         return {"progressed": True, "done": True, "reason": "entry_limit_unfilled"}
                     
-                    # 시장가 BUY 재시도 (기존 로직)
+                    # Market BUY retry (existing logic)
                     if remaining_usdt >= self.min_order_usdt:
                         ok, msg = self.submit_market_buy(
                             ctx=ctx,
@@ -2270,7 +2270,7 @@ class OrderStateMachine:
                             )
                             return {"progressed": True, "done": False, "reason": "retry_sell"}
 
-            # 재시도 불가 → 안전 정지/회수 모드 승격
+            # No retry possible → escalate to safe-stop/recovery mode
             if po.side == "ask":
                 self.ledger.append("EXIT_UNRESOLVED", market=market, reason="max_retries_reached")
                 return {
@@ -2281,7 +2281,7 @@ class OrderStateMachine:
                     "reason": "exit_unresolved",
                 }
 
-            # entry 실패는 전역 emergency로 막지 않는다. 대신 market entry cooldown.
+            # Entry failure does not trigger a global emergency. Use a market entry cooldown instead.
             try:
                 ctx.entry_block_until_ts = _now() + float(self.entry_unresolved_cooldown_sec)
             except (TypeError, ValueError) as e:
@@ -2301,6 +2301,6 @@ class OrderStateMachine:
                 "reason": "entry_unresolved",
             }
 
-        # wait인데 아직 timeout 전
+        # In wait state but not yet timed out
         ctx.order_state = po.to_dict()
         return {"progressed": True, "done": False, "reason": "wait"}

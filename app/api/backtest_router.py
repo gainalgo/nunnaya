@@ -2,7 +2,7 @@
 # File: app/api/backtest_router.py
 # Autocoin OS v3-H — Backtest API Router
 # ------------------------------------------------------------
-# 백테스팅 실행 및 결과 조회 API
+# Backtest execution and result query API
 # ============================================================
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from app.backtest.backtest_runner import BacktestRunner
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
-# 지원되는 전략 목록
+# Supported strategy list
 ALL_STRATEGIES = [
     "PINGPONG",
     "AUTOLOOP",
@@ -29,12 +29,12 @@ ALL_STRATEGIES = [
     "SNIPER"
 ]
 
-# 전역 백테스트 러너 (싱글톤)
+# Global backtest runner (singleton)
 _backtest_runner: Optional[BacktestRunner] = None
 
 
 def get_backtest_runner() -> BacktestRunner:
-    """백테스트 러너 싱글톤 가져오기"""
+    """Get the backtest runner singleton"""
     global _backtest_runner
     if _backtest_runner is None:
         _backtest_runner = BacktestRunner()
@@ -46,24 +46,24 @@ def get_backtest_runner() -> BacktestRunner:
 # ============================================================
 
 class BacktestRequest(BaseModel):
-    """백테스트 실행 요청"""
-    strategy: str = Field(..., description="전략 이름 (PINGPONG, AUTOLOOP, ...)")
-    market: str = Field(..., description="마켓 코드 (BTCUSDT, ...)")
-    days: int = Field(default=30, ge=1, le=365, description="백테스팅 기간 (일)")
-    initial_capital: float = Field(default=1000.0, description="초기 자본 (USDT)")
-    budget_per_trade: float = Field(default=200.0, description="거래당 예산 (USDT)")
+    """Backtest execution request"""
+    strategy: str = Field(..., description="Strategy name (PINGPONG, AUTOLOOP, ...)")
+    market: str = Field(..., description="Market code (BTCUSDT, ...)")
+    days: int = Field(default=30, ge=1, le=365, description="Backtest period (days)")
+    initial_capital: float = Field(default=1000.0, description="Initial capital (USDT)")
+    budget_per_trade: float = Field(default=200.0, description="Budget per trade (USDT)")
 
 
 class BulkBacktestRequest(BaseModel):
-    """대량 백테스트 실행 요청"""
-    strategies: List[str] = Field(..., description="전략 리스트")
-    markets: List[str] = Field(..., description="마켓 리스트")
-    days: int = Field(default=30, ge=1, le=365, description="백테스팅 기간 (일)")
-    parallel: bool = Field(default=True, description="병렬 실행 여부")
+    """Bulk backtest execution request"""
+    strategies: List[str] = Field(..., description="Strategy list")
+    markets: List[str] = Field(..., description="Market list")
+    days: int = Field(default=30, ge=1, le=365, description="Backtest period (days)")
+    parallel: bool = Field(default=True, description="Whether to run in parallel")
 
 
 class BacktestResultResponse(BaseModel):
-    """백테스트 결과 응답"""
+    """Backtest result response"""
     strategy: str
     market: str
     start_time: float
@@ -83,7 +83,7 @@ class BacktestResultResponse(BaseModel):
 
 
 class StrategySummaryResponse(BaseModel):
-    """전략별 종합 성과 응답"""
+    """Per-strategy aggregate performance response"""
     strategy: str
     total_trades: int
     wins: int
@@ -181,14 +181,14 @@ def _to_response(result: Any) -> BacktestResultResponse:
 
 @router.post("/run", response_model=BacktestResultResponse)
 async def run_backtest(request: BacktestRequest):
-    """단일 백테스트 실행
-    
+    """Run a single backtest
+
     Args:
-        request: 백테스트 실행 요청
-    
+        request: Backtest execution request
+
     Returns:
-        백테스트 결과
-    
+        Backtest result
+
     Example:
         ```json
         POST /api/backtest/run
@@ -221,11 +221,11 @@ async def run_backtest(request: BacktestRequest):
 
 @router.post("/bulk", response_model=Dict[str, Dict[str, BacktestResultResponse]])
 async def run_bulk_backtest(request: BulkBacktestRequest):
-    """대량 백테스트 실행 (여러 전략 × 여러 마켓)
-    
+    """Run bulk backtests (multiple strategies x multiple markets)
+
     Args:
-        request: 대량 백테스트 요청
-    
+        request: Bulk backtest request
+
     Returns:
         {strategy: {market: BacktestResult}}
     
@@ -250,7 +250,7 @@ async def run_bulk_backtest(request: BulkBacktestRequest):
             parallel=request.parallel
         )
         
-        # 응답 변환
+        # Convert response
         response = {}
         for strategy, market_results in results.items():
             response[strategy] = {}
@@ -266,17 +266,17 @@ async def run_bulk_backtest(request: BulkBacktestRequest):
 
 @router.get("/summary", response_model=Dict[str, StrategySummaryResponse])
 async def get_strategy_summary(
-    strategies: List[str] = Query(default=None, description="전략 리스트 (미지정 시 전체)"),
-    markets: List[str] = Query(default=None, description="마켓 리스트"),
-    days: int = Query(default=30, ge=1, le=365, description="백테스팅 기간")
+    strategies: List[str] = Query(default=None, description="Strategy list (all if unspecified)"),
+    markets: List[str] = Query(default=None, description="Market list"),
+    days: int = Query(default=30, ge=1, le=365, description="Backtest period")
 ):
-    """전략별 종합 성과 조회
-    
+    """Query per-strategy aggregate performance
+
     Args:
-        strategies: 전략 리스트 (기본값: 전체 전략)
-        markets: 마켓 리스트 (필수)
-        days: 백테스팅 기간
-    
+        strategies: Strategy list (default: all strategies)
+        markets: Market list (required)
+        days: Backtest period
+
     Returns:
         {strategy: StrategySummary}
     
@@ -290,12 +290,12 @@ async def get_strategy_summary(
             raise HTTPException(status_code=400, detail="markets parameter is required")
         
         runner = get_backtest_runner()
-        
-        # 기본값: 전체 전략
+
+        # Default: all strategies
         if not strategies:
             strategies = ALL_STRATEGIES
-        
-        # 대량 백테스트 실행
+
+        # Run bulk backtests
         results = runner.run_multiple_backtests(
             strategies=strategies,
             markets=markets,
@@ -303,10 +303,10 @@ async def get_strategy_summary(
             parallel=True
         )
         
-        # 전략별 종합 성과 계산
+        # Compute per-strategy aggregate performance
         summary_data = runner.get_strategy_summary(results)
-        
-        # 응답 변환
+
+        # Convert response
         response = {}
         for strategy, data in summary_data.items():
             response[strategy] = StrategySummaryResponse(
@@ -334,11 +334,11 @@ async def get_strategy_summary(
 
 @router.get("/cache")
 async def get_cached_results():
-    """캐시된 백테스트 결과 조회
-    
+    """Query cached backtest results
+
     Returns:
-        캐시된 결과 목록 (strategy_market_days: result_summary)
-    
+        List of cached results (strategy_market_days: result_summary)
+
     Example:
         ```
         GET /api/backtest/cache
@@ -370,11 +370,11 @@ async def get_cached_results():
 
 @router.delete("/cache")
 async def clear_cache():
-    """백테스트 캐시 클리어
-    
+    """Clear the backtest cache
+
     Returns:
-        삭제된 항목 수
-    
+        Number of deleted entries
+
     Example:
         ```
         DELETE /api/backtest/cache

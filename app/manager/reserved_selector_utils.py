@@ -23,7 +23,7 @@ from app.core.currency import Q
 
 _logger = logging.getLogger(__name__)
 
-# 코인 선별 제외 마커 (sorted 최하위 → 미선택)
+# Coin-selection exclusion marker (sorts to the bottom -> not selected)
 _SCORE_EXCLUDED: float = -9999.0
 
 BYBIT_BASE = BYBIT_API_BASE
@@ -31,47 +31,47 @@ DEFAULT_TIMEOUT = DEFAULT_REQUEST_TIMEOUT_SEC
 
 
 # ============================================================
-# [2026-03-03] 저가/저거래량 코인 실행품질 패널티
+# [2026-03-03] Execution-quality penalty for low-price / low-volume coins
 # ============================================================
 def _execution_quality_penalty(price: float, vol24_usdt: float, spread_bps: float = 0.0) -> float:
-    """호가단위 슬리피지 + 거래량 부족 패널티 (반환값 ≤ 0).
+    """Tick-size slippage + insufficient-volume penalty (return value <= 0).
 
-    저가 코인은 1틱 움직임이 큰 퍼센트를 차지하여
-    진입 시 이미 TP의 20~40%를 잃는 구조적 문제가 있다.
-    이 함수로 모든 스코어링 함수에 공통 패널티를 부과한다.
+    Low-price coins have a single tick that spans a large percentage,
+    so on entry you already lose 20~40% of the TP — a structural problem.
+    This function applies a common penalty across all scoring functions.
 
     Returns:
-        float: 0 (정상) ~ -15 (극저가+극저거래량) 사이의 패널티 값
+        float: penalty value between 0 (normal) and -15 (extreme low-price + extreme low-volume)
     """
     penalty = 0.0
 
-    # ── 1. 호가단위 슬리피지 패널티 ──
-    # Bybit tick size 기반 슬리피지 패널티
+    # ── 1. Tick-size slippage penalty ──
+    # Slippage penalty based on Bybit tick size
     if price <= 0:
         return -15.0
     from app.integrations.bybit_trade import get_tick_size
     tick = get_tick_size(price)
     tick_pct = (tick / price) * 100.0 if price > 0 else 99.0
 
-    if tick_pct >= 1.0:         # 1틱 = 1% 이상 (극저가)
+    if tick_pct >= 1.0:         # 1 tick = 1% or more (extreme low-price)
         penalty -= 10.0
-    elif tick_pct >= 0.5:       # 1틱 = 0.5% 이상
+    elif tick_pct >= 0.5:       # 1 tick = 0.5% or more
         penalty -= 5.0
-    elif tick_pct >= 0.2:       # 1틱 = 0.2% 이상
+    elif tick_pct >= 0.2:       # 1 tick = 0.2% or more
         penalty -= 2.0
-    elif tick_pct >= 0.1:       # 1틱 = 0.1%
+    elif tick_pct >= 0.1:       # 1 tick = 0.1%
         penalty -= 0.5
 
-    # ── 2. 거래량 부족 패널티 ──
-    # 24h 거래대금 기준 (USDT)
-    if vol24_usdt < 500_000:           # 500K USDT 미만
+    # ── 2. Insufficient-volume penalty ──
+    # Based on 24h turnover (USDT)
+    if vol24_usdt < 500_000:           # under 500K USDT
         penalty -= 8.0
-    elif vol24_usdt < 1_000_000:       # 1M USDT 미만
+    elif vol24_usdt < 1_000_000:       # under 1M USDT
         penalty -= 4.0
-    elif vol24_usdt < 3_000_000:       # 3M USDT 미만
+    elif vol24_usdt < 3_000_000:       # under 3M USDT
         penalty -= 1.5
 
-    # ── 3. 스프레드 과대 추가 패널티 ──
+    # ── 3. Extra penalty for excessive spread ──
     if spread_bps > 50:
         penalty -= min(5.0, (spread_bps - 50) * 0.1)
 
@@ -88,8 +88,8 @@ def _normalize_market(market: str) -> str:
     if not m:
         return ""
     normalized = Q.normalize(m)
-    # [2026-02-05] 잘못된 마켓 형식 필터링
-    # Q.normalize('')가 '''를 반환하는 버그 방지
+    # [2026-02-05] Filter out malformed market formats
+    # Guard against the bug where Q.normalize('') returns '''
     if normalized in ("BTC-", "USDT-") or len(normalized) < 5:
         return ""
     return normalized
@@ -128,7 +128,7 @@ def _clamp(x: float, lo: float, hi: float) -> float:
 
 
 def _finalize_usdt_notional(amount: float, min_order_usdt: float) -> Optional[float]:
-    """USDT 명목 금액: 소수 2자리로 정규화. `min_order_usdt` 미만이면 None (후보/예산 불가)."""
+    """USDT notional amount: normalized to 2 decimal places. Returns None if below `min_order_usdt` (candidate/budget not viable)."""
     try:
         mo = float(min_order_usdt)
     except (TypeError, ValueError):
@@ -241,8 +241,8 @@ class MarketSnapshot:
     depth_bid_usdt: float
     recent_trades: Optional[int] = None
     caution: bool = False
-    delisting: bool = False  # 거래지원 종료 예정
-    delisting_date: Optional[str] = None  # 상장폐지 예정일
+    delisting: bool = False  # trading support to be discontinued
+    delisting_date: Optional[str] = None  # scheduled delisting date
     names: Optional[Dict[str, str]] = None
     # ICAG v3: ATR / Bollinger enrichment (optional)
     atr_pct: float = 0.0
@@ -315,15 +315,15 @@ def _snapshot_from_ticker_and_ob(
 
 
 # ============================================================
-# [2026-03-03] SharedMarketData — 라운드 로빈용 공유 캐시
+# [2026-03-03] SharedMarketData — shared cache for round-robin scanning
 # ============================================================
 class SharedMarketData:
-    """전략 간 Ticker/Orderbook/Snapshot을 공유하는 캐시.
+    """Cache that shares Ticker/Orderbook/Snapshot across strategies.
 
-    라운드 로빈 스캔에서 매 라운드마다 ticker/orderbook을 재호출하지 않고,
-    한 번 수집한 데이터를 TTL(기본 120초) 동안 공유한다.
+    In round-robin scanning, instead of re-fetching ticker/orderbook every round,
+    the once-collected data is shared for a TTL (default 120 seconds).
 
-    사용법:
+    Usage:
         shared = SharedMarketData.get_or_refresh(system, ttl_sec=120)
         items, summary = build_reserved_candidates(system, ..., shared_data=shared)
     """
@@ -348,7 +348,7 @@ class SharedMarketData:
 
     @classmethod
     def get_or_refresh(cls, system: Any, ttl_sec: float = 120.0) -> Optional["SharedMarketData"]:
-        """캐시가 유효하면 재사용, 만료됐으면 None 반환 (호출자가 갱신 판단)."""
+        """Reuse the cache if still valid; return None if expired (caller decides whether to refresh)."""
         if cls._instance and cls._instance.is_valid(ttl_sec):
             return cls._instance
         return None

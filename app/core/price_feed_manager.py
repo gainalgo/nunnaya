@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Price Feed Manager - WebSocket/REST 자동 전환.
+Price Feed Manager - automatic WebSocket/REST switching.
 
-- REST ban 시 WebSocket 데이터 자동 사용
-- 상태 표시 지원
+- Falls back to WebSocket data automatically when REST is banned
+- Status display support
 """
 
 from __future__ import annotations
@@ -18,13 +18,13 @@ logger = logging.getLogger(__name__)
 
 
 class FeedStatus(str, Enum):
-    NORMAL = "normal"           # 🟢 정상
-    REST_LIMITED = "limited"    # 🟡 REST 제한, WebSocket 사용 중
-    DEGRADED = "degraded"       # 🟠 일부 기능 제한
+    NORMAL = "normal"           # 🟢 normal
+    REST_LIMITED = "limited"    # 🟡 REST limited, using WebSocket
+    DEGRADED = "degraded"       # 🟠 some features limited
 
 
 class PriceFeedManager:
-    """가격 피드 상태 관리자."""
+    """Price feed status manager."""
     
     def __init__(self) -> None:
         self._lock = Lock()
@@ -41,34 +41,34 @@ class PriceFeedManager:
             return self._status_message
     
     def set_rest_limited(self, remaining_sec: float) -> None:
-        """REST API 제한 상태 설정."""
+        """Set the REST API limited state."""
         with self._lock:
             self._status = FeedStatus.REST_LIMITED
-            self._status_message = f"REST API 제한 중 ({int(remaining_sec)}초), 실시간 데이터 사용"
+            self._status_message = f"REST API limited ({int(remaining_sec)}s), using realtime data"
             logger.info("[PriceFeed] %s", self._status_message)
     
     def set_normal(self) -> None:
-        """정상 상태로 복귀."""
+        """Return to the normal state."""
         with self._lock:
             if self._status != FeedStatus.NORMAL:
                 self._status = FeedStatus.NORMAL
                 self._status_message = ""
-                logger.info("[PriceFeed] 정상 상태 복귀")
+                logger.info("[PriceFeed] returned to normal state")
     
     def record_ws_update(self) -> None:
-        """WebSocket 데이터 수신 기록."""
+        """Record WebSocket data reception."""
         with self._lock:
             self._ws_last_update = time.time()
     
     def is_ws_alive(self, timeout_sec: float = 30.0) -> bool:
-        """WebSocket이 살아있는지 확인."""
+        """Check whether the WebSocket is alive."""
         with self._lock:
             if self._ws_last_update == 0:
                 return False
             return (time.time() - self._ws_last_update) < timeout_sec
     
     def status_dict(self) -> Dict[str, Any]:
-        """대시보드용 상태 정보."""
+        """Status info for the dashboard."""
         with self._lock:
             return {
                 "status": self._status.value,
@@ -82,5 +82,5 @@ class PriceFeedManager:
             }
 
 
-# 싱글톤
+# singleton
 price_feed_manager = PriceFeedManager()

@@ -1,7 +1,7 @@
 # ============================================================
-# Upbit FOCUS Exit Guards — 청산가드 보조 (순수 함수)
+# Upbit FOCUS Exit Guards — exit guard helpers (pure functions)
 # ------------------------------------------------------------
-# be_stall intelligent 의 모멘텀 점수 등. I/O·상태 없음 → 단위테스트 100%.
+# Momentum scoring for be_stall intelligent, etc. No I/O, no state → 100% unit-testable.
 #   (DESIGN_upbit_be_stall_intelligent_20260617.md §2.2)
 # ============================================================
 from __future__ import annotations
@@ -15,12 +15,12 @@ def score_momentum_long(
     rsi_strong: float = 55.0,
     rsi_weak: float = 45.0,
 ) -> Tuple[int, int, str]:
-    """LONG 5m 모멘텀 → (for_score, against_score, detail). 각 0~3 (MACD/RSI/BB).
+    """LONG 5m momentum → (for_score, against_score, detail). Each 0~3 (MACD/RSI/BB).
 
-    Bybit be_stall_intelligent 와 동일 수식(focus_manager.py:4693~4708) LONG 분기.
-    for  = MACD hist>0&상승 / RSI≥strong / 종가≥BB중간
-    against = MACD hist<0 / RSI≤weak / 종가<BB중간
-    데이터 부족/계산 실패 → (0,0,"insufficient") (호출자가 중립 처리).
+    Same formula as Bybit be_stall_intelligent (focus_manager.py:4693~4708), LONG branch.
+    for  = MACD hist>0 & rising / RSI≥strong / close≥BB mid
+    against = MACD hist<0 / RSI≤weak / close<BB mid
+    Insufficient data / calc failure → (0,0,"insufficient") (caller treats as neutral).
     """
     if not closes5 or len(closes5) < 26:
         return 0, 0, "insufficient"

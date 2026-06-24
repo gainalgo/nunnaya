@@ -2,7 +2,7 @@
 # GreenPen Zone Engine
 # ------------------------------------------------------------
 # Implements EP.8 from the Green Pen System:
-#   - "틈새·꼬리·쌍" (Zok·Sai·Koo) based S/R zone detection
+#   - "gap·wick·pair" (Zok·Sai·Koo) based S/R zone detection
 #   - Daily range calculation (ATR-based)
 #   - Zone proximity checking
 #
@@ -50,7 +50,7 @@ def compute_zones(
     max_zones: int = 4,
     zone_width_atr_mult: float = 0.2,
 ) -> List[Zone]:
-    """Compute support/resistance zones using 틈새·꼬리·쌍 method.
+    """Compute support/resistance zones using the gap·wick·pair method.
 
     Args:
         candles: H4 OHLCV list (oldest first). 10+ candles recommended.
@@ -67,7 +67,7 @@ def compute_zones(
     zone_width = atr * zone_width_atr_mult
     price_points: List[Tuple[float, str]] = []
 
-    # 1. 틈새 (Zok) — gap between same-color adjacent candle bodies
+    # 1. gap (Zok) — gap between same-color adjacent candle bodies
     for i in range(len(candles) - 1):
         c1, c2 = candles[i], candles[i + 1]
         if c1.is_bullish == c2.is_bullish:  # same color
@@ -76,14 +76,14 @@ def compute_zones(
             mid = (gap_low + gap_high) / 2
             price_points.append((mid, "zok"))
 
-    # 2. 꼬리 (Sai) — candle wick tips
+    # 2. wick (Sai) — candle wick tips
     for c in candles:
         if c.upper_wick > c.body_len * 0.3:
             price_points.append((c.high, "sai"))
         if c.lower_wick > c.body_len * 0.3:
             price_points.append((c.low, "sai"))
 
-    # 3. 쌍 (Koo) — body overlap between different-color adjacent candles
+    # 3. pair (Koo) — body overlap between different-color adjacent candles
     for i in range(len(candles) - 1):
         c1, c2 = candles[i], candles[i + 1]
         if c1.is_bullish != c2.is_bullish:  # different color
@@ -104,13 +104,13 @@ def compute_zones(
     resistances = sorted([z for z in zones if z.type == ZoneType.RESISTANCE], key=lambda z: -z.strength)
 
     if supports and resistances:
-        # 최소 1개씩 보장 → 나머지는 strength 순
+        # guarantee at least one of each → fill the rest by strength
         result: List[Zone] = [supports[0], resistances[0]]
         leftovers = supports[1:] + resistances[1:]
         leftovers.sort(key=lambda z: -z.strength)
         result.extend(leftovers[: max_zones - 2])
     else:
-        # 한쪽만 있으면 그대로
+        # only one side present → keep as is
         result = (supports + resistances)[:max_zones]
 
     result.sort(key=lambda z: -z.strength)

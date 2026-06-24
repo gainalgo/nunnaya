@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-거래소 통합 모듈 (Bybit Spot).
+Exchange integration module (Bybit Spot).
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ def get_trade_client(
     api_secret: str | None = None,
     **kwargs,
 ) -> BybitTradeClient:
-    """BybitTradeClient 인스턴스 반환."""
+    """Return a BybitTradeClient instance."""
     return BybitTradeClient(
         api_key=api_key or os.getenv("BYBIT_API_KEY"),
         api_secret=api_secret or os.getenv("BYBIT_API_SECRET"),
@@ -23,6 +23,6 @@ def get_trade_client(
     )
 
 
-# 편의를 위한 alias
+# Convenience aliases
 TradeClient = BybitTradeClient
 APIError = BybitAPIError

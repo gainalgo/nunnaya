@@ -1,10 +1,10 @@
 """
 Budget Policy Module
-- 모든 주문의 예산 계산/검증을 단일 지점에서 처리
-- GAZUA 예산 보호, 전략별 제한, 전역 제한 등 통합
+- Handle budget computation/validation for all orders at a single point
+- Unifies GAZUA budget protection, per-strategy limits, global limits, etc.
 
 [MIGRATED 2026-01-23] CoinStock → Autocoin
-- USDT 기반 주문
+- USDT-based orders
 - min_order: 10 USDT → 5 USDT
 - max_order: 1,000 USDT → 1,000 USDT
 """
@@ -18,16 +18,16 @@ from app.core.constants import env_float, env_bool
 
 @dataclass
 class BudgetDecision:
-    """예산 결정 결과"""
+    """Budget decision result"""
     allowed: bool
     final_usdt: float
     reason: str
     original_usdt: float
-    adjustments: Dict[str, float]  # 각 단계별 조정 내역
+    adjustments: Dict[str, float]  # Adjustment details per stage
 
 
 class BudgetPolicy:
-    """예산 정책 엔진"""
+    """Budget policy engine"""
     
     def __init__(self):
         self.min_order_usdt = env_float("OMA_MIN_ORDER_USDT", default=5.0)
@@ -43,15 +43,15 @@ class BudgetPolicy:
         market_state: str,
         is_entry: bool = True,
     ) -> BudgetDecision:
-        """주문 허용 여부 및 최종 금액 계산.
-        
-        결정 트리:
-        1. emergency_stop 체크
-        2. 최소 주문 금액 체크
-        3. 전략별 상한 체크
-        4. GAZUA 예산 보호 (할당된 예산 초과 금지)
-        5. 잔여 자본 체크
-        6. 최종 금액 결정
+        """Compute whether an order is allowed and its final amount.
+
+        Decision tree:
+        1. emergency_stop check
+        2. Minimum order amount check
+        3. Per-strategy cap check
+        4. GAZUA budget protection (do not exceed allocated budget)
+        5. Remaining capital check
+        6. Final amount decision
         """
         adjustments: Dict[str, float] = {}
         final = requested_usdt
@@ -66,7 +66,7 @@ class BudgetPolicy:
                 adjustments={}
             )
         
-        # 2. 최소 주문 금액
+        # 2. Minimum order amount
         if final < self.min_order_usdt:
             return BudgetDecision(
                 allowed=False,
@@ -76,25 +76,25 @@ class BudgetPolicy:
                 adjustments={}
             )
         
-        # 3. 최대 주문 금액
+        # 3. Maximum order amount
         if final > self.max_order_usdt:
             adjustments["max_order_cap"] = self.max_order_usdt - final
             final = self.max_order_usdt
         
-        # 4. GAZUA 예산 보호
+        # 4. GAZUA budget protection
         if self.gazua_budget_protect and strategy.upper() == "GAZUA":
             allocated = float(getattr(ctx, "allocated_capital", 0.0) or 0.0)
             if allocated > 0 and final > allocated:
                 adjustments["gazua_budget_cap"] = allocated - final
                 final = allocated
         
-        # 5. 잔여 자본 체크
+        # 5. Remaining capital check
         usable = float(getattr(ctx, "usable_capital", 0.0) or 0.0)
         if usable > 0 and final > usable:
             adjustments["usable_cap"] = usable - final
             final = usable
         
-        # 6. 최종 체크
+        # 6. Final check
         if final < self.min_order_usdt:
             return BudgetDecision(
                 allowed=False,
@@ -113,7 +113,7 @@ class BudgetPolicy:
         )
     
     def get_strategy_multiplier(self, strategy: str) -> float:
-        """전략별 예산 배수 반환"""
+        """Return the per-strategy budget multiplier"""
         multipliers = {
             "PINGPONG": 1.0,
             "AUTOLOOP": 1.1,
@@ -124,7 +124,7 @@ class BudgetPolicy:
         return multipliers.get(strategy.upper(), 1.0)
 
 
-# 싱글톤
+# Singleton
 _budget_policy: Optional[BudgetPolicy] = None
 
 def get_budget_policy() -> BudgetPolicy:

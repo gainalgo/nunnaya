@@ -74,7 +74,7 @@ def select_focus_coin(
 def _source1_volume_momentum(client: Any, top_n: int = 10) -> List[str]:
     """Fetch top-N linear perp symbols by 24h turnover."""
     try:
-        # ★ [2026-06-23] 거래소 추상화 — 직접 bybit_get 대신 client 경유 (client 파라미터 존중).
+        # ★ [2026-06-23] Exchange abstraction — go through client instead of direct bybit_get (respect client param).
         tickers = client.get_market_tickers()
 
         scored = []
@@ -87,16 +87,16 @@ def _source1_volume_momentum(client: Any, top_n: int = 10) -> List[str]:
             turnover = float(t.get("turnover24h", 0) or 0)
             change_pct = float(t.get("price24hPcnt", 0) or 0)
             last_price = float(t.get("lastPrice", 0) or 0)
-            # 최소 가격: $1.0 이상 (저가 코인 qty 폭발 방지 — ADA/XPL/PEPE 등 제외)
+            # Minimum price: >= $1.0 (avoid qty explosion on cheap coins — excludes ADA/XPL/PEPE etc.)
             if last_price < 1.0:
                 continue
-            # 유동성: 24h 거래대금 $10M 이상 (슬리피지 방지)
+            # Liquidity: 24h turnover >= $10M (avoid slippage)
             if turnover < 10_000_000:
                 continue
-            # 극변동 제외: 24h > 20%
+            # Exclude extreme moves: 24h > 20%
             if abs(change_pct) > 0.20:
                 continue
-            # 변동폭 최소: 24h > 0.5% (너무 잠잠하면 TP 안 맞음)
+            # Minimum range: 24h > 0.5% (too quiet means TP won't get hit)
             if abs(change_pct) < 0.005:
                 continue
             scored.append((symbol, turnover, abs(change_pct)))
@@ -154,7 +154,7 @@ def _source2_greenpen_analysis(
         direction = best_pa.direction.value
         confidence = best_pa.confidence
 
-    # Trend must support direction — 역추세 진입 완전 차단
+    # Trend must support direction — fully block counter-trend entry
     if direction == "LONG" and trend == "DOWNTREND":
         logger.info("[FOCUS_SELECT] %s PA→LONG but PRIMARY DOWNTREND — BLOCKED (no counter-trend)", market)
         return None
@@ -162,11 +162,11 @@ def _source2_greenpen_analysis(
         logger.info("[FOCUS_SELECT] %s PA→SHORT but PRIMARY UPTREND — BLOCKED (no counter-trend)", market)
         return None
 
-    # ── 30M 추세 정렬 — primary(H1)가 후행할 때 30M이 안전장치 ──
-    # [2026-05-15] H1 전환: primary_tf 가 H1 이 되며 옛 "H4↔H1" 비교가 H1↔H1 중복 → 한 칸 내려 primary↔30M.
-    # primary↔30M 충돌 → confidence × 0.5 (전환기일 수 있으므로 차단은 아님)
-    # 방향↔30M 충돌 → confidence × 0.5
-    # 둘 다 겹치면 × 0.25 → confidence < 0.3 기준에서 자연스럽게 탈락
+    # ── 30M trend alignment — when primary(H1) lags, 30M acts as a safety net ──
+    # [2026-05-15] H1 switch: as primary_tf became H1, the old "H4↔H1" comparison became a redundant H1↔H1 → step down one to primary↔30M.
+    # primary↔30M conflict → confidence × 0.5 (could be a transition, so not a hard block)
+    # direction↔30M conflict → confidence × 0.5
+    # both overlapping → × 0.25 → naturally drops out under the confidence < 0.3 threshold
     try:
         from app.strategy.greenpen.market_structure import analyze_structure
         m30_raw = client.get_kline(market, interval="30", limit=20)
@@ -178,14 +178,14 @@ def _source2_greenpen_analysis(
             m30_struct = analyze_structure(m30_candles, lookback=3)
             m30_trend = m30_struct.trend.value if hasattr(m30_struct.trend, 'value') else str(m30_struct.trend)
 
-            # primary↔30M 충돌 → confidence 반감
+            # primary↔30M conflict → halve confidence
             if (trend == "UPTREND" and m30_trend == "DOWNTREND") or \
                (trend == "DOWNTREND" and m30_trend == "UPTREND"):
                 confidence *= 0.5
                 logger.info("[FOCUS_SELECT] %s PRI=%s vs 30M=%s conflict — confidence *= 0.5 → %.2f",
                             market, trend, m30_trend, confidence)
 
-            # 방향↔30M 충돌 → confidence 반감
+            # direction↔30M conflict → halve confidence
             if (direction == "LONG" and m30_trend == "DOWNTREND") or \
                (direction == "SHORT" and m30_trend == "UPTREND"):
                 confidence *= 0.5

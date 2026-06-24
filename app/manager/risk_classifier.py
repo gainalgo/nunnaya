@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 # Suspicion v1 — Internal Risk Mapping
 # ============================================================
 # NOTE:
-# - Risk는 '신뢰 관리'가 아니라 '의심 관리'다.
-# - L0~L5는 내부 판단 단계
-# - UI에는 신호등 3색(RED/YELLOW/GREEN) + 감도로 표현된다.
+# - Risk is not 'trust management' but 'suspicion management'.
+# - L0~L5 are internal judgment stages
+# - In the UI it is shown as a 3-color traffic light (RED/YELLOW/GREEN) + intensity.
 
 SUSPICION_LEVEL_TABLE = [
     (80.0, "L0"),
@@ -52,20 +52,20 @@ LEVEL_TO_INTENSITY = {
     "L2": 0.4,
     "L3": 0.8,
     "L4": 0.5,
-    "L5": 1.0,   # 가장 강한 신뢰 (pulse 허용)
+    "L5": 1.0,   # strongest trust (pulse allowed)
 }
 
 class RiskClassifier:
     """Manager-level Risk Classifier.
 
-    LEGACY 출력 필드 (유지):
+    LEGACY output fields (kept):
     - band: L0/L1/L2
-    - unlock: L2일 때만 True
+    - unlock: True only at L2
     - cap_ratio
     - cap_usdt
     - reason
 
-    Suspicion v1 (추가):
+    Suspicion v1 (added):
     - suspicion_score (0~100)
     - suspicion_level (L0~L5)
     - suspicion_group (RED/YELLOW/GREEN)
@@ -85,18 +85,18 @@ class RiskClassifier:
         self.l2_conf_min = float(l2_conf_min)
         self.l2_gap_min = float(l2_gap_min)
 
-        # env 기반 cap ratio (LEGACY)
+        # env-based cap ratio (LEGACY)
         self.cap_l1 = _env_float("RISK_CAP_RATIO_L1", 0.2)
         self.cap_l2 = _env_float("RISK_CAP_RATIO_L2", 1.0)
 
     def classify(self, ctx: HyperEngineContext) -> Dict[str, Any]:
         # ====================================================
-        # Suspicion v1 — 의심 점수 계산 (PRIMARY)
+        # Suspicion v1 — suspicion score calculation (PRIMARY)
         # ====================================================
         # NOTE:
-        # - Context는 계산하지 않는다. 여기서 계산 후 write-back만 한다.
-        # - 기존 L0/L1/L2 자본 게이트를 대체하지 않는다.
-        # - '지금도 의심할 이유가 없는가?'를 지속적으로 재평가한다.
+        # - Context does not compute. We compute here and only write-back.
+        # - Does not replace the existing L0/L1/L2 capital gate.
+        # - Continuously re-evaluates 'is there still no reason to be suspicious?'.
 
         suspicion = float(getattr(ctx, "suspicion_score", 50.0))
         confidence = ctx.confidence
@@ -105,30 +105,30 @@ class RiskClassifier:
         if hasattr(ctx, "confidence_history") and ctx.confidence_history:
             prev_conf = ctx.confidence_history[-1]
 
-        # 1) confidence 절대값
+        # 1) confidence absolute value
         if confidence is not None:
             if confidence < self.l1_conf_min:
                 suspicion += 10.0
             elif confidence > self.l2_conf_min:
                 suspicion -= 5.0
 
-        # 2) confidence 변화 속도 (하락은 즉시 의심)
+        # 2) confidence rate of change (a drop is immediately suspicious)
         if confidence is not None and prev_conf is not None:
             delta = confidence - prev_conf
             if delta < -2.0:
                 suspicion += min(10.0, abs(delta) * 2.0)
 
-        # 3) 변동성 기반 의심 (strategy_reason 참고)
-        # SUSPICION: strategy_reason 구조 변경 가능성 있음 → 방어적으로 접근
+        # 3) volatility-based suspicion (refer to strategy_reason)
+        # SUSPICION: strategy_reason structure may change → approach defensively
         try:
             features = ctx.strategy_reason.get("features", {})
             vol = features.get("vol")
             if vol is not None and vol > 3.0:
                 suspicion += min(10.0, float(vol))
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[risk_classifier] %s: %s", 'SUSPICION: strategy_reason 구조 변경 가능성 있음 → 방어적으로 접근', exc, exc_info=True)
+            logger.warning("[risk_classifier] %s: %s", 'SUSPICION: strategy_reason structure may change → approach defensively', exc, exc_info=True)
 
-        # 4) 포지션 보유 시 기본 의심 가중
+        # 4) base suspicion weight when holding a position
         if ctx.position is not None:
             suspicion += 3.0
 
@@ -145,7 +145,7 @@ class RiskClassifier:
         group = LEVEL_TO_GROUP.get(level, "YELLOW")
         intensity = LEVEL_TO_INTENSITY.get(level, 0.5)
 
-        # Context write-back (기억)
+        # Context write-back (memory)
         ctx.suspicion_score = suspicion
         ctx.suspicion_level = level
         ctx.suspicion_group = group
@@ -161,15 +161,15 @@ class RiskClassifier:
         # LEGACY — Confidence-based Capital Gate (L0/L1/L2)
         # ====================================================
         # NOTE:
-        # 기존 안정 운용을 위해 유지.
-        # EMA 안정화 시장, 장기 운용에서는 여전히 유효할 수 있다.
-        # Suspicion v1이 충분히 검증될 때까지 병행 운용.
+        # Kept for existing stable operation.
+        # May still be valid in EMA-stabilized markets and long-term operation.
+        # Run in parallel until Suspicion v1 is sufficiently validated.
 
         bias: Optional[str] = ctx.bias
         confidence: Optional[float] = ctx.confidence
         ema_scores: Dict[str, float] = ctx.ema_scores or {}
 
-        # decision 미형성
+        # decision not formed
         if bias is None or confidence is None:
             return self._result(
                 band=RiskBand.L0,
@@ -214,7 +214,7 @@ class RiskClassifier:
                 },
             )
 
-        # L2 unlock 조건
+        # L2 unlock condition
         if ema_gap >= self.l2_gap_min:
             cap_ratio = float(self.cap_l2)
             cap_usdt = float(ctx.allocated_capital or 0.0) * cap_ratio
@@ -231,7 +231,7 @@ class RiskClassifier:
                 },
             )
 
-        # gap 부족 → L1 유지
+        # insufficient gap → stay at L1
         cap_ratio = float(self.cap_l1)
         cap_usdt = float(ctx.allocated_capital or 0.0) * cap_ratio
         return self._result(

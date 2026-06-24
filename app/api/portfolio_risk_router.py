@@ -37,16 +37,16 @@ class UpdateCorrelationGroupsRequest(BaseModel):
 @router.get("/status")
 async def get_portfolio_risk_status(request: Request) -> Dict[str, Any]:
     """
-    포트폴리오 리스크 관리 상태 조회
-    
+    Get portfolio risk management status
+
     Returns:
-        - enabled: 리스크 관리 활성화 여부
-        - can_enter_new_position: 신규 진입 가능 여부
-        - entry_block_reason: 진입 차단 사유 (차단 시)
-        - daily_status: 일일 리스크 상태 (손익, 손실률, 일시정지 등)
-        - circuit_breaker: Circuit Breaker 상태
-        - correlation_guard: 상관관계 가드 상태
-        - thresholds: 설정된 임계값
+        - enabled: whether risk management is active
+        - can_enter_new_position: whether new entries are allowed
+        - entry_block_reason: reason entries are blocked (when blocked)
+        - daily_status: daily risk status (PnL, loss rate, pause, etc.)
+        - circuit_breaker: Circuit Breaker status
+        - correlation_guard: correlation guard status
+        - thresholds: configured thresholds
     """
     try:
         system = request.app.state.system
@@ -60,10 +60,10 @@ async def get_portfolio_risk_status(request: Request) -> Dict[str, Any]:
 @router.post("/manual-pause")
 async def manual_pause(request: Request, req: ManualPauseRequest) -> Dict[str, Any]:
     """
-    수동으로 신규 진입 일시정지
-    
+    Manually pause new entries
+
     Args:
-        reason: 일시정지 사유
+        reason: pause reason
     """
     try:
         system = request.app.state.system
@@ -77,7 +77,7 @@ async def manual_pause(request: Request, req: ManualPauseRequest) -> Dict[str, A
 
 @router.post("/manual-unpause")
 async def manual_unpause(request: Request) -> Dict[str, Any]:
-    """수동으로 일시정지 해제"""
+    """Manually clear pause"""
     try:
         system = request.app.state.system
         prm = system.portfolio_risk_manager
@@ -90,7 +90,7 @@ async def manual_unpause(request: Request) -> Dict[str, Any]:
 
 @router.post("/circuit-breaker/resume")
 async def resume_circuit_breaker(request: Request) -> Dict[str, Any]:
-    """Circuit Breaker 수동 재개"""
+    """Manually resume Circuit Breaker"""
     try:
         system = request.app.state.system
         prm = system.portfolio_risk_manager
@@ -107,10 +107,10 @@ async def resume_circuit_breaker(request: Request) -> Dict[str, Any]:
 @router.post("/reset-daily-status")
 async def reset_daily_status(request: Request, req: ResetDailyStatusRequest) -> Dict[str, Any]:
     """
-    일일 상태 강제 리셋 (운영자 전용)
-    
+    Force-reset daily status (operator only)
+
     Args:
-        new_capital: 새로운 시작 자본
+        new_capital: new starting capital
     """
     try:
         system = request.app.state.system
@@ -128,10 +128,10 @@ async def reset_daily_status(request: Request, req: ResetDailyStatusRequest) -> 
 @router.post("/update-correlation-groups")
 async def update_correlation_groups(request: Request, req: UpdateCorrelationGroupsRequest) -> Dict[str, Any]:
     """
-    코인 섹터 정보 업데이트 (상관관계 그룹)
-    
+    Update coin sector info (correlation groups)
+
     Args:
-        market_sectors: {market: sector} 예) {"BTCUSDT": "L1", "ETHUSDT": "L1"}
+        market_sectors: {market: sector} e.g. {"BTCUSDT": "L1", "ETHUSDT": "L1"}
     """
     try:
         system = request.app.state.system
@@ -150,8 +150,8 @@ async def update_correlation_groups(request: Request, req: UpdateCorrelationGrou
 @router.get("/sector-exposure")
 async def get_sector_exposure(request: Request) -> Dict[str, Any]:
     """
-    섹터별 익스포저 조회
-    
+    Get exposure by sector
+
     Returns:
         {sector: total_exposure_usdt}
     """
@@ -159,7 +159,7 @@ async def get_sector_exposure(request: Request) -> Dict[str, Any]:
         system = request.app.state.system
         prm = system.portfolio_risk_manager
         
-        # 현재 활성 포지션 수집
+        # Collect currently active positions
         active_positions = {}
         active_markets = system.oma_registry.list_active()
         
@@ -169,11 +169,11 @@ async def get_sector_exposure(request: Request) -> Dict[str, Any]:
                 continue
             
             budget = getattr(ctx, "budget_usdt", 0.0) or 0.0
-            # 섹터 정보는 strategy에서 가져오거나 기본값 사용
+            # Get sector from strategy or use default
             sector = "UNKNOWN"
             strategy = str(getattr(ctx, "strategy", "") or "").upper()
             
-            # 간단한 섹터 매핑 (나중에 개선 가능)
+            # Simple sector mapping (can be improved later)
             if "BTC" in market or "ETH" in market:
                 sector = "L1"
             elif "USDT" in market or "USDC" in market:
@@ -202,12 +202,12 @@ async def get_sector_exposure(request: Request) -> Dict[str, Any]:
 @router.get("/history")
 async def get_risk_history(days: int = 7) -> Dict[str, Any]:
     """
-    리스크 관리 히스토리 (향후 구현)
-    
+    Risk management history (to be implemented)
+
     Args:
-        days: 조회 일수
+        days: number of days to query
     """
-    # TODO: 일일 손익 히스토리 저장 및 조회 기능 추가
+    # TODO: add daily PnL history persistence and query
     return {
         "message": "History feature not implemented yet",
         "days": days

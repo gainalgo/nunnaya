@@ -1,10 +1,10 @@
 """Phase 5F — Background loop methods extracted from HyperSystem.
 
 ── ASYNC SAFETY RULES ──
-모든 루프는 async. 동기 블로킹 작업은 반드시 asyncio.to_thread() 사용.
-- requests.get/post → asyncio.to_thread() 필수
-- File I/O (ledger.tail 등) → asyncio.to_thread() 필수
-- _scan_gate 점유 시 timeout 설정 필수 (교착 방지)
+All loops are async. Synchronous blocking work must use asyncio.to_thread().
+- requests.get/post → asyncio.to_thread() required
+- File I/O (ledger.tail etc.) → asyncio.to_thread() required
+- Must set a timeout when holding _scan_gate (deadlock prevention)
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ class BackgroundLoopsMixin:
 
         while True:
             try:
-                # Check every N minutes (기본 6시간, OMA_AI_RETRAIN_INTERVAL_SEC으로 조정)
+                # Check every N minutes (default 6 hours, tunable via OMA_AI_RETRAIN_INTERVAL_SEC)
                 await asyncio.sleep(_env_float("OMA_AI_RETRAIN_INTERVAL_SEC", 21600))
 
                 # Run in thread to avoid blocking event loop
@@ -60,7 +60,7 @@ class BackgroundLoopsMixin:
                     logger.warning("[BG_LOOPS] AI_LOOP ledger append failed: %s", exc, exc_info=True)
 
     async def _daily_report_loop(self):
-        """매일 자정(00:05)에 일일 리포트를 텔레그램으로 발송."""
+        """Send the daily report via Telegram every midnight (00:05)."""
         from app.core.constants import env_bool
         from datetime import datetime, timedelta
 
@@ -71,7 +71,7 @@ class BackgroundLoopsMixin:
 
         while True:
             try:
-                # 다음 00:05까지 대기 시간 계산
+                # Compute the wait time until the next 00:05
                 now = datetime.now()
                 tomorrow = now.replace(hour=0, minute=5, second=0, microsecond=0)
                 if now >= tomorrow:
@@ -80,14 +80,14 @@ class BackgroundLoopsMixin:
                 wait_sec = (tomorrow - now).total_seconds()
                 await asyncio.sleep(wait_sec)
 
-                # 어제 날짜 리포트 발송 (자정 넘겼으니 어제 = 전일)
+                # Send yesterday's report (past midnight, so "yesterday" = the previous day)
                 yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
                 try:
                     from app.manager.daily_pnl import get_daily_pnl_manager
                     mgr = get_daily_pnl_manager()
 
-                    # 어제 리포트 로드 및 발송
+                    # Load and send yesterday's report
                     report = mgr.load_report(yesterday)
                     if report:
                         mgr.send_daily_report_telegram(report)
@@ -105,7 +105,7 @@ class BackgroundLoopsMixin:
                     self.ledger.append("DAILY_REPORT_LOOP_ERROR", error=str(exc))
                 except (AttributeError, TypeError, ValueError) as exc:
                     logger.warning("[BG_LOOPS] daily report ledger append failed: %s", exc, exc_info=True)
-                await asyncio.sleep(3600)  # 에러 시 1시간 대기
+                await asyncio.sleep(3600)  # wait 1 hour on error
 
     async def _focus_loop(self):
         """FOCUS strategy background loop — 5-second tick."""
@@ -113,7 +113,7 @@ class BackgroundLoopsMixin:
 
         while True:
             try:
-                # ★ A5 FIX: Emergency Stop 전파 — FOCUS/Harpoon 모두 정지
+                # ★ A5 FIX: Emergency Stop propagation — halt both FOCUS and Harpoon
                 if bool(getattr(self, 'emergency_stop', False)):
                     fm_check = getattr(self, "focus_manager", None)
                     if fm_check and fm_check.enabled:
@@ -131,7 +131,7 @@ class BackgroundLoopsMixin:
                     from app.core.hyper_price_store import price_store
                     btc_price = price_store.get_price("BTCUSDT") or 0
 
-                    # ★ FOCUS 보유 코인을 price_feed에 등록 (실시간 가격 수신)
+                    # ★ Register FOCUS-held coins with price_feed (receive real-time prices)
                     try:
                         feed = getattr(self, "price_feed", None)
                         if feed and hasattr(feed, "add_symbol"):
@@ -147,7 +147,7 @@ class BackgroundLoopsMixin:
                         self._bg_executor, fm.tick, float(btc_price),
                     )
 
-                    # ★ Harpoon (작살) tick — FOCUS 루프에 편승
+                    # ★ Harpoon tick — piggybacks on the FOCUS loop
                     try:
                         hm = getattr(self, "harpoon_manager", None)
                         if hm is None:
@@ -162,7 +162,7 @@ class BackgroundLoopsMixin:
                                 self._bg_executor, hm.tick,
                             )
                     except Exception as h_exc:
-                        # ★ A1 FIX: Harpoon crash 시 안전 상태로 복귀 (FOCUS에 영향 없음)
+                        # ★ A1 FIX: on Harpoon crash, revert to a safe state (no impact on FOCUS)
                         logger.warning("[HARPOON_LOOP] tick error (reset to STANDBY): %s", h_exc)
                         try:
                             if hm:
@@ -180,12 +180,12 @@ class BackgroundLoopsMixin:
                 await asyncio.sleep(10.0)
 
     async def _upbit_gazua_loop(self):
-        """Upbit 현물 FOCUS background loop — 5초 tick. Bybit FOCUS 와 완전 격리.
+        """Upbit spot FOCUS background loop — 5s tick. Fully isolated from Bybit FOCUS.
 
-        에러는 try/except 로 가둬 시스템/Bybit FOCUS 에 전파되지 않음.
-        E-STOP 시 Bybit FOCUS 와 동일하게 자동 비활성화.
+        Errors are confined by try/except and do not propagate to the system / Bybit FOCUS.
+        On E-STOP, auto-disabled the same way as Bybit FOCUS.
         """
-        await asyncio.sleep(35)  # warmup (Bybit 30 과 어긋나게 — 부하 분산)
+        await asyncio.sleep(35)  # warmup (offset from Bybit's 30 — load balancing)
 
         while True:
             try:
@@ -199,7 +199,7 @@ class BackgroundLoopsMixin:
 
                 um = getattr(self, "upbit_gazua_manager", None)
                 if um and um.enabled:
-                    # btc_price 미사용(현물 자체판단) → 0.0 전달
+                    # btc_price unused (spot judges on its own) → pass 0.0
                     await asyncio.get_running_loop().run_in_executor(
                         self._bg_executor, um.tick, 0.0,
                     )
@@ -213,8 +213,8 @@ class BackgroundLoopsMixin:
                 await asyncio.sleep(10.0)
 
     async def _bithumb_gazua_loop(self):
-        """Bithumb 현물 FOCUS background loop — Upbit loop 미러, 완전 격리.
-        warmup 40s (Upbit 35·Bybit 30 과 어긋나게 — 부하 분산). E-STOP 시 자동 비활성화."""
+        """Bithumb spot FOCUS background loop — mirrors the Upbit loop, fully isolated.
+        warmup 40s (offset from Upbit's 35 / Bybit's 30 — load balancing). Auto-disabled on E-STOP."""
         await asyncio.sleep(40)
         while True:
             try:
@@ -239,8 +239,8 @@ class BackgroundLoopsMixin:
                 await asyncio.sleep(10.0)
 
     async def _bybit_spot_gazua_loop(self):
-        """Bybit 현물 FOCUS background loop — Upbit loop 미러, 완전 격리.
-        warmup 45s (Upbit 35·Bybit선물 30·Bithumb 40 과 어긋나게 — 부하 분산). E-STOP 시 자동 비활성화."""
+        """Bybit spot FOCUS background loop — mirrors the Upbit loop, fully isolated.
+        warmup 45s (offset from Upbit's 35 / Bybit futures' 30 / Bithumb's 40 — load balancing). Auto-disabled on E-STOP."""
         await asyncio.sleep(45)
         while True:
             try:
@@ -265,8 +265,8 @@ class BackgroundLoopsMixin:
                 await asyncio.sleep(10.0)
 
     async def _binance_spot_gazua_loop(self):
-        """Binance 현물 FOCUS background loop — Bybit 현물 loop 미러, 완전 격리.
-        warmup 50s (Upbit 35·Bybit선물 30·Bithumb 40·Bybit현물 45 와 어긋나게 — 부하 분산). E-STOP 시 자동 비활성화."""
+        """Binance spot FOCUS background loop — mirrors the Bybit spot loop, fully isolated.
+        warmup 50s (offset from Upbit's 35 / Bybit futures' 30 / Bithumb's 40 / Bybit spot's 45 — load balancing). Auto-disabled on E-STOP."""
         await asyncio.sleep(50)
         while True:
             try:
@@ -291,8 +291,8 @@ class BackgroundLoopsMixin:
                 await asyncio.sleep(10.0)
 
     async def _binance_futures_loop(self):
-        """Binance USDT-M 선물 FOCUS background loop — Bybit FOCUS(_focus_loop) 미러, 완전 격리.
-        warmup 55s (부하분산). E-STOP 시 자동 비활성화."""
+        """Binance USDT-M futures FOCUS background loop — mirrors Bybit FOCUS (_focus_loop), fully isolated.
+        warmup 55s (load balancing). Auto-disabled on E-STOP."""
         await asyncio.sleep(55)
         while True:
             try:
@@ -329,17 +329,17 @@ class BackgroundLoopsMixin:
                 await asyncio.sleep(10.0)
 
     async def _contrarian_loop(self):
-        """Periodic Contrarian auto-scan (역행 코인 자동 감지 및 알림)."""
+        """Periodic Contrarian auto-scan (auto-detect contrarian coins and alert)."""
         from app.core.contrarian_scanner import get_contrarian_scanner
         from app.core.constants import env_bool, env_int
 
         enabled = env_bool("CONTRARIAN_AUTO_SCAN_ENABLED", default=True)
-        interval_sec = env_int("CONTRARIAN_AUTO_SCAN_SEC", default=300)  # 5분마다
+        interval_sec = env_int("CONTRARIAN_AUTO_SCAN_SEC", default=300)  # every 5 minutes
 
         if not enabled:
             return
 
-        # 초기 대기 (가격 데이터 축적)
+        # Initial wait (accumulate price data)
         await asyncio.sleep(120)
 
         while True:
@@ -350,17 +350,17 @@ class BackgroundLoopsMixin:
                 if not scanner.enabled:
                     continue
 
-                # 마켓 리스트 가져오기
+                # Fetch the market list
                 markets = list(self.coordinator._contexts.keys()) if hasattr(self.coordinator, '_contexts') else []
                 if not markets:
                     continue
 
-                # scan_gate 보유 중이면 이번 사이클 스킵 (5분 주기라 다음 사이클에 실행)
+                # If scan_gate is held, skip this cycle (5-min interval, so run next cycle)
                 if self._scan_gate.locked():
                     logger.debug("[ContrarianLoop] scan_gate locked — skipping cycle")
                     continue
 
-                # 스캔 실행 (알림은 scanner 내부에서 처리)
+                # Run the scan (alerts are handled inside the scanner)
                 await asyncio.to_thread(scanner.scan, markets, True, "BTC")
 
             except asyncio.CancelledError:
@@ -373,7 +373,7 @@ class BackgroundLoopsMixin:
                     logger.warning("[BG_LOOPS] contrarian scan ledger append failed: %s", exc, exc_info=True)
 
     async def _volume_spike_update_loop(self) -> None:
-        """Volume Spike Detector 데이터를 주기적으로 업데이트."""
+        """Periodically update Volume Spike Detector data."""
         _vs_interval = _env_int("OMA_VOLUME_SPIKE_UPDATE_MIN", 10) * 60
         await asyncio.sleep(120)
         while True:
@@ -382,7 +382,7 @@ class BackgroundLoopsMixin:
                 from app.integrations.bybit_markets import fetch_bybit_markets, filter_quote_markets
                 detector = get_volume_spike_detector()
                 if detector:
-                    # scan_gate 보유 중이면 스킵 (10분 주기라 한 사이클 늦어도 무방)
+                    # If scan_gate is held, skip (10-min interval, so one delayed cycle is fine)
                     if self._scan_gate.locked():
                         logger.debug("[VolumeSpikeLoop] scan_gate locked — skipping cycle")
                     else:
@@ -445,33 +445,34 @@ class BackgroundLoopsMixin:
             await asyncio.sleep(_interval)
 
     async def _strategy_recommend_loop(self) -> None:
-        """전략별 추천코인을 백그라운드에서 직렬로 pre-warm (SLOW_TICK 방지).
+        """Pre-warm per-strategy recommended coins serially in the background (avoid SLOW_TICK).
 
-        대시보드가 전략화면 로드 시 동시 다발적으로 /recommendations를 호출하면
-        스레드풀이 포화되어 tick loop가 지연된다. 이 루프가 각 전략을 미리,
-        순서대로 계산·캐싱해두면 대시보드 요청은 캐시 히트로 즉시 반환된다.
+        When the dashboard loads the strategy screen it calls /recommendations in bursts,
+        saturating the thread pool and delaying the tick loop. By having this loop compute
+        and cache each strategy in advance, in order, dashboard requests return immediately
+        as cache hits.
 
-        주기: 부팅 30초 후 시작 → 전략마다 45초 간격 → 한 사이클 완료 후 120초 휴식
-        총 사이클: 7전략 × 45초 + 120초 = ~435초 ≈ 7.25분 (recommend read-TTL 600초가 이를 덮음)
-        ★ LIGHTNING 을 첫 순서로 — v4 에서 가장 먼저 붙이는 활성 plugin → 부팅 후 가장 빨리 데움
+        Cadence: start 30s after boot → 45s gap per strategy → 120s rest after a full cycle
+        Full cycle: 7 strategies × 45s + 120s = ~435s ≈ 7.25min (recommend read-TTL of 600s covers this)
+        ★ LIGHTNING first — the first active plugin attached in v4 → warms up fastest after boot
         """
         _STRATEGIES = ["LIGHTNING", "PINGPONG", "AUTOLOOP", "GAZUA", "CONTRARIAN", "SNIPER", "LADDER"]
-        _INTER_SEC = 45.0    # 전략 간 대기 — 15→45 (tick GIL 경합 감소)
-        _CYCLE_SEC = 120.0   # 한 사이클 완료 후 휴식 — 60→120
+        _INTER_SEC = 45.0    # gap between strategies — 15→45 (reduces tick GIL contention)
+        _CYCLE_SEC = 120.0   # rest after a full cycle — 60→120
 
-        # OMA_PREWARM_ENABLED=0 → 백그라운드 prewarm 비활성화 (대시보드 요청 시만 계산)
+        # OMA_PREWARM_ENABLED=0 → disable background prewarm (compute only on dashboard request)
         if os.getenv("OMA_PREWARM_ENABLED", "1").strip() == "0":
             logger.info("[Prewarm] disabled (OMA_PREWARM_ENABLED=0) — on-demand mode")
             return
 
-        await asyncio.sleep(30.0)  # 부팅 안정화 대기
+        await asyncio.sleep(30.0)  # wait for boot to stabilize
 
         while True:
             for strategy in _STRATEGIES:
                 try:
                     from app.api.strategy_router import prewarm_recommendation
-                    # scan_gate 대기: autopilot scan과 동시 실행 방지 (rate limiter / GIL 경합)
-                    # 전용 _scan_executor 사용 → tick loop 스레드풀 경합 방지
+                    # Wait on scan_gate: prevent running concurrently with autopilot scan (rate limiter / GIL contention)
+                    # Use the dedicated _scan_executor → avoid tick loop thread-pool contention
                     async with self._scan_gate:
                         _loop = asyncio.get_event_loop()
                         await _loop.run_in_executor(
@@ -491,17 +492,17 @@ class BackgroundLoopsMixin:
             price = price_store.get_price(market)
             volume = price_store.get_volume(market)
 
-            # 컨텍스트는 price 유무와 무관하게 항상 세팅
+            # Always set the context regardless of whether price exists
             ctx = self.coordinator.ensure_market(market)
             ctx.market_state = self.oma_registry.get_state(market).value
             ctx.trading_mode = self.trading_mode
             ctx.recovery = (ctx.market_state == "RECOVERY")
 
             # ------------------------------------------
-            # price 없는 경우: REST 폴백 시도 후 warmup tick
+            # No price: try REST fallback, then warmup tick
             # ------------------------------------------
             if price is None:
-                # ★ WebSocket 끊김 대비: REST API로 가격 조회 → price_store에 저장
+                # ★ WebSocket-drop fallback: fetch price via REST API → store in price_store
                 try:
                     from app.integrations.bybit_trade import BybitTradeClient
                     _fc = getattr(self, "_price_fallback_client", None)
@@ -516,12 +517,12 @@ class BackgroundLoopsMixin:
                     pass
 
                 if price is None:
-                    # warmup/ticks 진행을 위해 dummy price 사용
+                    # use a dummy price to keep warmup/ticks progressing
                     await asyncio.to_thread(self.coordinator.tick, market, 0.0)
                     return
 
             # ------------------------------------------
-            # price 있는 경우: 정상 tick 경로
+            # Price present: normal tick path
             # ------------------------------------------
 
             # 1) pending order progression
@@ -566,63 +567,63 @@ class BackgroundLoopsMixin:
             # ──────────────────────────────────────────────────────
             # [PERF] Price-Change Gate  (2026-03-18)
             # ──────────────────────────────────────────────────────
-            # 가격이 바뀌지 않았으면 새 정보 없음 → 인디케이터·AI·전략 결과 동일
-            # → coordinator.tick CPU 비용(~25ms/마켓) 절감, GIL 직렬화 병목 해소
+            # If price hasn't changed there's no new info → indicators / AI / strategy results are identical
+            # → save coordinator.tick CPU cost (~25ms/market), relieve GIL serialization bottleneck
             #
-            # 보장: 최소 3초마다 1회 full tick (시간 기반 로직 보호: time-stop 등)
-            # 영향: order_fsm은 위에서 항상 실행됨 (주문 상태 추적 무관)
+            # Guarantee: at least one full tick every 3s (protects time-based logic: time-stop etc.)
+            # Impact: order_fsm always runs above (independent of order-state tracking)
             # ──────────────────────────────────────────────────────
             _pcg_prev = getattr(ctx, '_pcg_last_price', None)
             _pcg_now = time.time()
             _pcg_changed = (_pcg_prev is None or float(price) != _pcg_prev)
 
-            # 마켓별 분산 초기화: 첫 tick에서 0~3초 랜덤 오프셋
-            # → 3초 타임아웃이 동시 만료되는 thundering herd 방지
+            # Per-market staggered init: 0~3s random offset on the first tick
+            # → prevent a thundering herd where all 3s timeouts expire at once
             if not hasattr(ctx, '_pcg_last_full_ts'):
                 import random
                 ctx._pcg_last_full_ts = _pcg_now - random.uniform(0.0, 3.0)
 
             _pcg_elapsed = _pcg_now - ctx._pcg_last_full_ts
 
-            # SLOW_MARKET 자중: 200ms 초과가 반복되면 full tick 간격을 넓힘
+            # SLOW_MARKET self-throttle: if 200ms is repeatedly exceeded, widen the full-tick interval
             _slow_cnt = int(getattr(ctx, '_slow_market_cnt', 0))
             _tick_interval = 3.0 if _slow_cnt < 10 else min(3.0 + _slow_cnt * 0.1, 6.0)
 
             if not _pcg_changed and _pcg_elapsed < _tick_interval:
-                # [DIAG] 스킵 카운트
+                # [DIAG] skip count
                 self._diag_skip_ticks = getattr(self, '_diag_skip_ticks', 0) + 1
-                return  # 가격 미변경 + tick 간격 미경과 → full tick 스킵
+                return  # price unchanged + tick interval not elapsed → skip full tick
 
             ctx._pcg_last_price = float(price)
             ctx._pcg_last_full_ts = _pcg_now
 
-            # SLOW_MARKET 카운터 감쇠 (빠른 tick이면 복구)
+            # Decay the SLOW_MARKET counter (recovers on fast ticks)
             if int(getattr(ctx, '_slow_market_cnt', 0)) > 0:
                 ctx._slow_market_cnt = max(0, int(ctx._slow_market_cnt) - 1)
 
-            # [DIAG] full tick 카운트 + 타이밍
+            # [DIAG] full tick count + timing
             self._diag_full_ticks = getattr(self, '_diag_full_ticks', 0) + 1
             _t_coord_start = time.perf_counter()
 
-            # 2) coordinator tick (정상 price)
+            # 2) coordinator tick (normal price)
             # -----------------------------------------------------------------
             # 🚨 TICK SAFETY (DO NOT REMOVE)
-            # tick은 1회만: 중복 tick은 warmup/전략 판정을 2배로 밀어버립니다.
+            # tick exactly once: a duplicate tick double-advances warmup/strategy decisions.
             # -----------------------------------------------------------------
-            # [PERF] 동기 실행 — asyncio.to_thread 제거 (2026-03-18)
-            # 이유: CPU-bound 작업을 N개 스레드에 넣으면 GIL 경합으로 오히려 느려짐
-            # 동기 실행 시 GIL 스위칭 오버헤드 0, 일정한 성능
+            # [PERF] synchronous execution — removed asyncio.to_thread (2026-03-18)
+            # Reason: spreading CPU-bound work across N threads is actually slower due to GIL contention
+            # Synchronous execution has zero GIL-switching overhead and consistent performance
             out = self.coordinator.tick(market, float(price), float(volume or 0.0))
 
-            # [DIAG] 마켓별 coordinator.tick 시간 — 200ms 초과 시 기록
+            # [DIAG] per-market coordinator.tick time — record when it exceeds 200ms
             _t_coord_ms = (time.perf_counter() - _t_coord_start) * 1000
             if _t_coord_ms > 200:
-                # [2026-03-24] TICK_DIAG_SLOW — 원장 기록 제거 (tick_perf.jsonl 전용 로그로 이관)
+                # [2026-03-24] TICK_DIAG_SLOW — removed ledger record (moved to dedicated tick_perf.jsonl log)
                 # self.ledger.append("TICK_DIAG_SLOW", market=market, coord_ms=round(_t_coord_ms))
                 pass
                 _slow_cnt = int(getattr(ctx, '_slow_market_cnt', 0)) + 1
                 ctx._slow_market_cnt = _slow_cnt
-                # [PERF-LOG] coordinator 내부 분해 포함 (CPU time + thread count for GIL diagnosis)
+                # [PERF-LOG] includes coordinator internal breakdown (CPU time + thread count for GIL diagnosis)
                 if self._perf_ledger is not None:
                     import threading as _thr
                     self._perf_ledger.append("SLOW_MARKET", market=market,
@@ -639,29 +640,29 @@ class BackgroundLoopsMixin:
                 engine_out = out.get("engine_out")
 
             # 2.1) STRATEGY telemetry snapshot (generic)
-            # [2026-03-14] 모든 전략에서 AI 학습용 SNAPSHOT 자동 수집
+            # [2026-03-14] Auto-collect AI-training SNAPSHOTs from every strategy
             try:
                 if isinstance(engine_out, dict):
                     strategy_out = engine_out.get("strategy_out")
                     if isinstance(strategy_out, dict):
                         meta = strategy_out.get("meta")
-                        # 기존 telemetry_emit 방식 (AUTOLOOP 등)
+                        # Existing telemetry_emit approach (AUTOLOOP etc.)
                         if isinstance(meta, dict) and meta.get("telemetry_emit") and isinstance(meta.get("telemetry"), dict):
                             snap = dict(meta.get("telemetry") or {})
                             snap.pop("market", None)
                             mode = str(strategy_out.get("mode") or "UNKNOWN").upper()
                             event_name = f"{mode}_SNAPSHOT"
                             self.ledger.append(event_name, market=market, **snap)
-                        # [NEW] telemetry 없는 전략도 brain + meta에서 기본 SNAPSHOT 생성
+                        # [NEW] Strategies without telemetry also get a basic SNAPSHOT from brain + meta
                         elif isinstance(meta, dict) and not meta.get("telemetry_emit"):
                             _snap_key = f"_last_snapshot_ts_{market}"
                             _snap_now = time.time()
                             _snap_last = getattr(self, _snap_key, 0.0)
-                            if _snap_now - _snap_last >= 60.0:  # 60초 throttle
+                            if _snap_now - _snap_last >= 60.0:  # 60s throttle
                                 setattr(self, _snap_key, _snap_now)
                                 mode = str(strategy_out.get("mode") or "UNKNOWN").upper()
                                 snap = {"price": float(price)}
-                                # brain에서 AI 피처 추출
+                                # Extract AI features from brain
                                 try:
                                     _brain = getattr(ctx, "current_ai", {}) or {}
                                     if isinstance(_brain, dict):
@@ -673,7 +674,7 @@ class BackgroundLoopsMixin:
                                                 snap[_bk] = _bd[_bk]
                                 except (KeyError, AttributeError, TypeError) as exc:
                                     logger.warning("[BG_LOOPS] brain AI feature extraction: %s", exc, exc_info=True)
-                                # meta에서 유용한 지표 추출
+                                # Extract useful metrics from meta
                                 for _mk in ("profit_pct", "regime", "tp_pct", "sl_pct",
                                              "dynamic_tp", "dynamic_sl", "atr_pct"):
                                     if _mk in meta:
@@ -682,11 +683,11 @@ class BackgroundLoopsMixin:
             except (OSError, KeyError, AttributeError, TypeError, ValueError, OverflowError) as exc:
                 self.ledger.append("STRATEGY_SNAPSHOT_ERROR", market=market, error=str(exc))
 
-            # [④] 수익 자동 락인 체크 (intent 처리 전, 포지션 보유 시)
+            # [④] Auto profit lock-in check (before intent handling, when a position is held)
             if self.profit_lock_enabled:
                 await self._check_profit_lock_tick(market, float(price), ctx)
 
-            # [2026-03-24] Peak Drawdown Guard (TP 근접 후 반전 방어)
+            # [2026-03-24] Peak Drawdown Guard (defend against reversal after approaching TP)
             if self.peak_drawdown_guard_enabled:
                 await self._check_peak_drawdown_tick(market, float(price), ctx)
 
@@ -701,10 +702,11 @@ class BackgroundLoopsMixin:
                         intent=intent,
                     )
 
-            # 4) reserved WATCH 후보 → 실포지션 생기면 ACTIVE 승격
-            # 부모님 모델: WATCH=대상 후보 / 실제 진입(position 보유)하면 ACTIVE 코인.
-            # 8553bef(승인=WATCH always) 이후 일반 plugin 진입의 ACTIVE 승격 경로가 없어
-            # 진입해도 WATCH 잔류 → reserved_watch tick 유지되나 상태 표시/관리가 어긋나던 문제 fix.
+            # 4) reserved WATCH candidate → promote to ACTIVE once a real position exists
+            # Owner's model: WATCH = target candidate / actual entry (position held) = ACTIVE coin.
+            # Since 8553bef (approval = WATCH always) there was no ACTIVE-promotion path for normal
+            # plugin entries, so entries stayed in WATCH → reserved_watch tick kept running but the
+            # state display/management was out of sync. This fixes that.
             try:
                 if getattr(ctx, "position", None) is not None:
                     from app.manager.oma_market_registry import MarketState as _MS

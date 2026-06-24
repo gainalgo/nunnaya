@@ -47,14 +47,14 @@ class RateLimiter:
     """
     
     WINDOW_SEC = 60
-    WEIGHT_LIMIT = 600  # Bybit: 600 requests / 분
+    WEIGHT_LIMIT = 600  # Bybit: 600 requests / min
     
     def __init__(self) -> None:
         self._state = RateLimitState()
         self._lock = Lock()
         
-        self.soft_threshold = _env_float("API_RATE_SOFT_THRESHOLD", 0.6)  # 70% → 60% (더 보수적)
-        self.hard_threshold = _env_float("API_RATE_HARD_THRESHOLD", 0.75)  # 90% → 75% (더 보수적)
+        self.soft_threshold = _env_float("API_RATE_SOFT_THRESHOLD", 0.6)  # 70% → 60% (more conservative)
+        self.hard_threshold = _env_float("API_RATE_HARD_THRESHOLD", 0.75)  # 90% → 75% (more conservative)
         self.weight_limit = _env_int("API_RATE_WEIGHT_LIMIT", self.WEIGHT_LIMIT)
         self.min_backoff_sec = _env_float("API_RATE_MIN_BACKOFF", 0.1)
         self.max_backoff_sec = _env_float("API_RATE_MAX_BACKOFF", 30.0)
@@ -75,13 +75,13 @@ class RateLimiter:
             if now >= self._state.banned_until:
                 self._state.banned_until = None
                 logger.info("[RateLimiter] Ban expired, resuming")
-                # price_feed_manager에 정상 복귀 알림
+                # Notify price_feed_manager of return to normal
                 try:
                     from app.core.price_feed_manager import price_feed_manager
                     price_feed_manager.set_normal()
                 except ImportError as exc:
                     logger.info("[RateLimiter] price_feed_manager not available for set_normal")
-                    logger.warning("[rate_limiter] %s: %s", 'price_feed_manager에 정상 복귀 알림', exc, exc_info=True)
+                    logger.warning("[rate_limiter] %s: %s", 'notify price_feed_manager of return to normal', exc, exc_info=True)
                 return False
             return True
     
@@ -98,13 +98,13 @@ class RateLimiter:
             logger.warning("[RateLimiter] Banned until %s (%.0f sec remaining)",
                           time.strftime("%H:%M:%S", time.localtime(until_ts)),
                           remaining)
-            # price_feed_manager에 상태 알림
+            # Notify price_feed_manager of status
             try:
                 from app.core.price_feed_manager import price_feed_manager
                 price_feed_manager.set_rest_limited(remaining)
             except ImportError as exc:
                 logger.info("[RateLimiter] price_feed_manager not available for set_rest_limited")
-                logger.warning("[rate_limiter] %s: %s", 'price_feed_manager에 상태 알림', exc, exc_info=True)
+                logger.warning("[rate_limiter] %s: %s", 'notify price_feed_manager of status', exc, exc_info=True)
     
     def can_request(self, weight: int = 1) -> bool:
         if not self.enabled:
@@ -150,7 +150,7 @@ class RateLimiter:
                 self._state.banned_until = time.time() + 60
     
     def parse_ban_from_error(self, error_msg: str) -> Optional[float]:
-        """에러 메시지에서 ban until timestamp 추출."""
+        """Extract ban-until timestamp from the error message."""
         try:
             if "IP banned until" in error_msg:
                 import re
@@ -164,7 +164,7 @@ class RateLimiter:
         return None
     
     def handle_api_error(self, error_msg: str, error_code: Optional[int] = None) -> None:
-        """API 에러 처리 - ban 감지 시 자동 설정."""
+        """Handle API error - auto-set ban when a ban is detected."""
         ban_ts = self.parse_ban_from_error(error_msg)
         if ban_ts:
             self.set_banned(ban_ts)
@@ -183,7 +183,7 @@ class RateLimiter:
         with self._lock:
             self._reset_window_if_needed()
             usage = self._state.weight_used / self.weight_limit
-            # ★ DEADLOCK FIX: is_banned()/get_ban_remaining()도 _lock 사용 → 직접 접근
+            # ★ DEADLOCK FIX: is_banned()/get_ban_remaining() also use _lock → access directly
             banned_until = self._state.banned_until
             now = time.time()
             is_ban = banned_until is not None and now < banned_until
@@ -198,11 +198,11 @@ class RateLimiter:
                 "error_count": self._state.error_count,
             }
 
-# 싱글톤
+# Singleton
 rate_limiter = RateLimiter()
 
 # ============================================================================
-# Bybit Rate Limiter (초당 8회 제한)
+# Bybit Rate Limiter (8 requests/sec limit)
 # ============================================================================
 
 from collections import deque
@@ -213,13 +213,13 @@ class BybitRateLimiter:
     """
     Bybit API Rate Limiter (Token Bucket)
     
-    Bybit API 제한:
-    - 초당 10회 (10 req/sec)
-    - 분당 600회 (600 req/min)
-    
-    안전 마진을 위해:
-    - 초당 8회로 제한 (80%)
-    - 분당 480회로 제한 (80%)
+    Bybit API limits:
+    - 10 req/sec
+    - 600 req/min
+
+    For a safety margin:
+    - Limit to 8 req/sec (80%)
+    - Limit to 480 req/min (80%)
     """
     
     _instance = None
@@ -234,11 +234,11 @@ class BybitRateLimiter:
         if self._initialized:
             return
         
-        # Token Bucket 설정
-        self.max_per_sec = 8  # 초당 8회 (안전 마진)
-        self.max_per_min = 480  # 분당 480회
-        
-        # 최근 요청 타임스탬프 큐
+        # Token Bucket settings
+        self.max_per_sec = 8  # 8 req/sec (safety margin)
+        self.max_per_min = 480  # 480 req/min
+
+        # Recent request timestamp queues
         self.requests_sec = deque(maxlen=self.max_per_sec)
         self.requests_min = deque(maxlen=self.max_per_min)
         
@@ -254,49 +254,49 @@ class BybitRateLimiter:
     
     def acquire(self) -> float:
         """
-        Rate limit 확인 후 필요 시 대기
-        
+        Check rate limit and wait if needed
+
         Returns:
-            대기 시간 (초)
+            Wait time (seconds)
         """
         with self._lock:
             now = time.time()
             wait = 0.0
             
-            # 1. 초당 제한 확인
+            # 1. Check per-second limit
             if len(self.requests_sec) >= self.max_per_sec:
                 oldest = self.requests_sec[0]
                 elapsed = now - oldest
-                
+
                 if elapsed < 1.0:
-                    # 1초 안에 max_per_sec회 요청 발생
-                    delay = 1.0 - elapsed + 0.01  # 10ms 버퍼
+                    # max_per_sec requests occurred within 1 second
+                    delay = 1.0 - elapsed + 0.01  # 10ms buffer
                     logger.debug(f"[BybitRateLimiter] Per-sec limit: wait {delay:.3f}s")
                     time.sleep(delay)
                     wait += delay
                     now = time.time()
             
-            # 2. 분당 제한 확인
+            # 2. Check per-minute limit
             if len(self.requests_min) >= self.max_per_min:
                 oldest = self.requests_min[0]
                 elapsed = now - oldest
-                
+
                 if elapsed < 60.0:
-                    # 60초 안에 max_per_min회 요청 발생
-                    delay = 60.0 - elapsed + 0.1  # 100ms 버퍼
+                    # max_per_min requests occurred within 60 seconds
+                    delay = 60.0 - elapsed + 0.1  # 100ms buffer
                     logger.warning(f"[BybitRateLimiter] Per-min limit: wait {delay:.3f}s")
                     time.sleep(delay)
                     wait += delay
                     now = time.time()
             
-            # 3. 요청 타임스탬프 기록
+            # 3. Record request timestamps
             self.requests_sec.append(now)
             self.requests_min.append(now)
             
             return wait
     
     def stats(self) -> dict:
-        """통계 반환"""
+        """Return statistics"""
         with self._lock:
             return {
                 "max_per_sec": self.max_per_sec,
@@ -305,12 +305,12 @@ class BybitRateLimiter:
                 "recent_min": len(self.requests_min),
             }
 
-# Bybit 싱글톤
+# Bybit singleton
 bybit_rate_limiter = BybitRateLimiter()
 
 def bybit_rate_limit(func: Callable) -> Callable:
     """
-    Bybit API Rate Limit 데코레이터
+    Bybit API Rate Limit decorator
 
     Usage:
         @bybit_rate_limit

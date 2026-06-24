@@ -1,14 +1,14 @@
 """
-마켓 심볼 정규화 유틸리티 (Bybit 전용)
-- BTCUSDT ↔ BTC/USDT 상호 변환
-- 잘못된 형식 자동 수정
+Market symbol normalization utilities (Bybit only)
+- BTCUSDT ↔ BTC/USDT bidirectional conversion
+- Auto-fix malformed formats
 """
 import re
 from typing import Optional
 
 
 class MarketSymbol:
-    """마켓 심볼 정규화"""
+    """Market symbol normalization"""
 
     # Bybit native = "BTCUSDT", slash = "BTC/USDT"
     BINANCE_PATTERN = re.compile(r"^([A-Z0-9]{2,10})/([A-Z]{3,4})$")
@@ -16,7 +16,7 @@ class MarketSymbol:
 
     @classmethod
     def normalize_bybit(cls, symbol: str) -> Optional[str]:
-        """Bybit 형식으로 정규화 (BTCUSDT)."""
+        """Normalize to Bybit format (BTCUSDT)."""
         if not symbol or not isinstance(symbol, str):
             return None
         symbol = symbol.strip().upper()
@@ -40,7 +40,7 @@ class MarketSymbol:
 
     @classmethod
     def normalize_slash(cls, symbol: str) -> Optional[str]:
-        """슬래시 형식으로 정규화 (BTC/USDT)."""
+        """Normalize to slash format (BTC/USDT)."""
         if not symbol or not isinstance(symbol, str):
             return None
         symbol = symbol.strip().upper()
@@ -57,7 +57,7 @@ class MarketSymbol:
                 if parts[0] == "USDT":
                     return f"{parts[1]}/USDT"
                 return f"{parts[1]}/{parts[0]}"
-        # 슬래시 없는 형식 (BTCUSDT → BTC/USDT)
+        # Slash-less format (BTCUSDT → BTC/USDT)
         if symbol.endswith("USDT") and len(symbol) > 6:
             base = symbol[:-4]
             return f"{base}/USDT"
@@ -65,7 +65,7 @@ class MarketSymbol:
 
     @classmethod
     def split(cls, symbol: str) -> Optional[tuple[str, str]]:
-        """심볼을 (base, quote) 튜플로 분리."""
+        """Split a symbol into a (base, quote) tuple."""
         if not symbol:
             return None
         symbol = symbol.strip().upper()
@@ -82,7 +82,7 @@ class MarketSymbol:
 
     @classmethod
     def is_usdt_market(cls, symbol: str) -> bool:
-        """USDT 마켓 여부 확인"""
+        """Check whether this is a USDT market"""
         normalized = cls.normalize_bybit(symbol)
         return bool(normalized and normalized.endswith("USDT"))
 
@@ -96,27 +96,27 @@ class MarketSymbol:
         return None
 
 
-# 편의 함수
+# Convenience functions
 def normalize_market(symbol: str, exchange: str = "bybit") -> Optional[str]:
-    """마켓 심볼 정규화 (편의 함수)"""
+    """Normalize a market symbol (convenience function)"""
     return MarketSymbol.convert_exchange(symbol, exchange)
 
 
 def is_valid_market(symbol: str) -> bool:
-    """유효한 마켓 심볼인지 검증"""
+    """Validate whether the market symbol is valid"""
     return MarketSymbol.normalize_bybit(symbol) is not None
 
 
-# 데코레이터: 자동 정규화
+# Decorator: auto-normalization
 def auto_normalize_market(exchange: str = "bybit"):
     """
-    함수의 market 파라미터를 자동으로 정규화하는 데코레이터
+    Decorator that automatically normalizes a function's market parameter
 
-    사용 예:
+    Usage:
     ```python
     @auto_normalize_market("bybit")
     def my_function(market: str, ...):
-        # market은 항상 "BTCUSDT" 형식
+        # market is always in "BTCUSDT" format
         pass
     ```
     """

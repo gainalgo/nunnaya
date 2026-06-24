@@ -1,12 +1,12 @@
 /* ============================================================
-   ribbon.js — 리본 탭 = 아래로 펼침 패널 (Excel 리본 collapse)
-   ★ per-strategy: 탭/패널/펼침은 active 전략 컨테이너(.rib-strat.show) 안에서만 동작.
-   탭 클릭 → 그 패널 펼침 / 같은 탭 재클릭 or Esc → 접힘 / Ctrl+1~9 (active 컨테이너 탭 순서)
+   ribbon.js — ribbon tabs = drop-down expanding panels (Excel ribbon collapse)
+   ★ per-strategy: tabs/panels/expansion only work inside the active strategy container (.rib-strat.show).
+   click tab → expand its panel / re-click same tab or Esc → collapse / Ctrl+1~9 (active container tab order)
    ============================================================ */
 (function () {
   'use strict';
   const V3 = window.V3 = window.V3 || {};
-  let openTab = null;   // 현재 펼친 탭 (active 컨테이너 기준)
+  let openTab = null;   // currently expanded tab (relative to active container)
 
   function activeContainer() { return document.querySelector('.rib-strat.show'); }
 
@@ -27,13 +27,13 @@
   V3.ribbonShow = show;
   V3.ribbonCollapse = collapse;
 
-  // active 전략 전환: 리본 컨테이너 show/hide (fold) + 열린 탭 접기
+  // switch active strategy: show/hide ribbon container (fold) + collapse open tab
   V3.ribbonSetActive = (key) => {
     collapse();
     document.querySelectorAll('.rib-strat').forEach((c) => c.classList.toggle('show', c.dataset.ribStrat === key));
   };
 
-  // 탭 클릭 = 위임 (탭이 여러 컨테이너에 존재) — 숨은 컨테이너 탭은 무시
+  // tab click = delegated (tabs exist in multiple containers) — ignore tabs in hidden containers
   document.addEventListener('click', (e) => {
     const tab = e.target.closest('.ribbon-tab'); if (!tab) return;
     if (!tab.closest('.rib-strat.show')) return;

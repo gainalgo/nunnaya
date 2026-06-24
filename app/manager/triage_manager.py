@@ -1,11 +1,11 @@
 # ============================================================
 # File: app/manager/triage_manager.py
-# Autocoin OS v3-H — 포트폴리오 트리아지 모드 매니저
+# Autocoin OS v3-H — portfolio triage mode manager
 # ------------------------------------------------------------
-# 설계서: docs/TRAIGE MODE PLAN.md
-# 결함 수정: ctx.position 필드명 (qty, entry — reconcile에서 세팅),
-#            should_sell() DCA 후 신규 평균가 기준,
-#            DCA 비동기 오프로드, TRIAGE_SELL 완료 감지
+# Design doc: docs/TRAIGE MODE PLAN.md
+# Bug fixes: ctx.position field names (qty, entry — set during reconcile),
+#            should_sell() based on post-DCA new average price,
+#            async DCA offload, TRIAGE_SELL completion detection
 # ============================================================
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 환경변수 헬퍼 (hyper_system 방식과 동일)
+# Environment variable helpers (same approach as hyper_system)
 # ============================================================
 
 def _ef(key: str, default: float) -> float:
@@ -47,7 +47,7 @@ def _load_settings_from_env() -> Dict[str, Any]:
         "trigger_loss_count": int(_ef("OMA_TRIAGE_TRIGGER_LOSS_COUNT", 5)),
         "max_dca_ratio": _ef("OMA_TRIAGE_MAX_DCA_RATIO", 2.0),
         "profit_target_pct": _ef("OMA_TRIAGE_PROFIT_TARGET_PCT", 0.3),
-        "fee_pct": 0.15,  # 수수료 마진 (매수+매도 합산)
+        "fee_pct": 0.15,  # fee margin (buy + sell combined)
         "max_loss_exclude_pct": _ef("OMA_TRIAGE_MAX_LOSS_EXCLUDE_PCT", -30.0),
         "coin_timeout_hours": _ef("OMA_TRIAGE_COIN_TIMEOUT_HOURS", 48.0),
         "max_duration_hours": _ef("OMA_TRIAGE_MAX_DURATION_HOURS", 168.0),
@@ -56,33 +56,33 @@ def _load_settings_from_env() -> Dict[str, Any]:
         "recovery_target": _es("OMA_TRIAGE_RECOVERY_TARGET", "ALL"),
         "notify": _eb("OMA_TRIAGE_NOTIFY", True),
         "state_path": _es("OMA_TRIAGE_STATE_PATH", "runtime/triage_state.json"),
-        "sell_timeout_sec": 300.0,   # TRIAGE_SELL 5분 타임아웃
-        "min_position_usdt": 10.0, # 먼지 제외 기준 (min_order_usdt * 2)
-        # BUY 차단 면제 전략
-        # CONTRARIAN: 하락장이 바로 진입 타이밍 (BTC Guard도 동일 정책)
-        # SNIPER: 시간민감 급등신호, 포트 손실과 독립적 기회
-        # WHALE: 고래 신호 추종, 시간민감
-        "global_dca_cap_pct": _ef("OMA_TRIAGE_GLOBAL_DCA_CAP_PCT", 30.0),  # 전체 DCA 합산 포트폴리오 % 캡
+        "sell_timeout_sec": 300.0,   # TRIAGE_SELL 5-minute timeout
+        "min_position_usdt": 10.0, # dust exclusion threshold (min_order_usdt * 2)
+        # Strategies exempt from BUY blocking
+        # CONTRARIAN: a falling market is precisely the entry timing (BTC Guard uses same policy)
+        # SNIPER: time-sensitive pump signal, opportunity independent of portfolio loss
+        # WHALE: follows whale signals, time-sensitive
+        "global_dca_cap_pct": _ef("OMA_TRIAGE_GLOBAL_DCA_CAP_PCT", 30.0),  # cap on total DCA as % of portfolio
         "exempt_strategies": ["CONTRARIAN", "SNIPER", "WHALE"],
-        "focus_dca_allow": True,     # 포커스 마켓 PRM 우회 허용
-        # BUY 모드 제어
-        # "block_all"      : 기존 동작 — 면제 전략 외 모든 BUY 차단
-        # "allow_non_loss" : 트리아지 진입 시점 손실 코인이 아닌 코인은 BUY 허용
+        "focus_dca_allow": True,     # allow focus market to bypass PRM
+        # BUY mode control
+        # "block_all"      : legacy behavior — block all BUY except exempt strategies
+        # "allow_non_loss" : allow BUY for coins that were not loss coins at triage entry time
         "buy_mode": "block_all",
-        # 손실 코인 조건부 즉시 DCA
-        # True: 손실 코인에 전략이 BUY 시그널을 내면 스케줄 기다리지 않고 즉시 DCA 허용
-        #       현금 버퍼(triage_reserved_usdt) 체크 후 통과
+        # Conditional immediate DCA on loss coins
+        # True: if a strategy emits a BUY signal on a loss coin, allow immediate DCA without
+        #       waiting for the schedule, after passing the cash buffer (triage_reserved_usdt) check
         "opportunistic_dca": False,
-        # 시장 회복 자동 해제
-        # BTC Guard OFF + PnL 개선 + 최소 경과 시간 → 트리아지 자동 종료
+        # Automatic exit on market recovery
+        # BTC Guard OFF + PnL improvement + minimum elapsed time → auto-exit triage
         "market_recovery_exit_enabled": _eb("OMA_TRIAGE_MARKET_RECOVERY_EXIT", True),
         "market_recovery_min_hours": _ef("OMA_TRIAGE_MARKET_RECOVERY_MIN_HOURS", 2.0),
-        # 매수 후 이 시간(분) 이내는 손실 코인으로 카운트 안 함
-        # 매수 직후 수수료+스프레드 때문에 오발동 방지
+        # Coins are not counted as loss coins within this many minutes after a buy
+        # Prevents false triggers from fees + spread right after a buy
         "loss_grace_min": _ef("OMA_TRIAGE_LOSS_GRACE_MIN", 30.0),
-        # 병렬 복구: 동시에 DCA 복구할 최대 코인 수
+        # Parallel recovery: max number of coins to DCA-recover concurrently
         "max_concurrent_targets": int(_ef("OMA_TRIAGE_MAX_CONCURRENT", 3)),
-        # 긴급 탈출: 시장 상황에 따라 수익 목표를 동적으로 낮춤
+        # Emergency exit: dynamically lower the profit target based on market conditions
         "emergency_exit_enabled": _eb("OMA_TRIAGE_EMERGENCY_EXIT", True),
         "emergency_moderate_avg_loss_pct": _ef("OMA_TRIAGE_EMERGENCY_MODERATE_PCT", -10.0),
         "emergency_severe_avg_loss_pct": _ef("OMA_TRIAGE_EMERGENCY_SEVERE_PCT", -30.0),
@@ -95,14 +95,14 @@ def _load_settings_from_env() -> Dict[str, Any]:
 
 class TriageManager:
     """
-    포트폴리오 트리아지 모드 상태 머신.
+    Portfolio triage mode state machine.
 
-    7상태: NORMAL → TRIAGE_INIT → TRIAGE_SCAN → TRIAGE_DCA
-           → TRIAGE_WAIT → TRIAGE_SELL → TRIAGE_EXIT → NORMAL
+    7 states: NORMAL → TRIAGE_INIT → TRIAGE_SCAN → TRIAGE_DCA
+              → TRIAGE_WAIT → TRIAGE_SELL → TRIAGE_EXIT → NORMAL
 
-    핵심 원리:
-      - 손실 코인 1개씩 DCA 물타기 → 본전+α 매도로 순차 복구
-      - 복구 중 신규 BUY 전면 차단 (hyper_system._triage_entry_blocked)
+    Core principle:
+      - DCA into one loss coin at a time → recover sequentially by selling at breakeven + alpha
+      - Block all new BUYs during recovery (hyper_system._triage_entry_blocked)
     """
 
     STATE_NORMAL = "NORMAL"
@@ -118,25 +118,25 @@ class TriageManager:
         self.state: str = self.STATE_NORMAL
         self.start_ts: float = 0.0
         self.trigger_reason: str = ""
-        self.active_targets: List[Dict[str, Any]] = []  # 병렬 복구 대상 (각 타겟에 state 필드)
-        self.recovered: List[Dict[str, Any]] = []              # 복구 완료
-        self.skipped: List[Dict[str, Any]] = []                # 스킵
-        self.excluded: List[Dict[str, Any]] = []               # 제외
+        self.active_targets: List[Dict[str, Any]] = []  # parallel recovery targets (each has a state field)
+        self.recovered: List[Dict[str, Any]] = []              # recovery complete
+        self.skipped: List[Dict[str, Any]] = []                # skipped
+        self.excluded: List[Dict[str, Any]] = []               # excluded
         self.initial_snapshot: Dict[str, Any] = {}
-        self._entry_equity_usdt: float = 0.0      # 진입 시점 전체 자산 (성과 측정)
+        self._entry_equity_usdt: float = 0.0      # total equity at entry time (performance measurement)
 
     # ============================================================
-    # current_target 하위 호환 프로퍼티
+    # current_target backward-compat property
     # ============================================================
 
     @property
     def current_target(self) -> Optional[Dict[str, Any]]:
-        """Backward compat: 첫 번째 active target 반환."""
+        """Backward compat: return the first active target."""
         return self.active_targets[0] if self.active_targets else None
 
     @current_target.setter
     def current_target(self, val: Optional[Dict[str, Any]]) -> None:
-        """Backward compat setter (테스트/외부 코드용)."""
+        """Backward compat setter (for tests / external code)."""
         if val is None:
             self.active_targets = []
         else:
@@ -149,7 +149,7 @@ class TriageManager:
             else:
                 self.active_targets = [val]
 
-    # 하위 호환 프로퍼티: 이전 인스턴스 변수를 current_target 내부로 위임
+    # Backward-compat properties: delegate former instance variables into current_target
     @property
     def _dca_confirmed_funds(self) -> float:
         t = self.current_target
@@ -184,39 +184,39 @@ class TriageManager:
             t["sell_submitted_ts"] = val
 
     # ============================================================
-    # DCA 체결 확인 (order_fsm buy-fill callback에서 호출)
+    # DCA fill confirmation (called from order_fsm buy-fill callback)
     # ============================================================
 
     def on_dca_fill_confirmed(self, *, market: str, entry_price: float,
                                qty: float, funds: float, fee: float) -> None:
-        """order_fsm buy-fill callback → DCA 실제 체결 확인."""
+        """order_fsm buy-fill callback → confirm actual DCA fill."""
         target = self._find_target(market)
         if target is None:
             return
         target["dca_confirmed_funds"] = target.get("dca_confirmed_funds", 0.0) + funds
-        # dca_invested를 실제 체결 기준으로 보정 (ACK 시점 추정값 → 실제값)
+        # Correct dca_invested to the actual fill (ACK-time estimate → actual value)
         target["dca_invested"] = target["dca_confirmed_funds"]
         self.save_state()
         logger.info("[TriageManager] DCA fill CONFIRMED market=%s funds=%.0f total_confirmed=%.0f",
                     market, funds, target["dca_confirmed_funds"])
 
     # ============================================================
-    # 타겟 검색 헬퍼
+    # Target lookup helper
     # ============================================================
 
     def _find_target(self, market: str) -> Optional[Dict[str, Any]]:
-        """active_targets에서 market으로 타겟 검색."""
+        """Find a target by market in active_targets."""
         for t in self.active_targets:
             if t.get("market") == market:
                 return t
         return None
 
     # ============================================================
-    # 자본 예약 계산
+    # Reserved capital calculation
     # ============================================================
 
     def calc_reserved_capital(self, system: Any) -> float:
-        """모든 active target의 잔여 DCA 예산 합산 → system._triage_reserved_usdt에 반영."""
+        """Sum remaining DCA budget across all active targets → reflect in system._triage_reserved_usdt."""
         if not self.is_active() or not self.active_targets:
             return 0.0
         total = 0.0
@@ -240,41 +240,41 @@ class TriageManager:
         return total
 
     # ============================================================
-    # 진입 조건
+    # Entry conditions
     # ============================================================
 
     def should_enter(self, system: Any) -> Tuple[bool, str]:
-        """트리아지 진입 여부 판단."""
+        """Decide whether to enter triage."""
         if self.state != self.STATE_NORMAL:
             return False, "already_in_triage"
 
-        # 전체 PnL: PRM에서 재사용 (이미 30초마다 업데이트됨)
+        # Total PnL: reused from PRM (already updated every 30s)
         prm = getattr(system, "portfolio_risk_manager", None)
         total_pnl_pct: Optional[float] = None
         if prm and getattr(prm, "daily_status", None):
             total_pnl_pct = prm.daily_status.loss_pct
 
-        # per-market 손실 코인 계산 (count 트리거 + 스코어링 재료)
+        # per-market loss coin count (count trigger + scoring inputs)
         loss_coins = self._gather_loss_coins(system)
 
-        trigger_pnl = float(self.settings["trigger_pnl_pct"])   # 예: -5.0
-        trigger_count = int(self.settings["trigger_loss_count"])  # 예: 5
+        trigger_pnl = float(self.settings["trigger_pnl_pct"])   # e.g. -5.0
+        trigger_count = int(self.settings["trigger_loss_count"])  # e.g. 5
 
-        # [FIX 2026-03-23] 트리아지 진입 조건 정상화
-        # 두 조건 모두 손실 코인이 trigger_loss_count 이상 존재해야 발동
-        # PnL만 나쁘고 포지션이 없거나 적으면 트리아지가 할 일이 없음
+        # [FIX 2026-03-23] Normalize triage entry conditions
+        # Both conditions require at least trigger_loss_count loss coins to fire
+        # If only PnL is bad but there are few/no positions, triage has nothing to do
         _n_loss = len(loss_coins)
         if _n_loss < trigger_count:
             return False, f"ok: pnl={total_pnl_pct:.1f}%, loss_coins={_n_loss} < {trigger_count}"
 
-        # 손실 코인 >= trigger_count 확인됨 → PnL 조건 OR 코인 수 조건
+        # loss coins >= trigger_count confirmed → PnL condition OR coin-count condition
         if total_pnl_pct is not None and total_pnl_pct <= trigger_pnl:
             return True, f"total_pnl={total_pnl_pct:.2f}% <= {trigger_pnl}% (loss_coins={_n_loss})"
 
-        return True, f"loss_coins={_n_loss} >= {trigger_count}개"
+        return True, f"loss_coins={_n_loss} >= {trigger_count}"
 
     def _gather_loss_coins(self, system: Any) -> List[Dict[str, Any]]:
-        """현재 포지션에서 손실 코인 목록을 수집."""
+        """Collect the list of loss coins from current positions."""
         from app.core.hyper_price_store import price_store
 
         result = []
@@ -282,7 +282,7 @@ class TriageManager:
             coordinator = getattr(system, "coordinator", None)
             if not coordinator:
                 return result
-            # [FIX] lock 보호 + dict 복사로 순회 중 RuntimeError 방지
+            # [FIX] lock protection + dict copy to avoid RuntimeError during iteration
             contexts = coordinator.get_contexts() if hasattr(coordinator, "get_contexts") else dict(getattr(coordinator, "contexts", {}))
             for market, ctx in contexts.items():
                 pos = getattr(ctx, "position", None)
@@ -292,21 +292,22 @@ class TriageManager:
                 avg_buy = float(pos.get("entry", 0.0) or 0.0)
                 if qty <= 0 or avg_buy <= 0:
                     continue
-                # [2026-03-30] 먼지코인 제외: 투자금 5 USDT 미만은 loss_coin 집계 안 함
+                # [2026-03-30] Exclude dust coins: investments under 5 USDT are not counted as loss_coins
                 if avg_buy * qty < 5.0:
                     continue
-                # [FIX 2026-03-22] price_store.get()는 오더북 dict를 반환하므로
-                # get_price()로 float을 가져와야 함.
-                # 가격이 없으면(재시작 직후 등) avg_buy 폴백 시 pnl=0%로 오분류되므로
-                # 스킵하여 가격이 들어올 때까지 대기 (_handle_scan 재시도 로직과 연동)
+                # [FIX 2026-03-22] price_store.get() returns an orderbook dict, so
+                # use get_price() to fetch a float.
+                # If price is missing (e.g. right after restart), falling back to avg_buy
+                # would misclassify as pnl=0%, so skip and wait until price arrives
+                # (works with the _handle_scan retry logic)
                 current_price = price_store.get_price(market)
                 if current_price is None:
                     continue
                 invested = avg_buy * qty
                 current_val = current_price * qty
                 pnl_pct = (current_price - avg_buy) / avg_buy * 100
-                # [FIX 2026-03-24] 매수 후 N분 이내는 손실 카운트 제외
-                # 매수 직후 수수료+스프레드로 트리아지 오발동 방지
+                # [FIX 2026-03-24] Exclude from loss count within N minutes after a buy
+                # Prevents false triage triggers from fees + spread right after a buy
                 import time as _time
                 _grace_min = float(self.settings.get("loss_grace_min", 30.0))
                 _entry_ts = float(getattr(ctx, "_last_buy_fill_ts", 0) or
@@ -328,24 +329,24 @@ class TriageManager:
         return result
 
     # ============================================================
-    # 긴급 탈출: 동적 수익 목표 계산
+    # Emergency exit: dynamic profit target calculation
     # ============================================================
 
     def get_effective_profit_target(self, system: Any) -> Tuple[float, str]:
-        """시장 상황에 따른 동적 수익 목표 반환.
+        """Return a dynamic profit target based on market conditions.
 
         Returns:
             (profit_target_pct, reason)
-            - 정상: (settings.profit_target_pct, "normal")
-            - 경고: (profit_target_pct * 0.5, "moderate")
-            - 긴급: (0.0, "emergency")  ← 수수료만 커버하면 즉시 탈출
+            - normal:    (settings.profit_target_pct, "normal")
+            - moderate:  (profit_target_pct * 0.5, "moderate")
+            - emergency: (0.0, "emergency")  ← exit immediately once fees are covered
         """
         base_target = float(self.settings["profit_target_pct"])
 
         if not self.settings.get("emergency_exit_enabled", True):
             return base_target, "normal"
 
-        # 손실 코인 평균 깊이 계산
+        # Compute average loss depth of loss coins
         avg_loss = self._calc_avg_loss_depth(system)
         if avg_loss is None:
             return base_target, "normal"
@@ -355,11 +356,11 @@ class TriageManager:
 
         btc_guard = bool(getattr(system, "btc_guard_mode", False))
 
-        # 긴급: avg_loss가 severe 임계값 이하 OR (BTC Guard ON + avg_loss > moderate 수준)
+        # Emergency: avg_loss at or below severe threshold OR (BTC Guard ON + avg_loss beyond moderate level)
         if avg_loss <= severe_threshold or (btc_guard and avg_loss <= moderate_threshold * 2):
             return 0.0, f"emergency(avg={avg_loss:.1f}%,btc_guard={btc_guard})"
 
-        # 경고: avg_loss가 moderate 임계값 이하
+        # Moderate: avg_loss at or below moderate threshold
         if avg_loss <= moderate_threshold:
             reduced = round(base_target * 0.5, 3)
             return reduced, f"moderate(avg={avg_loss:.1f}%)"
@@ -367,7 +368,7 @@ class TriageManager:
         return base_target, "normal"
 
     def _calc_avg_loss_depth(self, system: Any) -> Optional[float]:
-        """전체 손실 코인의 평균 손실률(%) 계산."""
+        """Compute the average loss rate (%) across all loss coins."""
         try:
             loss_coins = self._gather_loss_coins(system)
             if not loss_coins:
@@ -379,11 +380,11 @@ class TriageManager:
             return None
 
     # ============================================================
-    # 트리아지 진입
+    # Triage entry
     # ============================================================
 
     def enter_triage(self, system: Any, reason: str) -> None:
-        """트리아지 모드 진입. BUY 차단 + 스냅샷 저장."""
+        """Enter triage mode. Block BUY + save snapshot."""
         self.state = self.STATE_SCAN
         self.start_ts = time.time()
         self.trigger_reason = reason
@@ -392,14 +393,14 @@ class TriageManager:
         self.excluded = []
         self.active_targets = []
 
-        # 성과 측정: 진입 시점 전체 자산
+        # Performance measurement: total equity at entry time
         self._entry_equity_usdt = float(getattr(system, "_last_equity_usdt", 0.0) or 0.0)
 
-        # 초기 스냅샷
+        # Initial snapshot
         loss_coins = self._gather_loss_coins(system)
         prm = getattr(system, "portfolio_risk_manager", None)
         total_pnl = (prm.daily_status.loss_pct if prm and prm.daily_status else None)
-        # 시장 회복 해제용 스냅샷: BTC Guard 상태 + 총 PnL
+        # Snapshot for market-recovery exit: BTC Guard state + total PnL
         _btc_guard_at_entry = bool(getattr(system, "btc_guard_mode", False))
 
         self.initial_snapshot = {
@@ -414,7 +415,7 @@ class TriageManager:
         system._triage_entry_blocked = True
         self.save_state()
 
-        # 원장 기록
+        # Ledger record
         try:
             system.ledger.append(
                 "TRIAGE_ENTERED",
@@ -423,31 +424,31 @@ class TriageManager:
                 loss_coin_count=len(loss_coins),
             )
         except (AttributeError, TypeError) as exc:
-            logger.warning("[TRIAGE] 원장 기록: %s", exc, exc_info=True)
+            logger.warning("[TRIAGE] ledger record: %s", exc, exc_info=True)
 
-        # 텔레그램
+        # Telegram
         if self.settings.get("notify"):
             try:
                 system._send_telegram_safe(
-                    f"🏥 [TRIAGE] 진입\n사유: {reason}\n"
-                    f"손실 코인: {len(loss_coins)}개\n신규 매수 차단됨"
+                    f"🏥 [TRIAGE] entered\nreason: {reason}\n"
+                    f"loss coins: {len(loss_coins)}\nnew buys blocked"
                 )
             except (AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[TRIAGE] 텔레그램: %s", exc, exc_info=True)
+                logger.warning("[TRIAGE] telegram: %s", exc, exc_info=True)
 
         logger.info("[TriageManager] ENTERED reason=%s loss_coins=%d", reason, len(loss_coins))
 
     # ============================================================
-    # 복구 대상 선정
+    # Recovery target selection
     # ============================================================
 
     def select_recovery_target(self, system: Any) -> Optional[Dict[str, Any]]:
-        """score 기반으로 복구 가능성이 가장 높은 코인 1개 선정."""
+        """Select the single coin with the highest recovery likelihood based on score."""
         from app.core.hyper_price_store import price_store
         from app.strategy import indicators
 
         loss_coins = self._gather_loss_coins(system)
-        exclude_pct = float(self.settings["max_loss_exclude_pct"])  # 예: -30.0
+        exclude_pct = float(self.settings["max_loss_exclude_pct"])  # e.g. -30.0
         min_val = float(self.settings["min_position_usdt"])
 
         done_markets = set(
@@ -468,12 +469,12 @@ class TriageManager:
             invested = coin["invested"]
             current_val = coin["current_val"]
 
-            # 제외 조건
+            # Exclusion conditions
             ctx = None
             try:
                 ctx = system.coordinator.get_context(market)
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-                logger.warning("[TRIAGE] 제외 조건: %s", exc, exc_info=True)
+                logger.warning("[TRIAGE] exclusion conditions: %s", exc, exc_info=True)
 
             if getattr(ctx, "longhold", False) or getattr(ctx, "is_longhold", False):
                 new_excluded.append({"market": market, "reason": "longhold"})
@@ -485,11 +486,11 @@ class TriageManager:
                 new_excluded.append({"market": market, "reason": "dust"})
                 continue
 
-            # 스코어링
+            # Scoring
             closeness = max(0.0, 100.0 / max(1.0, abs(pnl_pct))) * 3.0
             capital = min(50.0, invested / 100_000.0)
 
-            # RSI (과매도일수록 반등 기대)
+            # RSI (the more oversold, the higher the bounce expectation)
             rsi_score = 0.0
             try:
                 tick_prices = getattr(ctx, "_tick_prices", None) if ctx else None
@@ -498,25 +499,25 @@ class TriageManager:
                     if rsi_val is not None and rsi_val < 40:
                         rsi_score = (40.0 - rsi_val) * 2.5
             except (KeyError, AttributeError, TypeError) as exc:
-                logger.warning("[TRIAGE] RSI (과매도일수록 반등 기대): %s", exc, exc_info=True)
+                logger.warning("[TRIAGE] RSI (oversold bounce expectation): %s", exc, exc_info=True)
 
-            # 거래량 (24h — tick_prices 변동성으로 근사)
+            # Volume (24h — approximated by tick_prices volatility)
             vol_score = 0.0
             try:
                 if tick_prices and len(tick_prices) >= 5:
-                    # 최근 가격 변동 범위로 유동성 근사
+                    # Approximate liquidity from the recent price range
                     hi = max(tick_prices[-20:]) if len(tick_prices) >= 20 else max(tick_prices)
                     lo = min(tick_prices[-20:]) if len(tick_prices) >= 20 else min(tick_prices)
                     if lo > 0:
                         range_pct = (hi - lo) / lo * 100
                         vol_score = min(50.0, range_pct * 2.0) * 1.5
             except (TypeError, ValueError) as exc:
-                logger.warning("[TRIAGE] 최근 가격 변동 범위로 유동성 근사: %s", exc, exc_info=True)
+                logger.warning("[TRIAGE] approximate liquidity from recent price range: %s", exc, exc_info=True)
 
             total_score = closeness + capital + rsi_score + vol_score
             scored.append({**coin, "score": round(total_score, 1), "rsi_score": rsi_score})
 
-        # 신규 excluded 업데이트 (중복 없이)
+        # Update newly excluded (without duplicates)
         ex_markets = {e["market"] for e in self.excluded}
         for e in new_excluded:
             if e["market"] not in ex_markets:
@@ -533,11 +534,11 @@ class TriageManager:
         return best
 
     # ============================================================
-    # DCA 시작
+    # DCA start
     # ============================================================
 
     def start_recovery(self, target: Dict[str, Any], system: Any = None) -> None:
-        """선정된 코인에 대해 DCA 복구 계획 수립 → active_targets에 추가."""
+        """Build a DCA recovery plan for the selected coin → add to active_targets."""
         new_target = {
             "market": target["market"],
             "state": "DCA",
@@ -576,13 +577,13 @@ class TriageManager:
                     target["market"], new_target["dca_splits_total"], len(self.active_targets))
 
     def _calc_splits(self, pnl_pct: float, ctx: Any = None, system: Any = None) -> int:
-        """손실 깊이 + 시장 상황 기반 DCA 분할 횟수 결정.
+        """Determine the number of DCA splits based on loss depth + market conditions.
 
-        기본: 손실 깊이 → 2/3/4
-        동적 조정: RSI 과매도 → +1, 고변동성 → +1, BTC 하락 → +1
-        범위: 2~6 (분할 많을수록 보수적)
+        Base: loss depth → 2/3/4
+        Dynamic adjustment: RSI oversold → +1, high volatility → +1, BTC downtrend → +1
+        Range: 2~6 (more splits = more conservative)
         """
-        # 기본 분할
+        # Base splits
         if pnl_pct > -5:
             base = 2
         elif pnl_pct > -10:
@@ -598,31 +599,31 @@ class TriageManager:
                 rsi_val = indicators.rsi(tick_prices, 14)
                 vol = indicators.volatility(tick_prices, 14)
 
-                # RSI 과매도(< 30): 반등 기대 높음 → 분할 줄여 초기 비중 확대
+                # RSI oversold (< 30): high bounce expectation → fewer splits to front-load the position
                 if rsi_val is not None and rsi_val < 30:
                     adjust -= 1
 
-                # 고변동성(> 8%): 추가 하락 가능 → 분할 늘려 보수적
+                # High volatility (> 8%): further downside possible → more splits, more conservative
                 if vol is not None and vol > 8.0:
                     adjust += 1
 
-            # BTC 하락 추세: 전체 시장 약세 → 분할 늘려 보수적
+            # BTC downtrend: overall market weakness → more splits, more conservative
             if system and getattr(system, "btc_guard_mode", False):
                 adjust += 1
         except (KeyError, AttributeError, TypeError) as exc:
-            logger.warning("[TRIAGE] BTC 하락 추세: 전체 시장 약세 → 분할 늘려 보수적: %s", exc, exc_info=True)
+            logger.warning("[TRIAGE] BTC downtrend / market weakness conservative split: %s", exc, exc_info=True)
 
         return max(2, min(6, base + adjust))
 
     # ============================================================
-    # DCA 실행 (system에서 bg_executor로 오프로드)
+    # DCA execution (offloaded to bg_executor by system)
     # ============================================================
 
     def execute_dca_step(self, target_or_system, system=None) -> None:
-        """DCA 분할 매수 한 스텝 실행 (executor에서 호출).
+        """Execute one DCA split-buy step (called from executor).
 
-        중복 방지는 order_fsm의 ctx.order_state 체크가 담당.
-        하위 호환: execute_dca_step(system) → current_target 사용
+        Duplicate prevention is handled by order_fsm's ctx.order_state check.
+        Backward compat: execute_dca_step(system) → uses current_target
         """
         if system is None:
             system = target_or_system
@@ -641,14 +642,14 @@ class TriageManager:
         splits_done = target["dca_splits_done"]
 
         if splits_done >= splits_total:
-            # DCA 완료 → WAIT 상태로 전환
+            # DCA complete → transition to WAIT state
             target["state"] = "WAIT"
             self._update_display_state()
             self.save_state()
             logger.info("[TriageManager] DCA complete → WAIT market=%s", market)
             return
 
-        # 예산 계산
+        # Budget calculation
         try:
             from app.core.hyper_price_store import price_store
             ctx = system.coordinator.get_context(market)
@@ -670,7 +671,7 @@ class TriageManager:
             already_invested = target["dca_invested"]
             remaining_budget = max(0.0, max_additional - already_invested)
 
-            # ★ 글로벌 DCA 캡: 전체 포트폴리오의 N%까지만 DCA 허용 (업비트 동기화 2026-04-05)
+            # ★ Global DCA cap: allow DCA up to only N% of the total portfolio (Upbit sync 2026-04-05)
             global_cap_pct = float(self.settings.get("global_dca_cap_pct", 30.0))
             total_equity = float(getattr(system, "_last_equity_usdt", 0.0) or getattr(system, "_last_cash_usdt", 0.0) or 0.0)
             if total_equity > 0:
@@ -685,34 +686,34 @@ class TriageManager:
             remaining_splits = splits_total - splits_done
             per_split = remaining_budget / max(1, remaining_splits)
 
-            # 동적 예산 조정: RSI 과매도 시 비중 확대, BTC 하락 시 축소
+            # Dynamic budget adjustment: increase weight when RSI oversold, decrease on BTC downtrend
             try:
                 from app.strategy import indicators
                 tick_prices = getattr(ctx, "_tick_prices", None)
                 if tick_prices and len(tick_prices) >= 15:
                     rsi_val = indicators.rsi(tick_prices, 14)
                     if rsi_val is not None:
-                        if rsi_val < 30:       # 강한 과매도 → 20% 확대
+                        if rsi_val < 30:       # strong oversold → +20%
                             per_split *= 1.2
-                        elif rsi_val > 60:     # 반등 진행 중 → 15% 축소
+                        elif rsi_val > 60:     # bounce in progress → -15%
                             per_split *= 0.85
                 if getattr(system, "btc_guard_mode", False):
-                    per_split *= 0.7           # BTC 하락 추세 → 30% 축소
+                    per_split *= 0.7           # BTC downtrend → -30%
             except (KeyError, AttributeError, TypeError) as exc:
-                logger.warning("[TRIAGE] 동적 예산 조정: RSI 과매도 시 비중 확대, BTC 하락 시 축소: %s", exc, exc_info=True)
+                logger.warning("[TRIAGE] dynamic budget adjustment (RSI oversold up, BTC down down): %s", exc, exc_info=True)
 
-            # 최소 주문 체크
+            # Minimum order check
             min_order = float(getattr(system, "min_order_usdt", 5.0))
             if per_split < min_order:
                 logger.info("[TriageManager] DCA skip: per_split=%.0f < min_order=%.0f market=%s",
                             per_split, min_order, market)
-                # 자본 부족 → WAIT으로 전환
+                # Insufficient capital → transition to WAIT
                 target["state"] = "WAIT"
                 self._update_display_state()
                 self.save_state()
                 return
 
-            # 가용 현금 체크
+            # Available cash check
             avail_usdt = float(getattr(system, "_last_cash_usdt", 0.0) or 0.0)
             per_split = min(per_split, avail_usdt * 0.95)
             if per_split < min_order:
@@ -744,14 +745,14 @@ class TriageManager:
                         note="ack_not_fill",
                     )
                 except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                    logger.warning("[TRIAGE] 가용 현금 체크: %s", exc, exc_info=True)
+                    logger.warning("[TRIAGE] ledger append (DCA step): %s", exc, exc_info=True)
                 logger.info("[TriageManager] DCA step %d/%d market=%s usdt=%.0f (ACK, fill pending)",
                             target["dca_splits_done"], splits_total, market, per_split)
                 try:
                     reserved = self.calc_reserved_capital(system)
                     system._triage_reserved_usdt = reserved
                 except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-                    logger.warning("[TRIAGE] 가용 현금 체크: %s", exc, exc_info=True)
+                    logger.warning("[TRIAGE] reserved capital update: %s", exc, exc_info=True)
             else:
                 logger.warning("[TriageManager] DCA submit failed market=%s: %s", market, msg)
 
@@ -759,11 +760,11 @@ class TriageManager:
             logger.error("[TriageManager] execute_dca_step error market=%s: %s", market, exc)
 
     # ============================================================
-    # 매도 조건 체크
+    # Sell condition check
     # ============================================================
 
     def check_sell_condition(self, target_or_system, system=None) -> Tuple[bool, str]:
-        """DCA 후 신규 평균가 기준으로 본전+α 도달 여부 확인."""
+        """Check whether breakeven + alpha is reached based on the post-DCA new average price."""
         if system is None:
             system = target_or_system
             target = self.current_target
@@ -778,7 +779,7 @@ class TriageManager:
             if not ctx or not getattr(ctx, "position", None):
                 return False, "no_position"
 
-            # DCA 후 신규 평균가 (거래소 reconcile로 업데이트됨)
+            # Post-DCA new average price (updated by exchange reconcile)
             avg_buy = float(ctx.position.get("entry", 0.0) or 0.0)
             current_price = price_store.get_price(market)
             if current_price is None:
@@ -786,8 +787,8 @@ class TriageManager:
             if avg_buy <= 0 or current_price <= 0:
                 return False, "invalid_price"
 
-            # 목표: (현재가 - DCA 후 평균가) / DCA 후 평균가 >= profit_target + fee
-            # 긴급 탈출: 시장 상황에 따라 profit_target을 동적으로 낮춤
+            # Target: (price - post-DCA avg) / post-DCA avg >= profit_target + fee
+            # Emergency exit: dynamically lower profit_target based on market conditions
             effective_target, severity = self.get_effective_profit_target(system)
             self._last_emergency_info = {"target_pct": effective_target, "severity": severity}
             target_pct = effective_target + float(self.settings["fee_pct"])
@@ -802,7 +803,7 @@ class TriageManager:
             return False, f"error: {exc}"
 
     def is_coin_timeout(self, target=None) -> bool:
-        """해당 코인 복구 시도 시간 초과 여부."""
+        """Whether the recovery attempt for this coin has timed out."""
         if target is None:
             target = self.current_target
             if target is None:
@@ -812,11 +813,11 @@ class TriageManager:
         return elapsed > timeout_sec
 
     # ============================================================
-    # 매도 실행
+    # Sell execution
     # ============================================================
 
     def execute_sell(self, target_or_system, system=None) -> None:
-        """타겟 마켓 전량 시장가 매도."""
+        """Market-sell the entire target position."""
         if system is None:
             system = target_or_system
             target = self.current_target
@@ -864,7 +865,7 @@ class TriageManager:
                 try:
                     system.ledger.append("TRIAGE_SELL_FAILED", market=market, error=str(msg))
                 except (AttributeError, TypeError, ValueError) as exc:
-                    logger.warning("[TRIAGE] triage_manager fallback: %s", exc, exc_info=True)
+                    logger.warning("[TRIAGE] ledger append (sell failed): %s", exc, exc_info=True)
                 target["state"] = "WAIT"
                 self._update_display_state()
                 self.save_state()
@@ -875,11 +876,11 @@ class TriageManager:
             self.save_state()
 
     # ============================================================
-    # 매도 완료 감지
+    # Sell completion detection
     # ============================================================
 
     def is_sell_complete(self, target_or_system, system=None) -> bool:
-        """매도 완료 여부: position qty ≈ 0 이거나 5분 타임아웃."""
+        """Sell completion: position qty ≈ 0 or 5-minute timeout."""
         if system is None:
             system = target_or_system
             target = self.current_target
@@ -889,10 +890,10 @@ class TriageManager:
             target = target_or_system
         market = target["market"]
 
-        # 타임아웃 체크 (부분 체결 등으로 무한 대기 방지)
+        # Timeout check (prevents infinite wait on partial fills, etc.)
         sell_timeout = float(self.settings.get("sell_timeout_sec", 300.0))
         if (time.time() - target.get("sell_submitted_ts", 0.0)) > sell_timeout:
-            # 잔량 확인 후 재매도 시도 (1회만)
+            # Check remaining qty then retry sell (once only)
             try:
                 ctx = system.coordinator.get_context(market)
                 remaining_qty = float(ctx.position.get("qty", 0.0) or 0.0) if ctx and getattr(ctx, "position", None) else 0.0
@@ -907,16 +908,16 @@ class TriageManager:
                             expected_price=expected_price, reason="triage:tp_hit_retry",
                         )
                     except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                        logger.warning("[TRIAGE] 잔량 확인 후 재매도 시도 (1회만): %s", exc, exc_info=True)
+                        logger.warning("[TRIAGE] retry sell after checking remaining qty (once): %s", exc, exc_info=True)
                     target["sell_submitted_ts"] = time.time()
                     return False
             except (OSError, KeyError, AttributeError, TypeError, ValueError, OverflowError) as exc:
-                logger.warning("[TRIAGE] 잔량 확인 후 재매도 시도 (1회만): %s", exc, exc_info=True)
+                logger.warning("[TRIAGE] retry sell after checking remaining qty (once): %s", exc, exc_info=True)
             logger.warning("[TriageManager] SELL timeout market=%s — forcing advance", market)
             target["_sell_retry_done"] = False
             return True
 
-        # position qty 체크
+        # position qty check
         try:
             ctx = system.coordinator.get_context(market)
             if not ctx or not getattr(ctx, "position", None):
@@ -928,11 +929,11 @@ class TriageManager:
             return False
 
     # ============================================================
-    # 복구 완료 처리
+    # Recovery completion handling
     # ============================================================
 
     def on_recovery_complete(self, target_or_system, system=None) -> None:
-        """마켓 복구 완료 → recovered 추가, active_targets에서 제거."""
+        """Market recovery complete → add to recovered, remove from active_targets."""
         if system is None:
             system = target_or_system
             target = self.current_target
@@ -942,7 +943,7 @@ class TriageManager:
             target = target_or_system
         market = target["market"]
 
-        # 수익 계산: execute_sell() 시점 스냅샷 우선, fallback 순서
+        # Profit calc: prefer the execute_sell() snapshot, then fallback order
         profit_usdt = 0.0
         try:
             from app.core.hyper_price_store import price_store
@@ -967,7 +968,7 @@ class TriageManager:
                 fee = (total_cost + total_revenue) * 0.001
                 profit_usdt = total_revenue - total_cost - fee
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[TRIAGE] 수익 계산: execute_sell() 시점 스냅샷 우선, fallback 순서: %s", exc, exc_info=True)
+            logger.warning("[TRIAGE] profit calc (prefer execute_sell snapshot, then fallback): %s", exc, exc_info=True)
 
         self.recovered.append({
             "market": market,
@@ -988,27 +989,27 @@ class TriageManager:
                 remaining_targets=len(self.active_targets),
             )
         except (TypeError, ValueError) as exc:
-            logger.warning("[TRIAGE] triage_manager fallback: %s", exc, exc_info=True)
+            logger.warning("[TRIAGE] ledger append (recovered): %s", exc, exc_info=True)
 
         if self.settings.get("notify"):
             try:
                 system._send_telegram_safe(
-                    f"✅ [TRIAGE] {market} 복구 완료!\n"
-                    f"복구 수익(추산): {profit_usdt:+,.2f} USDT\n"
-                    f"완료: {len(self.recovered)}건 / 진행중: {len(self.active_targets)}건"
+                    f"✅ [TRIAGE] {market} recovered!\n"
+                    f"recovery profit (est.): {profit_usdt:+,.2f} USDT\n"
+                    f"done: {len(self.recovered)} / in progress: {len(self.active_targets)}"
                 )
             except (AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[TRIAGE] triage_manager fallback: %s", exc, exc_info=True)
+                logger.warning("[TRIAGE] telegram notify (recovered): %s", exc, exc_info=True)
 
         logger.info("[TriageManager] RECOVERED market=%s profit≈%.0f remaining=%d",
                     market, profit_usdt, len(self.active_targets))
 
     # ============================================================
-    # 스킵
+    # Skip
     # ============================================================
 
     def skip_target(self, target: Dict[str, Any], system: Any, reason: str = "manual") -> None:
-        """복구 대상 건너뜀 → active_targets에서 제거."""
+        """Skip a recovery target → remove from active_targets."""
         market = target["market"]
         self.skipped.append({"market": market, "reason": reason, "ts": time.time()})
         self._remove_target_from_list(target)
@@ -1024,12 +1025,12 @@ class TriageManager:
                     market, reason, len(self.active_targets))
 
     def skip_current_target(self, system: Any, reason: str = "manual") -> None:
-        """하위 호환: 첫 번째 active target 스킵."""
+        """Backward compat: skip the first active target."""
         if self.active_targets:
             self.skip_target(self.active_targets[0], system, reason)
 
     def _remove_target_from_list(self, target: Dict[str, Any]) -> None:
-        """active_targets에서 타겟 제거 (참조 비교)."""
+        """Remove a target from active_targets (identity comparison)."""
         self.active_targets = [t for t in self.active_targets if t is not target]
 
     def _remove_target(self, target: Dict[str, Any], system: Any, recovered: bool) -> None:
@@ -1041,12 +1042,12 @@ class TriageManager:
             self.save_state()
 
     def _update_display_state(self) -> None:
-        """active_targets 상태로 글로벌 display state 갱신."""
+        """Update the global display state from active_targets states."""
         if not self.active_targets:
             if self.is_active():
                 self.state = self.STATE_SCAN
             return
-        # 우선순위: SELL > WAIT > DCA
+        # Priority: SELL > WAIT > DCA
         states = {t.get("state", "DCA") for t in self.active_targets}
         if "SELL" in states:
             self.state = self.STATE_SELL
@@ -1056,43 +1057,43 @@ class TriageManager:
             self.state = self.STATE_DCA
 
     # ============================================================
-    # 종료 조건
+    # Exit conditions
     # ============================================================
 
     def should_exit_triage(self, system: Optional[Any] = None) -> Tuple[bool, str]:
-        """트리아지 종료 여부 판단 (4가지 조건).
+        """Decide whether to exit triage (4 conditions).
 
-        [FIX 2026-03-22] 즉시 종료 버그 3건 수정 (2차 리뷰):
-          1) min_duration_guard: 60초 미만에서는 종료 불가
-             - 이전: 진입 후 5초 만에 poll() 첫 호출 시 즉시 종료 가능했음
-          2) ALL 조건: initial_count=0이면 스킵
-             - 이전: 진입 직후 가격 미확보 → loss_coin_count=0 →
-                     _count_remaining_loss_coins()=0 → "all_recovered" 즉시 반환
-          3) PnL 조건: initial_pnl < exit_pnl일 때만 체크
-             - 이전: prm.daily_status.loss_pct(0.0) >= exit_pnl(-2.0) →
-                     진입 당시 손실이 없어도 "pnl_recovered" 즉시 반환
+        [FIX 2026-03-22] Fixed 3 immediate-exit bugs (2nd review):
+          1) min_duration_guard: cannot exit before 60 seconds
+             - Before: could exit immediately on the first poll() call 5s after entry
+          2) ALL condition: skip if initial_count=0
+             - Before: right after entry, price unavailable → loss_coin_count=0 →
+                       _count_remaining_loss_coins()=0 → returned "all_recovered" immediately
+          3) PnL condition: only check when initial_pnl < exit_pnl
+             - Before: prm.daily_status.loss_pct(0.0) >= exit_pnl(-2.0) →
+                       returned "pnl_recovered" immediately even with no loss at entry
         """
         elapsed = time.time() - self.start_ts
 
-        # [FIX] 최소 60초 보호 — 진입 직후 오판 방지
+        # [FIX] Minimum 60s guard — prevent misjudgment right after entry
         if elapsed < 60:
             return False, f"min_duration_guard: {elapsed:.0f}s < 60s"
 
-        # 조건 1: 복구 목표 달성
+        # Condition 1: recovery target reached
         target_str = str(self.settings.get("recovery_target", "ALL")).strip()
         initial_count = self.initial_snapshot.get("loss_coin_count", 0)
         recovered_count = len(self.recovered)
 
         if target_str == "ALL":
-            # [FIX] initial_count=0이면 스킵 — 스냅샷이 미확정 상태
-            # (_handle_scan에서 첫 타겟 발견 시 보정됨)
+            # [FIX] Skip if initial_count=0 — snapshot not yet finalized
+            # (corrected in _handle_scan when the first target is found)
             if initial_count > 0:
                 loss_coins_remaining = self._count_remaining_loss_coins(system)
                 if loss_coins_remaining == 0:
                     return True, f"all_recovered: {recovered_count} recovered"
         elif target_str.replace(".", "").isdigit():
-            # [FIX 2026-03-24] "."포함 → 비율(0.0~1.0), 정수 → 개수
-            # "0.8" → 80% 복구, "3" → 3개 복구, "1.0" → 100% 복구, "1" → 1개 복구
+            # [FIX 2026-03-24] contains "." → ratio (0.0~1.0), integer → count
+            # "0.8" → recover 80%, "3" → recover 3, "1.0" → recover 100%, "1" → recover 1
             if "." in target_str:
                 val = max(0.0, min(1.0, float(target_str)))
                 if initial_count > 0 and recovered_count / initial_count >= val:
@@ -1102,9 +1103,9 @@ class TriageManager:
                 if recovered_count >= val:
                     return True, f"count_target: {recovered_count}>={val}"
 
-        # 조건 2: 전체 PnL 회복
-        # [FIX] 진입 당시 PnL이 exit_pnl보다 나빴을 때만 체크
-        # (진입 시 0.0%였는데 0.0% >= -2.0% 즉시 참이 되던 버그 수정)
+        # Condition 2: total PnL recovered
+        # [FIX] Only check when PnL at entry was worse than exit_pnl
+        # (fixes the bug where 0.0% at entry made 0.0% >= -2.0% immediately true)
         if system:
             prm = getattr(system, "portfolio_risk_manager", None)
             if prm and getattr(prm, "daily_status", None):
@@ -1114,15 +1115,15 @@ class TriageManager:
                 if initial_pnl < exit_pnl and current_pnl >= exit_pnl:
                     return True, f"pnl_recovered: {current_pnl:.2f}% >= {exit_pnl}%"
 
-        # 조건 3: 시장 회복 자동 해제
-        # BTC Guard OFF(회복) + 총 PnL이 진입 시점보다 개선 + 최소 경과 시간
-        # 전체 시장이 동반 하락 → 트리아지 진입 → 시장 회복 시 자동 해제하여 정상 매매 재개
+        # Condition 3: automatic exit on market recovery
+        # BTC Guard OFF (recovered) + total PnL improved vs entry + minimum elapsed time
+        # Whole market fell together → entered triage → on market recovery, auto-exit and resume normal trading
         if self.settings.get("market_recovery_exit_enabled", True) and system:
             _min_h = float(self.settings.get("market_recovery_min_hours", 2.0))
             if elapsed >= _min_h * 3600:
                 _btc_guard_now = bool(getattr(system, "btc_guard_mode", False))
                 if not _btc_guard_now:
-                    # BTC Guard OFF 확인 — PnL 개선도 확인
+                    # BTC Guard OFF confirmed — also confirm PnL improvement
                     _prm = getattr(system, "portfolio_risk_manager", None)
                     _cur_pnl = (_prm.daily_status.loss_pct
                                 if _prm and getattr(_prm, "daily_status", None) else None)
@@ -1135,7 +1136,7 @@ class TriageManager:
                                 f"elapsed={elapsed/3600:.1f}h"
                             )
 
-        # 조건 4: 최대 지속 시간 초과
+        # Condition 4: max duration exceeded
         max_hours = float(self.settings["max_duration_hours"])
         if elapsed > max_hours * 3600:
             return True, f"max_duration: {elapsed/3600:.1f}h > {max_hours}h"
@@ -1143,22 +1144,22 @@ class TriageManager:
         return False, f"continuing: recovered={recovered_count}, initial={initial_count}"
 
     def _count_remaining_loss_coins(self, system: Optional[Any]) -> int:
-        """현재 손실 코인 수 (recovered + skipped 제외)."""
+        """Current number of loss coins (excluding recovered + skipped)."""
         if not system:
-            return 1  # 알 수 없으면 계속
+            return 1  # if unknown, continue
         done = {r["market"] for r in self.recovered} | {s["market"] for s in self.skipped}
         loss_coins = self._gather_loss_coins(system)
         return sum(1 for c in loss_coins if c["market"] not in done)
 
     # ============================================================
-    # 트리아지 종료
+    # Triage exit
     # ============================================================
 
     def exit_triage(self, system: Any, reason: str) -> None:
-        """트리아지 모드 종료 → 정상 복귀."""
+        """Exit triage mode → return to normal."""
         elapsed_hours = (time.time() - self.start_ts) / 3600
 
-        # 성과 측정
+        # Performance measurement
         exit_equity = float(getattr(system, "_last_equity_usdt", 0.0) or 0.0)
         entry_equity = self._entry_equity_usdt or self.initial_snapshot.get("entry_equity_usdt", 0.0)
         equity_change = exit_equity - entry_equity if entry_equity > 0 else 0.0
@@ -1167,12 +1168,12 @@ class TriageManager:
         total_dca_invested = sum(r.get("dca_invested", 0) for r in self.recovered)
 
         self.state = self.STATE_NORMAL
-        self.active_targets = []  # 모든 진행 중 타겟 정리
+        self.active_targets = []  # clear all in-progress targets
         system._triage_entry_blocked = False
-        system._triage_reserved_usdt = 0.0  # 자본 예약 해제
+        system._triage_reserved_usdt = 0.0  # release capital reservation
         self.save_state()
 
-        # 세션 히스토리 기록 (runtime/triage_history.jsonl)
+        # Record session history (runtime/triage_history.jsonl)
         self._save_session_history(
             reason=reason,
             elapsed_hours=elapsed_hours,
@@ -1202,13 +1203,13 @@ class TriageManager:
         if self.settings.get("notify"):
             try:
                 system._send_telegram_safe(
-                    f"🎉 [TRIAGE] 정상 모드 복귀\n"
-                    f"사유: {reason}\n"
-                    f"복구: {len(self.recovered)}건 / 스킵: {len(self.skipped)}건\n"
-                    f"추산 수익: {total_profit:+,.2f} USDT\n"
-                    f"자산 변동: {equity_change:+,.2f} USDT ({equity_change_pct:+.2f}%)\n"
-                    f"DCA 투입: {total_dca_invested:,.0f}원\n"
-                    f"소요: {elapsed_hours:.1f}시간"
+                    f"🎉 [TRIAGE] back to normal mode\n"
+                    f"reason: {reason}\n"
+                    f"recovered: {len(self.recovered)} / skipped: {len(self.skipped)}\n"
+                    f"est. profit: {total_profit:+,.2f} USDT\n"
+                    f"equity change: {equity_change:+,.2f} USDT ({equity_change_pct:+.2f}%)\n"
+                    f"DCA invested: {total_dca_invested:,.0f}\n"
+                    f"elapsed: {elapsed_hours:.1f}h"
                 )
             except (AttributeError, TypeError, ValueError) as exc:
                 logger.warning("[TRIAGE] telegram notify on exit: %s", exc, exc_info=True)
@@ -1217,15 +1218,15 @@ class TriageManager:
                     reason, len(self.recovered), equity_change, equity_change_pct, elapsed_hours)
 
     # ============================================================
-    # 상태 조회
+    # Status queries
     # ============================================================
 
     def is_active(self) -> bool:
-        """트리아지 활성 여부 (NORMAL 아닌 모든 상태)."""
+        """Whether triage is active (any state other than NORMAL)."""
         return self.state != self.STATE_NORMAL
 
     def get_status_dict(self) -> Dict[str, Any]:
-        """API 응답용 상태 딕셔너리."""
+        """Status dictionary for API responses."""
         elapsed_sec = (time.time() - self.start_ts) if self.start_ts else 0.0
         elapsed_hours = elapsed_sec / 3600
         return {
@@ -1237,8 +1238,8 @@ class TriageManager:
             "elapsed_hours": round(elapsed_hours, 2),
             "trigger_reason": self.trigger_reason,
             "initial_snapshot": self.initial_snapshot,
-            "current_target": self.current_target,  # 하위 호환 (첫 번째 타겟)
-            "active_targets": self.active_targets,   # 병렬 복구 전체 목록
+            "current_target": self.current_target,  # backward compat (first target)
+            "active_targets": self.active_targets,   # full list of parallel recovery targets
             "recovered": self.recovered,
             "skipped": self.skipped,
             "excluded": self.excluded,
@@ -1250,18 +1251,18 @@ class TriageManager:
         }
 
     # ============================================================
-    # 메인 상태머신 폴 (tick_loop에서 bg_executor로 호출)
+    # Main state-machine poll (called from tick_loop via bg_executor)
     # ============================================================
 
     def poll(self, system: Any) -> None:
         """
-        tick_loop에서 주기적으로 호출되는 상태머신 디스패처.
+        State-machine dispatcher called periodically from tick_loop.
 
-        병렬 복구: active_targets 각각의 state(DCA/WAIT/SELL)를 처리하고,
-        빈 슬롯이 있으면 SCAN으로 추가 타겟을 배정한다.
+        Parallel recovery: processes each active_targets state (DCA/WAIT/SELL),
+        and assigns additional targets via SCAN when there are empty slots.
         """
         try:
-            # 자동 진입 (NORMAL 상태 + enabled + 아직 진입 전)
+            # Auto-entry (NORMAL state + enabled + not yet entered)
             if self.state == self.STATE_NORMAL:
                 if self.settings.get("enabled"):
                     ok, reason = self.should_enter(system)
@@ -1269,19 +1270,19 @@ class TriageManager:
                         self.enter_triage(system, reason)
                 return
 
-            # 종료 조건 체크 (모든 활성 상태에서)
+            # Exit condition check (in all active states)
             should_exit, exit_reason = self.should_exit_triage(system)
             if should_exit:
                 self.exit_triage(system, reason=exit_reason)
                 return
 
-            # 자본 예약 갱신 (매 poll 주기)
+            # Refresh capital reservation (every poll cycle)
             try:
                 system._triage_reserved_usdt = self.calc_reserved_capital(system)
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
                 logger.warning("[TRIAGE] reserved capital refresh: %s", exc, exc_info=True)
 
-            # 각 active target 처리 (copy로 순회 — 처리 중 제거 가능)
+            # Process each active target (iterate over a copy — may be removed during processing)
             for target in list(self.active_targets):
                 tstate = target.get("state", "DCA")
                 if tstate == "DCA":
@@ -1291,13 +1292,13 @@ class TriageManager:
                 elif tstate == "SELL":
                     self._handle_target_sell(target, system)
 
-            # 빈 슬롯 채우기 (SCAN)
+            # Fill empty slots (SCAN)
             max_targets = int(self.settings.get("max_concurrent_targets", 3))
             self._fill_target_slots(max_targets, system)
 
-            # active_targets가 비고 더 이상 타겟도 없으면 종료 체크
+            # If active_targets is empty and there are no more targets, check for exit
             if not self.active_targets:
-                # should_exit_triage에서 all_recovered 등으로 처리됨 — 다음 poll에서 종료
+                # handled via all_recovered etc. in should_exit_triage — exits on next poll
                 pass
 
         except Exception as exc:
@@ -1311,12 +1312,12 @@ class TriageManager:
                     logger.warning("[TRIAGE] poll error ledger append: %s", exc, exc_info=True)
 
     def _fill_target_slots(self, max_targets: int, system: Any) -> None:
-        """빈 슬롯을 SCAN으로 채운다."""
+        """Fill empty slots via SCAN."""
         while len(self.active_targets) < max_targets:
             prev_count = len(self.active_targets)
             target = self.select_recovery_target(system)
             if target is None:
-                # 타겟 없음
+                # no target
                 if not self.active_targets:
                     no_target_count = getattr(self, "_no_target_count", 0) + 1
                     self._no_target_count = no_target_count
@@ -1329,22 +1330,22 @@ class TriageManager:
                 break
             else:
                 self._no_target_count = 0
-                # 첫 타겟 발견 시 스냅샷 보정
+                # Correct the snapshot when the first target is found
                 if self.initial_snapshot.get("loss_coin_count", 0) == 0:
                     loss_coins = self._gather_loss_coins(system)
                     self.initial_snapshot["loss_coin_count"] = len(loss_coins)
                     self.initial_snapshot["loss_coins"] = [c["market"] for c in loss_coins]
-                    logger.info("[TriageManager] initial_snapshot 보정: loss_coin_count=%d", len(loss_coins))
+                    logger.info("[TriageManager] initial_snapshot corrected: loss_coin_count=%d", len(loss_coins))
                     self.save_state()
                 self.start_recovery(target, system=system)
                 logger.info("[TriageManager] SCAN → DCA: %s (concurrent=%d)",
                             target["market"], len(self.active_targets))
-                # 안전장치: start_recovery가 실제로 타겟을 추가하지 않았으면 무한루프 방지
+                # Safety: prevent infinite loop if start_recovery did not actually add a target
                 if len(self.active_targets) <= prev_count:
                     break
 
     def _handle_target_dca(self, target: Dict[str, Any], system: Any) -> None:
-        """DCA 스텝 실행."""
+        """Execute a DCA step."""
         splits_total = target.get("dca_splits_total", 1)
         splits_done = target.get("dca_splits_done", 0)
         if splits_done < splits_total:
@@ -1355,10 +1356,10 @@ class TriageManager:
             self.save_state()
 
     def _handle_target_wait(self, target: Dict[str, Any], system: Any) -> None:
-        """목표 수익률 도달 감지."""
+        """Detect reaching the target profit rate."""
         market = target.get("market", "?")
 
-        # 포지션이 외부에 의해 소멸된 경우 자동 스킵
+        # Auto-skip if the position was cleared externally
         try:
             ctx = system.coordinator.get_context(market)
             if ctx is not None and not getattr(ctx, "position", None):
@@ -1379,23 +1380,23 @@ class TriageManager:
             self.skip_target(target, system, reason=f"coin_timeout_hold(dca={dca_invested:.0f})")
 
     def _handle_target_sell(self, target: Dict[str, Any], system: Any) -> None:
-        """매도 완료 감지."""
+        """Detect sell completion."""
         if self.is_sell_complete(target, system):
             market = target.get("market", "?")
             logger.info("[TriageManager] SELL complete → RECOVERED: %s", market)
             self.on_recovery_complete(target, system)
 
     # ============================================================
-    # 하위 호환: 이전 _handle_* 메서드 (테스트 및 외부 코드용)
+    # Backward compat: former _handle_* methods (for tests and external code)
     # ============================================================
 
     def _handle_scan(self, system: Any) -> None:
-        """하위 호환: _fill_target_slots + 첫 타겟 처리."""
+        """Backward compat: _fill_target_slots + handle first target."""
         max_targets = int(self.settings.get("max_concurrent_targets", 3))
         self._fill_target_slots(max_targets, system)
 
     def _handle_dca(self, system: Any) -> None:
-        """하위 호환: current_target의 DCA 처리."""
+        """Backward compat: handle DCA for current_target."""
         target = self.current_target
         if target is None:
             self.state = self.STATE_SCAN
@@ -1403,7 +1404,7 @@ class TriageManager:
         self._handle_target_dca(target, system)
 
     def _handle_wait(self, system: Any) -> None:
-        """하위 호환: current_target의 WAIT 처리."""
+        """Backward compat: handle WAIT for current_target."""
         target = self.current_target
         if target is None:
             self.state = self.STATE_SCAN
@@ -1411,7 +1412,7 @@ class TriageManager:
         self._handle_target_wait(target, system)
 
     def _handle_sell(self, system: Any) -> None:
-        """하위 호환: current_target의 SELL 처리."""
+        """Backward compat: handle SELL for current_target."""
         target = self.current_target
         if target is None:
             self.state = self.STATE_SCAN
@@ -1419,11 +1420,11 @@ class TriageManager:
         self._handle_target_sell(target, system)
 
     # ============================================================
-    # 세션 히스토리 (성과 측정)
+    # Session history (performance measurement)
     # ============================================================
 
     def _save_session_history(self, **kwargs) -> None:
-        """트리아지 세션 결과를 runtime/triage_history.jsonl에 추가."""
+        """Append the triage session result to runtime/triage_history.jsonl."""
         try:
             history_path = Path("runtime/triage_history.jsonl")
             history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1440,7 +1441,7 @@ class TriageManager:
             }
             with open(history_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            # 파일 크기 제한 (1MB 초과 시 앞부분 삭제)
+            # File size limit (drop the front if it exceeds 1MB)
             try:
                 if history_path.stat().st_size > 1_000_000:
                     lines = history_path.read_text(encoding="utf-8").strip().split("\n")
@@ -1451,11 +1452,11 @@ class TriageManager:
             logger.warning("[TriageManager] _save_session_history error: %s", exc)
 
     # ============================================================
-    # 영속화
+    # Persistence
     # ============================================================
 
     def save_state(self) -> None:
-        """runtime/triage_state.json에 원자적 저장."""
+        """Atomically save to runtime/triage_state.json."""
         try:
             path = Path(self.settings.get("state_path", "runtime/triage_state.json"))
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1477,7 +1478,7 @@ class TriageManager:
             logger.error("[TriageManager] save_state failed: %s", exc)
 
     def load_state(self) -> None:
-        """triage_state.json 복원 (재시작 후 상태 유지)."""
+        """Restore triage_state.json (persist state across restarts)."""
         path = Path(self.settings.get("state_path", "runtime/triage_state.json"))
         if not path.exists():
             return
@@ -1487,14 +1488,14 @@ class TriageManager:
             self.start_ts = float(data.get("start_ts", 0.0))
             self.trigger_reason = data.get("trigger_reason", "")
 
-            # 하위 호환: 이전 포맷의 current_target → active_targets 변환
+            # Backward compat: convert old-format current_target → active_targets
             if "active_targets" in data:
                 self.active_targets = data["active_targets"] or []
             elif data.get("current_target"):
                 old_target = data["current_target"]
-                # 이전 포맷 → 새 포맷 변환: state 필드 추가
+                # Old format → new format: add the state field
                 if "state" not in old_target:
-                    # 글로벌 state에서 per-target state 유추
+                    # Infer per-target state from the global state
                     _gs = data.get("state", "")
                     if "SELL" in _gs:
                         old_target["state"] = "SELL"
@@ -1502,7 +1503,7 @@ class TriageManager:
                         old_target["state"] = "WAIT"
                     else:
                         old_target["state"] = "DCA"
-                    # per-target 타이밍 필드 추가
+                    # Add per-target timing fields
                     old_target.setdefault("last_dca_ts", 0.0)
                     old_target.setdefault("sell_submitted_ts", 0.0)
                     old_target.setdefault("dca_confirmed_funds", 0.0)
@@ -1515,7 +1516,7 @@ class TriageManager:
             self.skipped = data.get("skipped", [])
             self.excluded = data.get("excluded", [])
             self.initial_snapshot = data.get("initial_snapshot", {})
-            # settings 복원: state 파일에 저장된 PATCH 변경분 우선, ENV는 폴백
+            # Restore settings: PATCH changes saved in the state file take priority, ENV is the fallback
             saved_settings = data.get("settings")
             if saved_settings and isinstance(saved_settings, dict):
                 for k, v in saved_settings.items():

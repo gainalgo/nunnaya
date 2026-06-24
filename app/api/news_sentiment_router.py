@@ -2,10 +2,10 @@
 News Sentiment API Router
 
 Endpoints:
-    GET  /api/news-sentiment/status     - 전체 상태 + 감성 + 헤드라인
-    GET  /api/news-sentiment/coin/{c}   - 특정 코인 감성
-    POST /api/news-sentiment/config     - ON/OFF 토글 + 설정 변경
-    POST /api/news-sentiment/refresh    - 캐시 무시 강제 갱신
+    GET  /api/news-sentiment/status     - Overall status + sentiment + headlines
+    GET  /api/news-sentiment/coin/{c}   - Sentiment for a specific coin
+    POST /api/news-sentiment/config     - ON/OFF toggle + config change
+    POST /api/news-sentiment/refresh    - Force refresh, bypassing cache
 """
 
 from __future__ import annotations
@@ -55,12 +55,12 @@ def news_sentiment_coin(coin: str):
 
 @router.post("/config")
 def news_sentiment_config(
-    focus_enabled: Optional[bool] = Query(None, description="FOCUS conviction 연동 ON/OFF"),
-    nunnaya_enabled: Optional[bool] = Query(None, description="Nunnaya budget 연동 ON/OFF"),
+    focus_enabled: Optional[bool] = Query(None, description="FOCUS conviction integration ON/OFF"),
+    nunnaya_enabled: Optional[bool] = Query(None, description="Nunnaya budget integration ON/OFF"),
     cache_sec: Optional[int] = Query(None, ge=60, le=7200, description="Cache duration (sec)"),
     api_key: Optional[str] = Body(None, description="CryptoPanic API key (POST body only)"),
 ):
-    """Update news sentiment config. api_key는 POST body로만 전달 (URL 노출 방지)."""
+    """Update news sentiment config. api_key is passed via POST body only (avoids URL exposure)."""
     ns = _get_ns()
     patch = {}
     for k, v in {
@@ -76,7 +76,7 @@ def news_sentiment_config(
         return {"ok": True, "config": ns.config, "message": "no changes"}
 
     result = ns.update_config(patch)
-    # 민감 정보 마스킹 후 로그
+    # Log after masking sensitive info
     _safe = {k: ("****" if k == "api_key" else v) for k, v in patch.items()}
     logger.info("[NEWS] Config updated: %s", _safe)
     return {"ok": True, "config": result}

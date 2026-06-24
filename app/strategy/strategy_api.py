@@ -1,8 +1,8 @@
 # ============================================================
 # File: app/strategy/strategy_api.py
 # ------------------------------------------------------------
-# 전략 엔진 외부 접근 API (FastAPI Router)
-# 분석, 정책 조회/수정, 신호 테스트용 엔드포인트 제공
+# Strategy engine external access API (FastAPI Router)
+# Provides endpoints for analysis, policy get/update, and signal testing
 # ============================================================
 
 from __future__ import annotations
@@ -22,12 +22,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/strategy", tags=["strategy"])
 
-# 단일 글로벌 전략 파이프라인
+# Single global strategy pipeline
 pipeline = StrategyPipeline()
 
 
 # ------------------------------------------------------------
-# 1) 정책 조회
+# 1) Get policy
 # ------------------------------------------------------------
 @router.get("/policy/{market}")
 def get_policy(market: str) -> Dict[str, Any]:
@@ -36,7 +36,7 @@ def get_policy(market: str) -> Dict[str, Any]:
 
 
 # ------------------------------------------------------------
-# 2) 정책 업데이트
+# 2) Update policy
 # ------------------------------------------------------------
 @router.post("/policy/{market}")
 def update_policy(market: str, updates: Dict[str, Any]):
@@ -45,7 +45,7 @@ def update_policy(market: str, updates: Dict[str, Any]):
 
 
 # ------------------------------------------------------------
-# 3) Brain 분석 결과 조회
+# 3) Get Brain analysis result
 # ------------------------------------------------------------
 @router.get("/brain/{market}/{price}")
 def analyze_brain(market: str, price: float) -> Dict[str, Any]:
@@ -55,7 +55,7 @@ def analyze_brain(market: str, price: float) -> Dict[str, Any]:
 
 
 # ------------------------------------------------------------
-# 4) 최종 전략 시그널 테스트
+# 4) Final strategy signal test
 # ------------------------------------------------------------
 @router.get("/signal/{market}/{price}")
 def get_signal(market: str, price: float) -> Dict[str, Any]:
@@ -64,14 +64,14 @@ def get_signal(market: str, price: float) -> Dict[str, Any]:
 
 
 # ------------------------------------------------------------
-# 5) Ladder 전략 계산기 (Preview/Simulation)
+# 5) Ladder strategy calculator (Preview/Simulation)
 # ------------------------------------------------------------
 def _calculate_ladder_steps(alloc: float, step_pct: float, max_steps: int, martingale: float, min_order_usdt: float, base_price: float = 0.0) -> Dict[str, Any]:
-    """Ladder 단계별 금액 계산 로직 (공통)."""
+    """Ladder per-step amount calculation logic (shared)."""
     steps = []
     total_weight = 0.0
     
-    # 총 가중치 계산 (Entry(0) + N steps)
+    # Compute total weight (Entry(0) + N steps)
     for i in range(max_steps + 1):
         total_weight += pow(martingale, i)
     
@@ -82,7 +82,7 @@ def _calculate_ladder_steps(alloc: float, step_pct: float, max_steps: int, marti
         fraction = base_fraction * pow(martingale, i)
         amount_raw = alloc * fraction
         
-        # USDT 0.01 단위 절사
+        # Truncate to USDT 0.01 unit
         amount = int(amount_raw * 100) / 100
         
         drop_pct = step_pct * i
@@ -124,12 +124,12 @@ class LadderCalcRequest(BaseModel):
 
 @router.post("/ladder/calculate")
 def calculate_ladder(req: LadderCalcRequest) -> Dict[str, Any]:
-    """임의 파라미터로 Ladder 시뮬레이션."""
+    """Ladder simulation with arbitrary parameters."""
     return _calculate_ladder_steps(req.allocated_capital, req.step_pct, req.max_steps, req.martingale, req.min_order_usdt, req.base_price)
 
 @router.get("/ladder/preview/{market}")
 def preview_ladder_market(market: str, request: Request) -> Dict[str, Any]:
-    """특정 마켓의 현재 설정(배정금+파라미터) 기반 Ladder 시뮬레이션."""
+    """Ladder simulation based on a market's current settings (allocation + params)."""
     system = request.app.state.system
     ctx = system.coordinator.get_context(market)
     
@@ -164,10 +164,10 @@ def preview_ladder_market(market: str, request: Request) -> Dict[str, Any]:
 
 
 # ------------------------------------------------------------
-# 6) Autoloop 전략 계산기 (Preview/Simulation)
+# 6) Autoloop strategy calculator (Preview/Simulation)
 # ------------------------------------------------------------
 def _calculate_autoloop_steps(alloc: float, buy_splits: List[float], add_buy_drop_pcts: List[float], base_price: float = 0.0, martingale: float = 1.0) -> Dict[str, Any]:
-    """Autoloop 분할 매수 계획 계산."""
+    """Compute Autoloop split-buy plan."""
     steps = []
     total_planned = 0.0
     
@@ -183,7 +183,7 @@ def _calculate_autoloop_steps(alloc: float, buy_splits: List[float], add_buy_dro
     
     for i, frac in enumerate(splits):
         amount_raw = alloc * frac
-        amount = int(amount_raw * 100) / 100  # USDT 0.01 단위
+        amount = int(amount_raw * 100) / 100  # USDT 0.01 unit
         
         drop_pct = 0.0
         if i > 0:
@@ -226,12 +226,12 @@ class AutoloopCalcRequest(BaseModel):
 
 @router.post("/autoloop/calculate")
 def calculate_autoloop(req: AutoloopCalcRequest) -> Dict[str, Any]:
-    """임의 파라미터로 Autoloop 시뮬레이션."""
+    """Autoloop simulation with arbitrary parameters."""
     return _calculate_autoloop_steps(req.allocated_capital, req.buy_splits, req.add_buy_drop_pcts, req.base_price, req.martingale)
 
 @router.get("/autoloop/preview/{market}")
 def preview_autoloop_market(market: str, request: Request) -> Dict[str, Any]:
-    """특정 마켓의 현재 설정(배정금+파라미터) 기반 Autoloop 시뮬레이션."""
+    """Autoloop simulation based on a market's current settings (allocation + params)."""
     system = request.app.state.system
     ctx = system.coordinator.get_context(market)
     

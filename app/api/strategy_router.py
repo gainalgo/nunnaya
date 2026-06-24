@@ -2,13 +2,13 @@
 # File: app/api/strategy_router.py
 # Autocoin OS v3-H — Strategy Router (Unified / Readable)
 #
-# 역할 요약:
-# - Strategy 시스템의 판단/점수/상태를 외부(UI/OMA)에 "조회"로 제공
-# - 계산, 선택, 실행 권한은 절대 여기서 다루지 않는다
+# Role summary:
+# - Exposes the Strategy system's decisions/scores/state to the outside (UI/OMA) as read-only "queries"
+# - Calculation, selection, and execution authority are never handled here
 #
-# 섹션 구성:
-#  A. Last Strategy State        (시장 단일 최신 상태)
-#  B. Strategy Score Table View  (READY 이후 행정/판단용 테이블)
+# Section layout:
+#  A. Last Strategy State        (single latest state per market)
+#  B. Strategy Score Table View  (admin/decision table after READY)
 # ============================================================
 
 from fastapi import APIRouter, Request, Query
@@ -45,17 +45,17 @@ except ImportError:
     def get_regime_fit(regime, strategy=None):
         return 0.5
 
-# [2026-02-01] [PROTECTED] 전략 → topn_selector 프로필 매핑
-# DO NOT MODIFY - 각 전략은 고유한 특성에 맞는 프로필로 스코어링해야 함
-# 이 매핑을 변경하면 전략별 코인 선별이 망가집니다
+# [2026-02-01] [PROTECTED] strategy -> topn_selector profile mapping
+# DO NOT MODIFY - each strategy must be scored with the profile matching its characteristics
+# Changing this mapping breaks per-strategy coin selection
 STRATEGY_TO_PROFILE: Dict[str, str] = {
-    "PINGPONG": "pingpong",    # 박스권, 횡보, 변동성
-    "AUTOLOOP": "autorope",    # 유동성 + 적당한 변동성
-    "LADDER": "ladder",        # 트렌드 추종, 분할매수
-    "LIGHTNING": "lightning",  # 브레이크아웃, 모멘텀
-    "GAZUA": "gazua",          # 강한 상승 모멘텀
-    "CONTRARIAN": "pingpong",  # 역행 = 변동성 + 박스권 유사
-    "SNIPER": "lightning",     # 급등 저격 = 모멘텀 유사
+    "PINGPONG": "pingpong",    # range-bound, sideways, volatility
+    "AUTOLOOP": "autorope",    # liquidity + moderate volatility
+    "LADDER": "ladder",        # trend following, scaled buying
+    "LIGHTNING": "lightning",  # breakout, momentum
+    "GAZUA": "gazua",          # strong upward momentum
+    "CONTRARIAN": "pingpong",  # contrarian = similar to volatility + range-bound
+    "SNIPER": "lightning",     # pump sniping = similar to momentum
 }
 import threading
 from time import time as time_now
@@ -75,21 +75,21 @@ from app.api.strategy_utils import (
 # ============================================================
 # Endpoint-specific locks (not shared utilities — stay here)
 # ============================================================
-_scope_deploy_lock = threading.Lock()  # 멀티 브라우저 동시 배포 방지
-_sniper_setup_lock = threading.Lock()  # [FIX M11] setup_sniper 동시 호출 방지 (중복 포지션 위험)
-_recommend_semaphore = threading.Semaphore(1)  # 추천 계산 동시 1개 제한 (tick loop 스레드풀 보호)
+_scope_deploy_lock = threading.Lock()  # prevent concurrent deploy across multiple browsers
+_sniper_setup_lock = threading.Lock()  # [FIX M11] prevent concurrent setup_sniper calls (duplicate position risk)
+_recommend_semaphore = threading.Semaphore(1)  # limit recommendation computation to 1 at a time (protects tick loop thread pool)
 
 # ============================================================
-# [2026-03-03] 6-Stage Scope Score — 추천/활성 점수 통일 유틸
-# longshort_multi_scan의 핵심 confidence/rank_score 로직을
-# reserved_selector에서도 재사용할 수 있도록 독립 함수로 추출.
+# [2026-03-03] 6-Stage Scope Score — unified recommendation/active score utility
+# Extracts the core confidence/rank_score logic of longshort_multi_scan
+# into a standalone function so reserved_selector can reuse it.
 # ============================================================
 def compute_scope_score(
     market: str,
     *,
     btc_regime: str = "TREND",
 ) -> Optional[Dict[str, Any]]:
-    """단일 마켓에 대해 5분봉 기반 6-stage confidence + rank_score 산출.
+    """Compute 6-stage confidence + rank_score for a single market based on 5-minute candles.
 
     Returns dict with keys: confidence, rank_score, rsi, bb_position,
     atr_pct, vol_surge, ema_aligned, fire_level, stages_passed,
@@ -161,7 +161,7 @@ def compute_scope_score(
     period_high = max(highs) if highs else current_price
     dist_from_low_pct = ((current_price - period_low) / period_low * 100) if period_low > 0 else 999
 
-    # ── 6-Stage 경량 필터 (max 88) ──
+    # ── 6-Stage lightweight filter (max 88) ──
     confidence_raw = 0.0
     if dist_from_low_pct <= 3.0:
         confidence_raw += max(0, 24 - dist_from_low_pct * 8)
@@ -213,7 +213,7 @@ def compute_scope_score(
     else:
         fire_level = "HOLD"
 
-    # ── 파동 분석 [FIX L5: 공통 함수 _compute_wave_metrics 사용으로 중복 제거] ──
+    # ── Wave analysis [FIX L5: use shared helper _compute_wave_metrics to remove duplication] ──
     _wm = _compute_wave_metrics(prices, candle_min=5, fee_pct=FEE_ROUND_TRIP)
     avg_up_amp = _wm["avg_up_amp_pct"]
     avg_down_amp = _wm["avg_down_amp_pct"]
@@ -301,13 +301,13 @@ router.include_router(_longshort_router)
 # ============================================================
 # A. Last Strategy State
 # ------------------------------------------------------------
-# 목적:
-# - 특정 시장(market)의 "가장 최근 전략 판단 상태" 조회
-# - 엔진 실행 여부와 무관한 순수 판단 정보
+# Purpose:
+# - Query the "most recent strategy decision state" for a specific market
+# - Pure decision info, independent of whether the engine is running
 #
-# 사용처:
-# - 디버깅
-# - 개별 시장 상세 화면
+# Used by:
+# - Debugging
+# - Per-market detail view
 # ============================================================
 @router.get(
     "/last",
@@ -329,11 +329,11 @@ def last_strategy_state(
     system = request.app.state.system
     ctx = system.coordinator.get_context(market)
 
-    # 마지막 tick 결과의 ai/brain이 있다면 사용
-    # - coordinator가 ctx.last_ai 를 채워주도록 되어 있으나, 방어적으로 접근
+    # Use the ai/brain from the last tick result if present
+    # - the coordinator is supposed to fill ctx.last_ai, but access defensively
     brain = None
 
-    # 1) 엔진이 context.strategy_reason["engine_ai"]에 넣는 경우
+    # 1) Case where the engine puts it in context.strategy_reason["engine_ai"]
     sr = getattr(ctx, "strategy_reason", None)
     if isinstance(sr, dict):
         brain = sr.get("engine_ai")
@@ -342,7 +342,7 @@ def last_strategy_state(
     if brain is None:
         last = getattr(ctx, "last_ai", None)
         if isinstance(last, dict):
-            # engine_out["ai"] 전체를 넣는 케이스를 고려
+            # Account for the case where the whole engine_out["ai"] is stored
             brain = last.get("brain") if isinstance(last.get("brain"), dict) else last
 
     return {
@@ -352,22 +352,22 @@ def last_strategy_state(
         "policy": ctx.policy,
         "unrealized_profit": ctx.unrealized_profit,
         "total_profit": ctx.total_profit,
-        # ⬇️ 보조 판단 자료 (지표/AI)
+        # ⬇️ Supplementary decision data (indicators/AI)
         "brain": brain  # { rsi, macd_histogram, volatility, ... }
     }
 
 # ============================================================
 # B. Strategy Score Table View (READ ONLY)
 # ------------------------------------------------------------
-# 목적:
-# - READY 상태 이후, StrategySelector가 계산한
-#   "전략 점수 결과"를 테이블 형태로 제공
+# Purpose:
+# - After READY state, expose the "strategy score results" computed by
+#   StrategySelector in table form
 #
-# 핵심 원칙:
-# - OMA/UI 행정·판단용 조회 전용
-# - 전략 수정 / 재계산 / 실행 트리거 없음
+# Key principles:
+# - Read-only, for OMA/UI admin and decision making
+# - No strategy modification / recomputation / execution trigger
 #
-# 사용처:
+# Used by:
 # - OMA Admin UI
 # - Strategy Score Table
 # ============================================================
@@ -394,14 +394,14 @@ def get_strategy_scores(
 
     items: List[Dict[str, Any]] = []
 
-    # 모든 시장 컨텍스트 순회
+    # Iterate over all market contexts
     for market, ctx in system.coordinator.contexts.items():
-        # READY(=warm-up 완료) 이전 시장은 판단 대상 아님
+        # Markets before READY (= warm-up complete) are not eligible for decisions
         try:
             if not ctx.is_ready():
                 continue
         except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-            logger.warning("[strategy_router] %s: %s", 'READY(=warm-up 완료) 이전 시장은 판단 대상 아님 except-> continue', exc, exc_info=True)
+            logger.warning("[strategy_router] %s: %s", 'markets before READY (= warm-up complete) are not eligible except-> continue', exc, exc_info=True)
             continue
 
         st = getattr(ctx, "strategy_state", None)
@@ -409,7 +409,7 @@ def get_strategy_scores(
             continue
 
         selected = st.get("selected")
-        
+
         # [PATCH] Filter by strategy if requested (e.g. ?strategy=AUTOLOOP)
         if target_strategy:
             # 1. Strategy match
@@ -422,7 +422,7 @@ def get_strategy_scores(
 
         scores = st.get("scores") or {}
 
-        # 선택된 전략의 점수(없으면 최고점)
+        # Score of the selected strategy (or the highest if absent)
         score_val = None
         if isinstance(scores, dict):
             if selected in scores:
@@ -434,7 +434,7 @@ def get_strategy_scores(
                     logger.warning("strategy_router.get_strategy_scores L434 except", exc_info=True)
                     score_val = None
 
-        # opinion은 reason 내부에 있을 수 있음(없으면 None)
+        # opinion may live inside reason (None if absent)
         opinion = None
         rsn = st.get("reason")
         if isinstance(rsn, dict):
@@ -449,8 +449,8 @@ def get_strategy_scores(
             "ts": st.get("ts"),
         })
 
-    # 점수 기준 내림차순 (OMA 판단 편의)
-    # 점수 기준 내림차순 (OMA 판단 편의)
+    # Descending by score (for OMA decision convenience)
+    # Descending by score (for OMA decision convenience)
     items.sort(key=lambda x: x["score"], reverse=True)
 
     return {

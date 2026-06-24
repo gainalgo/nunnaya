@@ -50,10 +50,10 @@ class SlotLifecycleMixin:
         return "UNKNOWN"
 
     def _is_demote_protected(self, market: str) -> bool:
-        """Autopilot demote/idle-longhold 제외 대상인지 확인.
+        """Check whether the market is excluded from Autopilot demote/idle-longhold.
 
-        - 전략 파라미터 no_demote/sticky/sniper_sticky
-        - 기존 user_sell_only 보호 규칙과 별도로 운용
+        - Strategy params no_demote/sticky/sniper_sticky
+        - Operated separately from the existing user_sell_only protection rule
         """
         try:
             ctx = self.system.coordinator.contexts.get(market)
@@ -71,7 +71,7 @@ class SlotLifecycleMixin:
             return False
 
     def _position_snapshot(self, market: str) -> Tuple[bool, float, float]:
-        """현재 포지션 보유 여부/수량/평가금액(USDT) 반환."""
+        """Return current position held flag / quantity / valuation (USDT)."""
         qty = 0.0
         value_usdt = 0.0
         try:
@@ -135,8 +135,8 @@ class SlotLifecycleMixin:
                 if m: active_markets.append(m)
 
         # Step 2a) Orphan cleanup (stuck/empty contexts)
-        # - RECOVERY인데 포지션/주문이 비어있으면 WATCH로 정리
-        # - ACTIVE인데 전략 미지정(OFF/UNKNOWN) + 포지션/주문 비어있으면 WATCH로 정리
+        # - If RECOVERY but position/order are empty, clean up to WATCH
+        # - If ACTIVE but strategy unassigned (OFF/UNKNOWN) + position/order empty, clean up to WATCH
         orphan_cleaned: List[Dict[str, Any]] = []
         orphan_cleanup_en = str(os.getenv("OMA_AUTOPILOT_ORPHAN_CLEANUP_ENABLED", "1")).strip().lower() in ("1", "true", "yes", "on")
         if orphan_cleanup_en:
@@ -171,7 +171,7 @@ class SlotLifecycleMixin:
                     if not ctx:
                         continue
 
-                    # LongHold / user_sell_only 마켓은 정리 대상에서 제외
+                    # Exclude LongHold / user_sell_only markets from cleanup
                     is_longhold = False
                     user_sell_only = False
                     try:
@@ -192,7 +192,7 @@ class SlotLifecycleMixin:
                     if is_longhold or user_sell_only:
                         continue
 
-                    # 포지션/주문 상태 확인
+                    # Check position/order state
                     has_position = False
                     try:
                         pos = getattr(ctx, "position", None)
@@ -207,8 +207,8 @@ class SlotLifecycleMixin:
                         continue
 
                     strat = self._infer_strategy(mkt, active_reason_map)
-                    # RECOVERY는 빈 컨텍스트면 전략과 무관하게 정리
-                    # ACTIVE는 전략 미지정 상태에서만 정리
+                    # RECOVERY: if context is empty, clean up regardless of strategy
+                    # ACTIVE: clean up only when strategy is unassigned
                     if bucket == "ACTIVE" and strat not in ("", "OFF", "UNKNOWN"):
                         continue
 
@@ -258,12 +258,12 @@ class SlotLifecycleMixin:
 
         result["orphan_cleaned"] = orphan_cleaned
 
-        # Step 2.5) WATCH 타임아웃 → DISABLED 자동 정리
-        # 2026-03-10: 매도 후 WATCH에 남아 있는 코인을 일정 시간 후 제거하여
-        # 전략 슬롯/소유권을 해제하고, 같은 코인 반복 선택 방지
+        # Step 2.5) WATCH timeout -> auto cleanup to DISABLED
+        # 2026-03-10: Remove coins that remain in WATCH after selling, after a set time,
+        # to release the strategy slot/ownership and prevent repeated selection of the same coin
         watch_timeout_cleaned = 0
         try:
-            _watch_timeout_sec = int(os.getenv("AUTOPILOT_WATCH_TIMEOUT_SEC", "3600"))  # 기본 1시간
+            _watch_timeout_sec = int(os.getenv("AUTOPILOT_WATCH_TIMEOUT_SEC", "3600"))  # default 1 hour
             if _watch_timeout_sec > 0:
                 _snap_w = self.system.oma_registry.snapshot()
                 for _wr in (_snap_w.get("watch") or []):
@@ -282,7 +282,7 @@ class SlotLifecycleMixin:
                         continue
                     if (now - _wts) < _watch_timeout_sec:
                         continue
-                    # 포지션 있으면 건드리지 않음
+                    # Do not touch if a position is held
                     try:
                         _wctx = self.system.coordinator.get_context(_wm)
                         _wqty = float(getattr(_wctx, "position", None) and getattr(_wctx.position, "qty", 0) or 0)
@@ -373,12 +373,12 @@ class SlotLifecycleMixin:
                 if idle_duration < limit_sec:
                     continue
 
-                # [PROTECTED] GAZUA 전략은 사용자 수동 매매용이므로 demote 대상에서 제외
-                # DO NOT MODIFY: 이 로직은 사용자 지시로 보호됨 (2026-01-23)
+                # [PROTECTED] GAZUA strategy is for user manual trading, so exclude it from demote
+                # DO NOT MODIFY: this logic is protected by user instruction (2026-01-23)
                 if strat == "GAZUA":
                     continue
 
-                # [2026-02-01] LongHold 마켓도 demote에서 제외 (장기 보유 의도 존중)
+                # [2026-02-01] LongHold markets are also excluded from demote (respect long-hold intent)
                 try:
                     ladder_mgr = getattr(self.system, "ladder_manager", None)
                     if ladder_mgr:
@@ -388,7 +388,7 @@ class SlotLifecycleMixin:
                 except (KeyError, AttributeError, TypeError) as exc:
                     logger.warning("Failed to check LongHold config for demote exclusion %s: %s", mkt, exc)
 
-                # [2026-02-01] user_sell_only=True인 마켓도 demote에서 제외
+                # [2026-02-01] markets with user_sell_only=True are also excluded from demote
                 try:
                     ctx = self.system.coordinator.contexts.get(mkt)
                     if ctx:
@@ -399,24 +399,24 @@ class SlotLifecycleMixin:
                 except (KeyError, AttributeError, TypeError) as exc:
                     logger.warning("Failed to check user_sell_only for demote exclusion %s: %s", mkt, exc)
 
-                # [SNIPER(s)] no_demote/sticky 설정 시 demote 제외
+                # [SNIPER(s)] exclude from demote when no_demote/sticky is set
                 if self._is_demote_protected(mkt):
                     continue
 
-                # LADDER는 본 공통 규칙에서 제외 (현행 유지).
+                # LADDER is excluded from this common rule (keep as is).
                 if strat == "LADDER":
                     continue
 
                 has_pos, pos_qty, pos_value_usdt = self._position_snapshot(mkt)
                 if has_pos:
-                    # 보유 중이면 바로 demote하지 않고:
-                    # - dust면 청소 대상으로 WATCH로 내려 슬롯 회전
-                    # - 일반 보유는 Step 3a(LongHold 전환)에서 처리
+                    # If held, do not demote immediately:
+                    # - if dust, send to WATCH as a cleanup target to rotate the slot
+                    # - normal holdings are handled in Step 3a (LongHold conversion)
                     if pos_value_usdt < dust_threshold_usdt:
                         candidates.append((age, strat, mkt, int(limit_min), "dust_cleanup"))
                     continue
 
-                # 미보유는 조용히 WATCH로 내리고 슬롯 보충 대상으로 넘긴다.
+                # If not held, quietly demote to WATCH and pass it on as a slot-refill target.
                 candidates.append((age, strat, mkt, int(limit_min), "idle_no_position"))
 
             candidates.sort(key=lambda x: x[0], reverse=True)
@@ -492,7 +492,7 @@ class SlotLifecycleMixin:
                     except (AttributeError, TypeError, ValueError) as exc2:
                         logger.warning("Failed to log demote error for %s: %s", mkt, exc2)
 
-        # Step 3a) 24시간+ 무거래 + 보유 포지션 → LongHold 자동 전환 (LADDER 제외 공통 규칙)
+        # Step 3a) 24h+ no trades + held position -> auto-convert to LongHold (common rule, LADDER excluded)
         longhold_converted: List[Dict[str, Any]] = []
         idle_to_longhold_en = bool(getattr(self.system, "autopilot_idle_to_longhold_enabled", True))
         idle_to_longhold_hours = max(1, int(getattr(self.system, "autopilot_idle_to_longhold_hours", 24) or 24))
@@ -500,7 +500,7 @@ class SlotLifecycleMixin:
 
         longhold_candidates: List[str] = []
         if idle_to_longhold_en:
-            # 이미 demote된 마켓 제외
+            # Exclude already-demoted markets
             demoted_markets = {str(d.get("market") or "").strip().upper() for d in demoted if d.get("market")}
             recovery_rows = snap.get("recovery") or []
             recovery_markets: List[str] = []
@@ -527,7 +527,7 @@ class SlotLifecycleMixin:
                 longhold_candidates.append(mku)
 
         if idle_to_longhold_en and longhold_candidates:
-            # 24시간 윈도우로 FILL 기록 조회
+            # Query FILL records over a 24-hour window
             since_ts_24h = now - float(idle_to_longhold_sec)
 
             records_24h: List[Dict[str, Any]] = []
@@ -560,17 +560,17 @@ class SlotLifecycleMixin:
                     continue
 
             for mkt in longhold_candidates:
-                # [SNIPER(s)] no_demote/sticky 설정 시 idle→LongHold 전환 제외
+                # [SNIPER(s)] exclude from idle->LongHold conversion when no_demote/sticky is set
                 if self._is_demote_protected(mkt):
                     continue
 
                 strat = self._infer_strategy(mkt, active_reason_map)
 
-                # LADDER는 별도 운영 정책 유지(공통 회전 규칙 제외)
+                # LADDER keeps its separate operating policy (excluded from the common rotation rule)
                 if strat == "LADDER":
                     continue
 
-                # 이미 LongHold인 마켓 제외
+                # Exclude markets that are already LongHold
                 try:
                     ladder_mgr = getattr(self.system, "ladder_manager", None)
                     if ladder_mgr:
@@ -580,8 +580,8 @@ class SlotLifecycleMixin:
                 except (KeyError, AttributeError, TypeError) as exc:
                     logger.warning("Failed to check existing LongHold config for %s: %s", mkt, exc)
 
-                # GAZUA도 수동 전략이므로 이미 demote에서 제외됨 (PROTECTED)
-                # 하지만 LongHold로 전환할지 여부는 별도 판단: GAZUA는 제외하지 않음
+                # GAZUA is a manual strategy too, so it is already excluded from demote (PROTECTED)
+                # But whether to convert to LongHold is judged separately: GAZUA is not excluded
 
                 try:
                     since_active = float(self.system.oma_registry.get_active_since_ts(mkt) or 0.0)
@@ -593,11 +593,11 @@ class SlotLifecycleMixin:
                 idle_duration = now - max(last_fill, since_active)
                 age = (now - since_active) if since_active > 0 else 0.0
 
-                # 24시간 이상 무거래 체크
+                # Check for no trades for 24h or more
                 if idle_duration < idle_to_longhold_sec:
                     continue
 
-                # 포지션이 있어야 LongHold로 전환 의미가 있음
+                # A position must exist for LongHold conversion to be meaningful
                 has_position = False
                 avg_buy_price = 0.0
                 position_qty = 0.0
@@ -610,7 +610,7 @@ class SlotLifecycleMixin:
                             position_qty = float(pos.get("qty", 0) or 0)
                             avg_buy_price = float(pos.get("avg_price", 0) or pos.get("entry", 0) or 0)
                             has_position = position_qty > 0
-                            # 현재가로 포지션 가치 계산
+                            # Compute position value at current price
                             try:
                                 from app.core.hyper_price_store import price_store
                                 current_price = price_store.get_price(mkt) or avg_buy_price
@@ -624,8 +624,8 @@ class SlotLifecycleMixin:
                 if not has_position:
                     continue
 
-                # Dust 포지션은 LongHold로 보내지 않고 주기 청소 대상으로만 분류.
-                # (슬롯은 WATCH로 내려 회전 보장)
+                # Dust positions are not sent to LongHold, only classified as periodic cleanup targets.
+                # (the slot is demoted to WATCH to guarantee rotation)
                 try:
                     dust_threshold_usdt = float(
                         getattr(self.system, "dust_vacuum_threshold_usdt", 5.0) or 5.0
@@ -662,11 +662,11 @@ class SlotLifecycleMixin:
                     })
                     continue
 
-                # LongHold로 전환 실행
+                # Execute LongHold conversion
                 try:
                     ladder_mgr = getattr(self.system, "ladder_manager", None)
                     if ladder_mgr:
-                        # LongHold 설정 생성
+                        # Create LongHold config
                         ladder_mgr.save_longhold_config({
                             "market": mkt,
                             "enabled": True,
@@ -676,7 +676,7 @@ class SlotLifecycleMixin:
                             "repeat": True,
                         })
 
-                        # context_state에 user_sell_only=True 설정
+                        # Set user_sell_only=True in context_state
                         from app.manager.market_controls import apply_engine_controls
                         apply_engine_controls(
                             self.system,
@@ -686,7 +686,7 @@ class SlotLifecycleMixin:
                             stoploss_pct=-50.0,
                         )
 
-                        # OMA 상태 업데이트 (ACTIVE 유지, reason만 변경)
+                        # Update OMA state (keep ACTIVE, only change reason)
                         self.system.oma_set_market(
                             market=mkt,
                             state=MarketState.ACTIVE,
@@ -788,13 +788,13 @@ class SlotLifecycleMixin:
             perf_candidates: List[Tuple[float, float, int, str, str, float, int, int, int, float]] = []
             for mkt in active_markets:
                 strat = self._infer_strategy(mkt, active_reason_map)
-                # LADDER는 공통 회전/강등 규칙 제외(현행 유지)
+                # LADDER is excluded from the common rotation/demote rule (keep as is)
                 if strat == "LADDER":
                     continue
                 if self._is_demote_protected(mkt):
                     continue
-                # 보유 포지션은 perf-demote에서 제외.
-                # (보유 장기체류는 Step 3a에서 LongHold 전환으로 처리)
+                # Held positions are excluded from perf-demote.
+                # (long-held positions are handled by LongHold conversion in Step 3a)
                 has_pos, _, _ = self._position_snapshot(mkt)
                 if has_pos:
                     continue
@@ -890,11 +890,11 @@ class SlotLifecycleMixin:
         result["demoted"] = demoted
         result["dust_cleanup_targets"] = dust_cleanup_targets
 
-        # Step 3c) Quick Rotation: 무포지션 ACTIVE 슬롯 조기 교체
-        # - SNIPER(s)의 Scope Slot Quick Rotation과 동일 개념
-        # - 아직 매수 안 한 슬롯을 idle 한도 전에 더 강한 후보로 교체
-        # - 조건: has_pos=False, age >= 2분, new_score >= old_score * 1.10
-        # - [Phase 2-C] PINGPONG/AUTOLOOP 전용 rank_score 체계 구축 완료
+        # Step 3c) Quick Rotation: early swap of position-less ACTIVE slots
+        # - Same concept as SNIPER(s) Scope Slot Quick Rotation
+        # - Swap a not-yet-bought slot for a stronger candidate before the idle limit
+        # - Conditions: has_pos=False, age >= 2min, new_score >= old_score * 1.10
+        # - [Phase 2-C] PINGPONG/AUTOLOOP dedicated rank_score system completed
         quick_rotated_general: List[Dict[str, Any]] = []
         _qr_strategies = {"PINGPONG", "AUTOLOOP", "LIGHTNING", "CONTRARIAN", "GAZUA"}
         try:
@@ -975,8 +975,8 @@ class SlotLifecycleMixin:
                 if not best_cand:
                     continue
 
-                # _deploy_scores 미설정(0) 시 queue의 live 점수를 베이스라인으로 보완
-                # — UI 배포·부팅 복원 슬롯은 Step4 미통과로 deploy_score=0 → 아무 후보나 교체 허용 방지
+                # When _deploy_scores is unset (0), supplement with the queue's live score as baseline
+                # — UI-deployed/boot-restored slots have deploy_score=0 (did not pass Step4) -> prevent swapping for any arbitrary candidate
                 _eff_deploy_score = deploy_score
                 if _eff_deploy_score <= 0:
                     for _qi in queue_items_qr:
@@ -1038,7 +1038,7 @@ class SlotLifecycleMixin:
                             if b > 0:
                                 budget_usdt = b
                         except (TypeError, ValueError):
-                            logger.warning("[Autopilot] QR 예산 추출 실패: %s → budget=None", new_market)
+                            logger.warning("[Autopilot] QR budget extraction failed: %s -> budget=None", new_market)
                             budget_usdt = None
 
                     self.system.oma_set_market(

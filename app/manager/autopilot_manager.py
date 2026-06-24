@@ -50,22 +50,22 @@ from app.manager.dynamic_stoploss import DynamicStopLossManager, PositionInfo, S
 
 class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveMixin, ScopeRotationMixin):
     """
-    Autopilot(자동 운용) 로직을 전담하는 매니저.
-    HyperSystem에서 분리됨.
+    Manager dedicated to the Autopilot (automated operation) logic.
+    Extracted from HyperSystem.
     """
 
     def __init__(self, system: Any):
         global _cached_system
         self.system = system
-        _cached_system = system  # [2026-02-01] 직접 함수 호출용 시스템 참조
-        _scanner_mod._cached_system = system  # scanner 모듈에도 설정
+        _cached_system = system  # [2026-02-01] system reference for direct function calls
+        _scanner_mod._cached_system = system  # also set on the scanner module
 
         # Runtime state
         self._task: Optional[asyncio.Task] = None
         self._inflight: bool = False
         self.last_run_ts: Optional[float] = None
         self.last_result: Any = None
-        self._boot_ts: float = time.time()  # [2026-03-07] 서버 부팅 시각 (warm-up 제어)
+        self._boot_ts: float = time.time()  # [2026-03-07] server boot time (warm-up control)
 
         # Cooldown persistence
         self.cooldown_path = str(os.getenv("OMA_AUTOPILOT_COOLDOWN_PATH", "runtime/autopilot_cooldown.json") or "runtime/autopilot_cooldown.json")
@@ -75,10 +75,10 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
         except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
             logger.warning("[AUTOPILOT] Cooldown persistence: %s", exc, exc_info=True)
         
-        # Quick Rotation: 배포 시 점수 저장 (전략별 무포지션 슬롯 조기 교체용)
+        # Quick Rotation: store scores at deploy time (for early rotation of positionless slots per strategy)
         self._deploy_scores: Dict[str, float] = {}
 
-        # [Phase 3-B] 전략별 연속 손실 추적 (Loss-Based Cooldown)
+        # [Phase 3-B] track consecutive losses per strategy (Loss-Based Cooldown)
         self._strategy_loss_streak: Dict[str, int] = {}
         self._strategy_loss_cooldown_until: Dict[str, float] = {}
 
@@ -144,26 +144,26 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
         return (cur >= sm) or (cur <= em)
 
     async def _loop(self):
-        # [2026-03-03] 라운드 로빈 스케줄러: 전략을 2~3개 그룹으로 나누어 시간차 스캔
-        # [2026-05-30] 부모님 통찰 — 옛 hardcoded PINGPONG+AUTOLOOP 시대 잔재 제거.
-        # 매 round 마다 enabled=True plugin 만 동적 구성 (8개 시대 + WHALE 포함).
+        # [2026-03-03] round-robin scheduler: split strategies into 2~3 groups for staggered scanning
+        # [2026-05-30] owner insight — remove leftovers from the old hardcoded PINGPONG+AUTOLOOP era.
+        # Each round dynamically composes only enabled=True plugins (8-strategy era + WHALE included).
         def _build_scan_rounds() -> List[List[str]]:
             _en = lambda name: bool(getattr(self.system, f"reserved_{name.lower()}_enabled", True))
-            fast = [s for s in ("PINGPONG", "AUTOLOOP") if _en(s)]      # 빠른 회전
-            precise = [s for s in ("SNIPER", "CONTRARIAN") if _en(s)]   # 정밀 스캔
-            ai = [s for s in ("LIGHTNING", "LADDER", "GAZUA", "WHALE") if _en(s)]  # AI/패턴 스캔
+            fast = [s for s in ("PINGPONG", "AUTOLOOP") if _en(s)]      # fast rotation
+            precise = [s for s in ("SNIPER", "CONTRARIAN") if _en(s)]   # precision scan
+            ai = [s for s in ("LIGHTNING", "LADDER", "GAZUA", "WHALE") if _en(s)]  # AI/pattern scan
             rounds = [r for r in (fast, precise, ai) if r]
             return rounds if rounds else []
 
         _current_round = 0
         _roundrobin_enabled = str(os.getenv("OMA_ROUNDROBIN_ENABLED", "true")).strip().lower() in ("1", "true", "yes", "on")
 
-        # [2026-03-07] Scope 자동충원 독립 타이머
-        # autopilot_enabled와 무관하게 빈 슬롯이 있으면 자동 스캔+충원
+        # [2026-03-07] Scope auto-refill independent timer
+        # Regardless of autopilot_enabled, auto-scan + refill when there are empty slots
         _scope_last_run_ts: float = 0.0
-        _SCOPE_INDEPENDENT_INTERVAL: int = 60  # 60초마다 scope 슬롯 상태 체크
+        _SCOPE_INDEPENDENT_INTERVAL: int = 60  # check scope slot state every 60 seconds
 
-        # [2026-03-24] 부팅 직후 안정화 대기 (price_feed + reconcile)
+        # [2026-03-24] stabilization wait right after boot (price_feed + reconcile)
         await asyncio.sleep(15.0)
 
         while True:
@@ -173,7 +173,7 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
                 now = time.time()
                 autopilot_on = bool(getattr(self.system, "autopilot_enabled", False))
 
-                # ── [2026-03-07] Scope 독립 루프: autopilot OFF여도 빈 슬롯 자동충원 ──
+                # ── [2026-03-07] Scope independent loop: auto-refill empty slots even when autopilot is OFF ──
                 scope_rotation_en = bool(getattr(self.system, "autopilot_scope_rotation_enabled", True))
                 scope_target = max(0, int(
                     getattr(self.system, "autopilot_scope_target_n",
@@ -196,7 +196,7 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
                     except (KeyError, AttributeError, TypeError, ValueError) as exc:
                         logger.warning(f"[Autopilot/ScopeIndependent] error: {exc}", exc_info=True)
 
-                # ── 기존 Autopilot 메인 루프 ──
+                # ── existing Autopilot main loop ──
                 if not autopilot_on:
                     continue
 
@@ -207,10 +207,10 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
                 if interval < 5:
                     interval = 5
 
-                # [2026-05-30] 동적 round 구성 — enabled=True plugin 만 (옛 hardcoded 제거)
+                # [2026-05-30] dynamic round composition — only enabled=True plugins (old hardcoded removed)
                 _scan_rounds = _build_scan_rounds() if _roundrobin_enabled else []
 
-                # [2026-03-03] 라운드 로빈: interval을 라운드 수로 나눠서 더 자주 스캔
+                # [2026-03-03] round-robin: divide interval by the number of rounds to scan more often
                 if _roundrobin_enabled and _scan_rounds:
                     effective_interval = max(60, interval // len(_scan_rounds))
                 else:
@@ -224,12 +224,12 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
                     continue
 
                 if _roundrobin_enabled and _scan_rounds:
-                    # 현재 라운드의 전략만 스캔
+                    # scan only the strategies of the current round
                     round_strategies = _scan_rounds[_current_round % len(_scan_rounds)]
                     _current_round += 1
                     await self.step(reason="loop", scan_only=False, round_strategies=round_strategies)
                 elif _roundrobin_enabled and not _scan_rounds:
-                    # 모든 plugin disabled → autopilot 휴면 (round 0개)
+                    # all plugins disabled → autopilot dormant (0 rounds)
                     continue
                 else:
                     await self.step(reason="loop", scan_only=False)
@@ -282,7 +282,7 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
             sn_target = max(0, int(getattr(self.system, "reserved_sniper_n", 0) or 0))
             wh_target = max(0, int(getattr(self.system, "reserved_whale_n", 0) or 0))
 
-            # [2026-05-30] Per-strategy ON/OFF — enabled=False 시 target 강제 0 (idle 작동 차단)
+            # [2026-05-30] Per-strategy ON/OFF — force target 0 when enabled=False (block idle operation)
             if not bool(getattr(self.system, "reserved_pingpong_enabled", True)):
                 pp_target = 0
             if not bool(getattr(self.system, "reserved_autoloop_enabled", True)):
@@ -304,7 +304,7 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
 
             auto_approve = bool(getattr(self.system, "autopilot_auto_approve", False))
             idle_en = bool(getattr(self.system, "autopilot_idle_demote_enabled", False))
-            idle_min = max(0, int(getattr(self.system, "autopilot_idle_demote_min", 120) or 120))  # 기본 120분 (2시간)
+            idle_min = max(0, int(getattr(self.system, "autopilot_idle_demote_min", 120) or 120))  # default 120 min (2 hours)
             grace_sec = max(0, int(getattr(self.system, "autopilot_grace_sec", 0) or 0))
             demote_max_total = max(0, int(getattr(self.system, "autopilot_demote_max_total", 0) or 0))
             demote_max_per_strategy = max(0, int(getattr(self.system, "autopilot_demote_max_per_strategy", 0) or 0))
@@ -421,13 +421,13 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
                         logger.warning("[AUTOPILOT] graduation ledger append: %s", exc2, exc_info=True)
             result["graduations"] = graduations
 
-            # Step 6.5) 승률 연동 Assist Fire — 수익 슬롯 비율에 따라 공격성 자동 조절
+            # Step 6.5) win-rate-linked Assist Fire — auto-adjust aggressiveness by the ratio of profitable slots
             try:
                 self._adapt_assist_fire_by_winrate()
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
                 logger.warning(f"[Autopilot] assist_fire adapt error: {exc}", exc_info=True)
 
-            # Step 7) Scope Slot Rotation — SNIPERS(precision_scope) idle 슬롯 교체
+            # Step 7) Scope Slot Rotation — rotate idle SNIPERS (precision_scope) slots
             scope_rotated: List[Dict[str, Any]] = []
             scope_rotation_en = bool(getattr(self.system, "autopilot_scope_rotation_enabled", True))
             scope_idle_min = max(2, int(getattr(self.system, "autopilot_scope_idle_min", 2) or 2))
@@ -467,17 +467,17 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
         active_reason_map: Dict[str, List[str]],
         now: float,
     ) -> List[Dict[str, Any]]:
-        """성과 기반 예산 리밸런싱."""
+        """Performance-based budget rebalancing."""
         adjustments: List[Dict[str, Any]] = []
-        
-        # 설정
+
+        # settings
         window_hours = float(getattr(self.system, "autopilot_perf_window_hours", 24) or 24)
         min_trades = int(getattr(self.system, "autopilot_perf_min_trades", 3) or 3)
         apply_auto = bool(getattr(self.system, "autopilot_perf_apply_auto", False))
         
         since_ts = now - (window_hours * 3600)
         
-        # PnL 데이터 수집
+        # collect PnL data
         try:
             records = await asyncio.to_thread(
                 functools.partial(
@@ -491,18 +491,18 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
             return adjustments
 
         pnl_agg = aggregate_fill_pnl(records, since_ts=since_ts, until_ts=now, markets=active_markets)
-        
+
         if not pnl_agg:
             return adjustments
-        
-        # 메트릭 수집
+
+        # collect metrics
         metrics: List[PerformanceMetrics] = []
         for market in active_markets:
             agg = pnl_agg.get(market)
             if not agg:
                 continue
-            
-            # 현재 예산
+
+            # current budget
             budget_usdt = 0.0
             try:
                 state = self.system.oma_registry.get_market_info(market) or {}
@@ -510,10 +510,10 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
             except (KeyError, AttributeError, TypeError, ValueError) as exc:
                 logger.warning("[AUTOPILOT] current budget read: %s", exc, exc_info=True)
             
-            # 전략 추론
+            # infer strategy
             strategy = self._infer_strategy_from_reason(active_reason_map.get(market, []))
-            
-            # 활성화 시점
+
+            # activation timestamp
             active_since = 0.0
             try:
                 state = self.system.oma_registry.get_market_info(market) or {}
@@ -532,7 +532,7 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
         if not metrics:
             return adjustments
         
-        # 총 자본 계산
+        # compute total capital
         total_capital = 0.0
         try:
             total_capital = float(getattr(self.system, "equity_usdt", 0) or 0) * float(getattr(self.system, "deploy_ratio", 0.8) or 0.8)
@@ -542,10 +542,10 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
         if total_capital <= 0:
             return adjustments
         
-        # 조정 계산
+        # compute adjustments
         adj_list, summary = self.budget_rebalancer.calculate_adjustments(metrics, total_capital)
-        
-        # 적용
+
+        # apply
         for adj in adj_list:
             if adj.action == "skip":
                 continue
@@ -564,7 +564,7 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
             if apply_auto and adj.action != "hold":
                 try:
                     if adj.action == "remove":
-                        # 퇴출
+                        # evict
                         self.system.oma_set_market(
                             market=adj.market,
                             state=MarketState.WATCH,
@@ -578,7 +578,7 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
                         self.mark_cooldown(adj.market, reason="perf_remove")
                         result_entry["applied"] = True
                     else:
-                        # 예산 조정
+                        # budget adjustment
                         self.system.oma_set_market(
                             market=adj.market,
                             state=MarketState.ACTIVE,
@@ -612,16 +612,16 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
         active_reason_map: Dict[str, List[str]],
         now: float,
     ) -> List[Dict[str, Any]]:
-        """전략 졸업 처리."""
+        """Strategy graduation handling."""
         graduations: List[Dict[str, Any]] = []
-        
-        # 설정
+
+        # settings
         window_hours = float(getattr(self.system, "autopilot_grad_window_hours", 24) or 24)
         apply_auto = bool(getattr(self.system, "autopilot_grad_apply_auto", False))
         
         since_ts = now - (window_hours * 3600)
         
-        # PnL 데이터 수집
+        # collect PnL data
         try:
             records = await asyncio.to_thread(
                 functools.partial(
@@ -633,18 +633,18 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
         except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError):
             logger.warning("[Autopilot] graduation ledger read failed", exc_info=True)
             return graduations
-        
+
         pnl_agg = aggregate_fill_pnl(records, since_ts=since_ts, until_ts=now, markets=active_markets)
-        
-        # 컨텍스트 수집
+
+        # collect contexts
         contexts: List[MarketContext] = []
         for market in active_markets:
             agg = pnl_agg.get(market)
-            
-            # 전략 추론
+
+            # infer strategy
             strategy = self._infer_strategy_from_reason(active_reason_map.get(market, []))
-            
-            # 예산 및 활성 시점
+
+            # budget and activation timestamp
             budget = 0.0
             active_since = 0.0
             try:
@@ -652,11 +652,11 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
                 budget = float(state.get("budget_usdt") or 0.0)
                 active_since = float(state.get("ts") or 0.0)
             except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[AUTOPILOT] 예산 및 활성 시점: %s", exc, exc_info=True)
-            
+                logger.warning("[AUTOPILOT] budget and activation timestamp: %s", exc, exc_info=True)
+
             age_hours = (now - active_since) / 3600 if active_since > 0 else 0
-            
-            # AI 피처 수집
+
+            # collect AI features
             momentum = 0.0
             volatility = 0.0
             trend = 0.0
@@ -682,9 +682,9 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
                     avg_buy_price = float(getattr(ctx, "avg_buy_price", 0) or 0)
                     position_value = float(getattr(ctx, "position_value_usdt", 0) or 0)
             except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[AUTOPILOT] AI 피처 수집: %s", exc, exc_info=True)
-            
-            # ROI 계산
+                logger.warning("[AUTOPILOT] AI feature collection: %s", exc, exc_info=True)
+
+            # compute ROI
             roi_pct = 0.0
             net_cash = 0.0
             trade_count = 0
@@ -719,7 +719,7 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
         if not contexts:
             return graduations
         
-        # 졸업 평가
+        # evaluate graduation
         decisions, summary = self.strategy_graduator.batch_evaluate(contexts)
         
         for decision in decisions:
@@ -739,10 +739,10 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
             
             if apply_auto and decision.to_strategy:
                 try:
-                    # 전략 전환 적용
+                    # apply strategy switch
                     apply_engine_controls(self.system, decision.market, decision.to_strategy)
-                    
-                    # OMA 상태 업데이트
+
+                    # update OMA state
                     self.system.oma_set_market(
                         market=decision.market,
                         state=MarketState.ACTIVE,
@@ -780,6 +780,6 @@ class AutopilotManager(CooldownMixin, ScannerMixin, SlotLifecycleMixin, ApproveM
         return graduations
 
     def _infer_strategy_from_reason(self, reasons: List[str]) -> str:
-        """reason 리스트에서 전략 추론."""
+        """Infer the strategy from the reason list."""
         return _infer_strategy_from_reason_impl(reasons)
 

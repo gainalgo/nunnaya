@@ -36,7 +36,7 @@ class StateIOMixin:
     # Sector Map Loading
     # --------------------------------------------------------
     def _load_sector_map_from_file(self) -> None:
-        """섹터 맵 파일에서 코인→섹터 매핑을 로드합니다."""
+        """Load the coin->sector mapping from the sector map file."""
         try:
             sector_file = os.path.join(os.path.dirname(__file__), "..", "data", "sector_map.json")
             if not os.path.exists(sector_file):
@@ -88,10 +88,10 @@ class StateIOMixin:
             logger.warning("[StateIO] Failed to parse context_state ts, defaulting to 0")
             file_ts = 0.0
 
-        # WATCH(대기) 상태는 컨텍스트까지 복원하지 않는다.
-        # - ACTIVE/RECOVERY + (position/order_state 보유)만 복원하여
-        #   부팅 후 "대기 코인 워밍업" 노이즈를 줄이고,
-        #   불필요한 warm-up/연산을 피한다.
+        # Do not restore full context for WATCH (idle) markets.
+        # - Only restore ACTIVE/RECOVERY + (markets holding a position/order_state)
+        #   to reduce post-boot "idle coin warmup" noise and
+        #   avoid unnecessary warm-up/computation.
         active_set = set(self.oma_registry.list_active())
         try:
             recovery_list = self.oma_registry.list_recovery() if hasattr(self.oma_registry, "list_recovery") else []
@@ -144,13 +144,13 @@ class StateIOMixin:
                 continue
 
             ctx = self.coordinator.ensure_market(market)
-            # [2026-02-02] ACTIVE/RECOVERY 마켓인지 확인하여 is_active 전달
+            # [2026-02-02] Check whether this is an ACTIVE/RECOVERY market and pass is_active
             current_state = self.oma_registry.get_state(market)
             is_active_market = current_state in (MarketState.ACTIVE, MarketState.RECOVERY)
             ctx.apply_state(st, stale_reset_sec=self.context_state_stale_reset_sec, max_prices=self.context_state_max_prices, is_active=is_active_market)
 
-            # 파일이 너무 오래되었으면(강제 stale), warmup 리셋
-            # [2026-02-02] ACTIVE/RECOVERY 마켓은 워밍업 리셋 대신 force_ready() 호출
+            # If the file is too old (force stale), reset warmup
+            # [2026-02-02] For ACTIVE/RECOVERY markets call force_ready() instead of warmup reset
             if file_ts > 0 and self.context_state_stale_reset_sec > 0:
                 try:
                     if (now - file_ts) > float(self.context_state_stale_reset_sec):
@@ -164,13 +164,13 @@ class StateIOMixin:
                     except (AttributeError, TypeError, ValueError) as exc2:
                         logger.warning("[StateIO] warmup reset ledger error for %s: %s", market, exc2)
 
-            # 복원된 컨텍스트가 position/order를 가지고 있는데 OMA가 ACTIVE가 아니면
-            # 안전을 위해 RECOVERY로 승격(진입 금지 + 회수 허용)
-            # 단, dust 정리(_dust_disabled 플래그)로 DISABLED된 경우는 재승격 차단
+            # If a restored context holds a position/order but OMA is not ACTIVE,
+            # promote it to RECOVERY for safety (no entry allowed + exit/recovery allowed).
+            # Exception: if DISABLED via dust cleanup (_dust_disabled flag), block re-promotion.
             _restore_dust_disabled = bool(getattr(ctx, '_dust_disabled', False))
             if (has_position or has_order) and (self.oma_registry.get_state(market) != MarketState.ACTIVE) and not _restore_dust_disabled:
                 try:
-                    # [FIX] 수동 구매 코인: budget_usdt를 실제 포지션 가치로 설정
+                    # [FIX] Manually purchased coin: set budget_usdt to the actual position value
                     pos_data = st.get("position") or {}
                     pos_entry = float(pos_data.get("entry", 0) or 0)
                     pos_qty = float(pos_data.get("qty", 0) or 0)
@@ -180,7 +180,7 @@ class StateIOMixin:
                         market=market,
                         state=MarketState.RECOVERY,
                         reason=["state_restore", "manual_purchase"],
-                        budget_usdt=pos_value,  # 실제 포지션 가치로 예산 설정
+                        budget_usdt=pos_value,  # set budget to the actual position value
                         persist=True
                     )
                 except (KeyError, AttributeError, TypeError, ValueError) as exc:
@@ -189,8 +189,8 @@ class StateIOMixin:
                     except (AttributeError, TypeError, ValueError) as exc2:
                         logger.warning("[StateIO] recovery promote ledger error for %s: %s", market, exc2)
 
-            # [FIX] 수동 구매 코인: position이 있으면 allocated_capital을 실제 포지션 가치로 설정
-            # 균등 분배된 값이 아니라 실제 구매 금액을 사용해야 다른 코인에 예산이 제대로 분배됨
+            # [FIX] Manually purchased coin: if a position exists, set allocated_capital to the actual position value.
+            # Use the actual purchase amount (not the evenly-split value) so budget is distributed correctly to other coins.
             if ctx.position:
                 pos_usdt = float(ctx.position.get("usdt") or 0)
                 if pos_usdt <= 0:
@@ -199,8 +199,8 @@ class StateIOMixin:
                     qty = float(ctx.position.get("qty", 0) or 0)
                     pos_usdt = entry * qty
 
-                # [PROTECTED] GAZUA 전략은 사용자 설정 예산 우선 - 포지션 가치로 덮어쓰지 않음
-                # DO NOT MODIFY: 이 로직은 사용자 지시로 보호됨 (2026-01-23)
+                # [PROTECTED] GAZUA strategy prioritizes the user-configured budget - do not overwrite with position value
+                # DO NOT MODIFY: this logic is protected per owner instruction (2026-01-23)
                 is_gazua = False
                 try:
                     s_mode = str(((ctx.controls or {}).get("strategy") or {}).get("mode") or "").upper()
@@ -209,7 +209,7 @@ class StateIOMixin:
                     logger.warning("[StateIO] GAZUA check failed for %s: %s", market, exc)
 
                 if is_gazua:
-                    # GAZUA: registry 예산이 있으면 유지, 없으면 포지션 가치 사용
+                    # GAZUA: keep the registry budget if present, otherwise use the position value
                     reg_budget = self.oma_registry.get_budget_usdt(market)
                     if reg_budget and float(reg_budget) > 0:
                         if ctx.allocated_capital <= 0:
@@ -218,7 +218,7 @@ class StateIOMixin:
                                 self.ledger.append("CONTEXT_ALLOC_FIXED", market=market, old=0, new=float(reg_budget), source="gazua_budget")
                             except (TypeError, ValueError) as exc:
                                 logger.warning("[StateIO] GAZUA alloc ledger error for %s: %s", market, exc)
-                        # allocated가 이미 있으면 유지 (덮어쓰지 않음)
+                        # if allocated already exists, keep it (do not overwrite)
                     elif pos_usdt > 0 and ctx.allocated_capital <= 0:
                         ctx.allocated_capital = pos_usdt
                         try:
@@ -226,35 +226,35 @@ class StateIOMixin:
                         except (AttributeError, TypeError) as exc:
                             logger.warning("[StateIO] GAZUA pos alloc ledger error for %s: %s", market, exc)
                 else:
-                    # GAZUA 외 전략: 사용자 설정 예산 우선
-                    # [FIX 2026-01-25] registry에 예산이 있으면 사용자 설정으로 간주하고 유지
+                    # Non-GAZUA strategies: prioritize the user-configured budget
+                    # [FIX 2026-01-25] if registry has a budget, treat it as user-configured and keep it
                     reg_budget = self.oma_registry.get_budget_usdt(market)
                     if reg_budget and float(reg_budget) > 0:
-                        # 사용자가 수동으로 예산을 설정한 경우 → 유지
+                        # if the user manually set a budget -> keep it
                         if ctx.allocated_capital <= 0:
                             ctx.allocated_capital = float(reg_budget)
                             try:
                                 self.ledger.append("CONTEXT_ALLOC_FIXED", market=market, old=0, new=float(reg_budget), source="user_budget")
                             except (TypeError, ValueError) as exc:
                                 logger.warning("[StateIO] user budget alloc ledger error for %s: %s", market, exc)
-                        # allocated가 이미 있으면 유지 (덮어쓰지 않음)
+                        # if allocated already exists, keep it (do not overwrite)
                     elif pos_usdt > 0 and ctx.allocated_capital <= 0:
-                        # 포지션은 있는데 예산이 없으면 포지션 가치로 복구
+                        # if a position exists but no budget, restore using the position value
                         ctx.allocated_capital = pos_usdt
                         try:
                             self.ledger.append("CONTEXT_ALLOC_FIXED", market=market, old=0, new=pos_usdt, source="pos_fallback")
                         except (AttributeError, TypeError) as exc:
                             logger.warning("[StateIO] pos fallback alloc ledger error for %s: %s", market, exc)
 
-            # [FIX 2026-03-10] controls.strategy.mode가 OMA reason과 불일치하면 복구.
-            # 기본값이 mode="PINGPONG", enabled=False 이므로, OMA에 strategy:LADDER 등
-            # 다른 전략 태그가 있으면 controls가 제대로 적용 안 된 것이다.
+            # [FIX 2026-03-10] If controls.strategy.mode mismatches the OMA reason, recover it.
+            # The default is mode="PINGPONG", enabled=False, so if OMA carries a different
+            # strategy tag (e.g. strategy:LADDER), controls were not applied correctly.
             try:
                 ctrls = getattr(ctx, "controls", None) or {}
                 strat_cfg = ctrls.get("strategy") or {}
                 current_mode = str(strat_cfg.get("mode") or "").strip().upper()
 
-                # OMA reason에서 strategy:XXX 태그 찾기
+                # Find the strategy:XXX tag in the OMA reason
                 oma_reasons = self.oma_registry.get_reason(market) or []
                 inferred_strategy = ""
                 for r in oma_reasons:
@@ -262,7 +262,7 @@ class StateIOMixin:
                         inferred_strategy = r.split(":", 1)[1].strip().upper()
                         break
 
-                # OMA reason과 현재 mode가 다르면 복구 (기본 PINGPONG→LADDER 등)
+                # If the OMA reason differs from the current mode, recover it (e.g. default PINGPONG->LADDER)
                 if inferred_strategy and inferred_strategy not in ("UNKNOWN", "") and current_mode != inferred_strategy:
                     from app.manager.market_controls import apply_engine_controls
                     apply_engine_controls(self, market, inferred_strategy)
@@ -281,7 +281,7 @@ class StateIOMixin:
                 stale_reset_sec=int(self.context_state_stale_reset_sec),
             )
 
-    # context_state.json 비대화 방지: 이 크기(10MB) 초과 시 .bak 로테이션
+    # Prevent context_state.json bloat: rotate to .bak when it exceeds this size (10MB)
     _CONTEXT_STATE_MAX_BYTES = 10 * 1024 * 1024  # 10MB
 
     def _save_context_state(self) -> None:
@@ -329,7 +329,7 @@ class StateIOMixin:
                     guards_overridden = False
 
                 if (st in (MarketState.ACTIVE, MarketState.RECOVERY)) or has_pos or has_ord or strategy_enabled or guards_overridden:
-                    # [2026-03-09] WATCH/DISABLED: price_tail 제외 (설정만 보존, I/O 60% 감소)
+                    # [2026-03-09] WATCH/DISABLED: exclude price_tail (keep settings only, ~60% less I/O)
                     _is_live = (st in (MarketState.ACTIVE, MarketState.RECOVERY)) or has_pos or has_ord
                     _max_p = self.context_state_max_prices if _is_live else 0
                     out_contexts[m] = ctx.to_state(max_prices=_max_p)
@@ -339,12 +339,12 @@ class StateIOMixin:
                 "contexts": out_contexts,
             }
 
-            # PID+TID+ns 고유 이름 → 멀티스레드 충돌 및 Windows Defender 잠금 방지
+            # PID+TID+ns unique name -> avoid multithread collisions and Windows Defender locks
             tmp_path = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"
             try:
                 with self._state_lock:
                     # Atomic write: tmp → flush/fsync → replace
-                    # indent 제거 → 파일 크기 ~40% 감소, 쓰기 속도 향상
+                    # no indent -> ~40% smaller file, faster writes
                     with open(tmp_path, "w", encoding="utf-8") as f:
                         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
 
@@ -359,7 +359,7 @@ class StateIOMixin:
                                 raise
                             time.sleep(0.05 * (attempt + 1))
 
-                    # [2026-03-15] 비대화 방지: 크기 초과 시 .bak 로테이션 + 경고
+                    # [2026-03-15] Prevent bloat: rotate to .bak + warn when size is exceeded
                     try:
                         file_size = os.path.getsize(path)
                         if file_size > self._CONTEXT_STATE_MAX_BYTES:
@@ -369,7 +369,7 @@ class StateIOMixin:
                             except OSError as exc:
                                 logger.error("[StateIO] .bak rotation os.replace failed: %s", exc)
                             logger.warning(
-                                "[ContextState] 파일 크기 초과: %s (%.1fMB > %.1fMB) → .bak 로테이션",
+                                "[ContextState] file size exceeded: %s (%.1fMB > %.1fMB) -> .bak rotation",
                                 path, file_size / 1024 / 1024,
                                 self._CONTEXT_STATE_MAX_BYTES / 1024 / 1024,
                             )
@@ -432,8 +432,8 @@ class StateIOMixin:
             r = data.get("reserved")
             ap = data.get("autopilot")
 
-            # [FIX] guards 안에 flat하게 저장된 경우 fallback
-            # reserved/autopilot 섹션이 없으면 guards에서 추출
+            # [FIX] Fallback when settings are stored flat inside guards.
+            # If reserved/autopilot sections are missing, extract them from guards.
             if r is None and isinstance(g, dict):
                 r = {}
                 for k, v in g.items():

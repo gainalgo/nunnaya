@@ -1,16 +1,16 @@
-"""Capital Tracker — 입출금 추적 + 순수 트레이딩 성과 계산.
+"""Capital Tracker — deposit/withdraw tracking + pure trading performance.
 
-입금/출금과 무관하게 순수 트레이딩 실력을 측정하기 위한 모듈.
-TWR (Time-Weighted Return) 방식으로 자본 변동을 보정.
+Module for measuring pure trading skill independent of deposits/withdrawals.
+Corrects for capital changes using the TWR (Time-Weighted Return) method.
 
-사용법:
-  - 입금 시: POST /api/strategy/focus/capital/deposit {amount: 500}
-  - 출금 시: POST /api/strategy/focus/capital/withdraw {amount: 200}
-  - 성과 조회: GET /api/strategy/focus/capital/performance
+Usage:
+  - Deposit: POST /api/strategy/focus/capital/deposit {amount: 500}
+  - Withdraw: POST /api/strategy/focus/capital/withdraw {amount: 200}
+  - Performance: GET /api/strategy/focus/capital/performance
 
-파일:
-  - runtime/capital_events.jsonl — 입출금 이벤트 로그
-  - runtime/capital_baseline.json — 초기 자본 + 현재 기준선
+Files:
+  - runtime/capital_events.jsonl — deposit/withdraw event log
+  - runtime/capital_baseline.json — initial capital + current baseline
 """
 import json
 import os
@@ -27,16 +27,16 @@ BASELINE_PATH = os.path.join("runtime", "capital_baseline.json")
 
 
 class CapitalTracker:
-    """입출금 추적 + 순수 트레이딩 ROI 계산."""
+    """Deposit/withdraw tracking + pure trading ROI calculation."""
 
     def __init__(self, events_path: str = None, baseline_path: str = None):
-        # ★ [2026-06-23] path-aware — 거래소별 자본추적 격리(기본=전역 Bybit, 0변화).
+        # ★ [2026-06-23] path-aware — isolate capital tracking per exchange (default=global Bybit, no behavior change).
         self._events_path = events_path or EVENTS_PATH
         self._baseline_path = baseline_path or BASELINE_PATH
         self._baseline = self._load_baseline()
 
     def _load_baseline(self) -> Dict:
-        """기준선 로드. 없으면 빈 상태."""
+        """Load the baseline. Returns an empty state if none exists."""
         if os.path.exists(self._baseline_path):
             try:
                 with open(self._baseline_path, "r", encoding="utf-8") as f:
@@ -44,10 +44,10 @@ class CapitalTracker:
             except (json.JSONDecodeError, OSError):
                 pass
         return {
-            "initial_capital": 0.0,     # 최초 입금 시 설정
-            "total_deposited": 0.0,     # 누적 입금액
-            "total_withdrawn": 0.0,     # 누적 출금액
-            "net_invested": 0.0,        # 순 투자금 (입금 - 출금)
+            "initial_capital": 0.0,     # set on first deposit
+            "total_deposited": 0.0,     # cumulative deposits
+            "total_withdrawn": 0.0,     # cumulative withdrawals
+            "net_invested": 0.0,        # net invested (deposits - withdrawals)
             "created_ts": 0.0,
         }
 
@@ -55,13 +55,13 @@ class CapitalTracker:
         safe_write_json(self._baseline_path, self._baseline)
 
     def _append_event(self, event: Dict):
-        """이벤트를 JSONL에 추가."""
+        """Append an event to the JSONL log."""
         os.makedirs(os.path.dirname(self._events_path), exist_ok=True)
         with open(self._events_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
     def get_events(self) -> List[Dict]:
-        """모든 자본 이벤트 조회."""
+        """Return all capital events."""
         events = []
         if not os.path.exists(self._events_path):
             return events
@@ -79,10 +79,10 @@ class CapitalTracker:
             pass
         return events
 
-    # ── 입금 / 출금 ──
+    # ── Deposit / Withdraw ──
 
     def deposit(self, amount: float, memo: str = "") -> Dict:
-        """입금 기록."""
+        """Record a deposit."""
         if amount <= 0:
             return {"ok": False, "error": "Amount must be positive"}
 
@@ -111,7 +111,7 @@ class CapitalTracker:
         return {"ok": True, "event": event, "baseline": self._baseline}
 
     def withdraw(self, amount: float, memo: str = "") -> Dict:
-        """출금 기록."""
+        """Record a withdrawal."""
         if amount <= 0:
             return {"ok": False, "error": "Amount must be positive"}
 
@@ -136,7 +136,7 @@ class CapitalTracker:
         return {"ok": True, "event": event, "baseline": self._baseline}
 
     def set_initial(self, amount: float) -> Dict:
-        """초기 자본 설정 (첫 시작 시)."""
+        """Set the initial capital (on first start)."""
         self._baseline["initial_capital"] = round(amount, 2)
         if self._baseline["total_deposited"] == 0:
             self._baseline["total_deposited"] = round(amount, 2)
@@ -156,71 +156,71 @@ class CapitalTracker:
         logger.info("[Capital] Initial capital set to $%.2f", amount)
         return {"ok": True, "baseline": self._baseline}
 
-    # ── 성과 계산 ──
+    # ── Performance calculation ──
 
     def get_performance(self, current_equity: float, trading_pnl: float) -> Dict[str, Any]:
-        """순수 트레이딩 성과 계산.
+        """Calculate pure trading performance.
 
         Args:
-            current_equity: 현재 Bybit 지갑 잔고 (USDT)
-            trading_pnl: journal에서 계산한 총 실현 PnL
+            current_equity: current Bybit wallet balance (USDT)
+            trading_pnl: total realized PnL computed from the journal
 
         Returns:
-            순수 성과 지표들
+            pure performance metrics
         """
         net_invested = self._baseline.get("net_invested", 0)
         initial = self._baseline.get("initial_capital", 0)
 
-        # 1. 절대 수익 = 현재 잔고 - 순 투자금
+        # 1. Absolute profit = current balance - net invested
         absolute_profit = round(current_equity - net_invested, 2) if net_invested > 0 else 0
 
-        # 2. 순수 트레이딩 수익률 = 실현 PnL / 순 투자금 × 100
-        #    입출금과 무관 — journal의 pnl_net 합계만 사용
+        # 2. Pure trading ROI = realized PnL / net invested × 100
+        #    Independent of deposits/withdrawals — uses only the sum of journal pnl_net
         trading_roi_pct = round(trading_pnl / net_invested * 100, 2) if net_invested > 0 else 0
 
-        # 3. 전체 수익률 = (현재 잔고 - 순 투자금) / 순 투자금 × 100
+        # 3. Total ROI = (current balance - net invested) / net invested × 100
         total_roi_pct = round(absolute_profit / net_invested * 100, 2) if net_invested > 0 else 0
 
-        # 4. 일별 스냅샷에서 TWR 계산
+        # 4. Compute TWR from daily snapshots
         daily_snapshots = self._get_daily_roi_series()
 
-        # 5. TWR (Time-Weighted Return) — 입출금 보정
+        # 5. TWR (Time-Weighted Return) — corrects for deposits/withdrawals
         twr = 1.0
         for d in daily_snapshots:
             twr *= (1 + d.get("roi_pct", 0) / 100)
         twr_pct = round((twr - 1) * 100, 2)
 
-        # 6. 운영 기간
+        # 6. Operating period
         created = self._baseline.get("created_ts", 0)
         days_active = round((time.time() - created) / 86400, 1) if created > 0 else 0
 
-        # 7. 일 평균 수익률
+        # 7. Average daily ROI
         daily_avg_roi = round(twr_pct / max(days_active, 1), 2)
 
         return {
             "baseline": self._baseline,
             "current_equity": round(current_equity, 2),
             "net_invested": net_invested,
-            # 절대 수치
+            # absolute figures
             "absolute_profit": absolute_profit,
             "trading_pnl": round(trading_pnl, 2),
-            # 수익률
+            # ROI
             "trading_roi_pct": trading_roi_pct,
             "total_roi_pct": total_roi_pct,
             "twr_pct": twr_pct,
-            # 일별 통계
+            # daily stats
             "days_active": days_active,
             "daily_avg_roi_pct": daily_avg_roi,
             "daily_snapshots_count": len(daily_snapshots),
         }
 
     def _get_daily_roi_series(self) -> List[Dict]:
-        """일별 스냅샷에서 ROI% 시리즈 추출."""
+        """Extract the ROI% series from daily snapshots."""
         from app.manager.focus_daily_snapshot import get_all_snapshots
         snapshots = get_all_snapshots()
         series = []
         for snap in snapshots:
-            # 스냅샷에 equity_start가 있으면 정밀 ROI 계산
+            # If the snapshot has equity_start, compute a precise ROI
             equity_start = snap.get("equity_start", 0)
             pnl = snap.get("total_pnl", 0)
             if equity_start > 0:
@@ -237,17 +237,17 @@ class CapitalTracker:
         return series
 
     def get_status(self) -> Dict:
-        """현재 자본 추적 상태."""
+        """Current capital tracking state."""
         return {
             "baseline": self._baseline,
             "events_count": len(self.get_events()),
         }
 
 
-# Singleton (전역 Bybit/Harpoon — 0변화)
+# Singleton (global Bybit/Harpoon — no behavior change)
 capital_tracker = CapitalTracker()
 
-# Per-path 레지스트리 (거래소별 자본추적 격리). get_capital_tracker(None)=전역 singleton.
+# Per-path registry (isolate capital tracking per exchange). get_capital_tracker(None)=global singleton.
 import threading as _threading
 _TRACKERS = {None: capital_tracker}
 _TRACKERS_LOCK = _threading.Lock()

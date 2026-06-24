@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # Entry timeout: auto-disable markets with no position after this period
 ENTRY_TIMEOUT_SEC = env_float("OMA_LADDER_ENTRY_TIMEOUT_SEC", default=180.0)
 
-# Limit order mode: True=지정가 그리드(피뢰침), False=시장가 fallback(기존 방식)
+# Limit order mode: True=limit-order grid (lightning rod), False=market-order fallback (legacy)
 LADDER_LIMIT_ORDERS = env_bool("OMA_LADDER_LIMIT_ORDERS", default=True)
 
 
@@ -834,7 +834,7 @@ class LadderGridV3:
             self.mgr.save_config(existing)
 
             # OMA ACTIVE + LADDER
-            # NOTE: Bootstrap은 사용자 수동 Deploy로만 호출됨 (confidence gate N/A)
+            # NOTE: Bootstrap is only invoked via user manual Deploy (confidence gate N/A)
             try:
                 system.oma_set_market(
                     market, MarketState.ACTIVE,

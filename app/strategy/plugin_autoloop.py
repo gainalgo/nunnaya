@@ -25,10 +25,10 @@ logger = logging.getLogger(__name__)
 
 
 class AutoloopPlugin(StrategyPlugin):
-    """오토로푸 전략 플러그인.
+    """Autoloop strategy plugin.
 
-    핵심 지표는 RSI + MACD 이며, 실제 계산/부트스트랩 로직은
-    app.engine.autoloop_strategy 에서 처리한다.
+    Core indicators are RSI + MACD; the actual calculation/bootstrap logic
+    is handled in app.engine.autoloop_strategy.
     """
 
     name: str = "autoloop"
@@ -40,12 +40,12 @@ class AutoloopPlugin(StrategyPlugin):
             if isinstance(ctrls, dict):
                 params = dict((ctrls.get("strategy") or {}).get("params") or {})
         except (KeyError, AttributeError, TypeError):
-            logger.warning("[%s] params 추출 실패 → 기본값 사용: %s", self.name if hasattr(self, 'name') else '?', getattr(ctx, 'market', '?'), exc_info=True)
+            logger.warning("[%s] failed to extract params → using defaults: %s", self.name if hasattr(self, 'name') else '?', getattr(ctx, 'market', '?'), exc_info=True)
             params = {}
 
         # --------------------------------------------------------
         # AI-Driven Dynamic Tuning (Autoloop) - 2026-01-30 v2
-        # 전략별 AI 임계값 + Regime 적합도 기반 동적 조절
+        # Per-strategy AI threshold + dynamic adjustment based on regime fit
         # --------------------------------------------------------
         ai_score = 0.5
         regime = "UNKNOWN"
@@ -54,12 +54,12 @@ class AutoloopPlugin(StrategyPlugin):
             ai_score = float(brain.get("ai_prediction", 0.5))
             regime = str(brain.get("regime", "UNKNOWN")).upper()
 
-        # 전략별 AI 조정
+        # Per-strategy AI adjustment
         ai_adjustment = adjust_ai_score_for_strategy(ai_score, strategy="autoloop", regime=regime)
         tp_scale = ai_adjustment["tp_scale"]
         sl_scale = ai_adjustment["sl_scale"]
 
-        # tp_sl_mode: "auto" (AI/ATR 동적 조정 허용) | "manual" (사용자 고정값 잠금)
+        # tp_sl_mode: "auto" (allow AI/ATR dynamic adjustment) | "manual" (lock user fixed values)
         tp_sl_mode = str(params.get("tp_sl_mode", "auto")).strip().lower()
         is_manual = tp_sl_mode == "manual"
 
@@ -69,7 +69,7 @@ class AutoloopPlugin(StrategyPlugin):
             shift = factor * 20.0
             params["rsi_buy"] = max(10.0, min(60.0, float(params.get("rsi_buy", 28.0)) + shift))
             params["rsi_sell"] = max(40.0, min(90.0, float(params.get("rsi_sell", 58.0)) + shift))
-            # TP/SL 스케일 적용 (manual 모드면 건너뜀)
+            # Apply TP/SL scale (skipped in manual mode)
             if not is_manual:
                 base_tp = float(params.get("tp_pct", 2.5))
                 params["tp_pct"] = max(1.2, base_tp * tp_scale)
@@ -96,14 +96,14 @@ class AutoloopPlugin(StrategyPlugin):
             except (KeyError, AttributeError, TypeError, ValueError) as exc:
                 logger.warning("[AUTOLOOP_PLUGIN] Online Calibration Overlay: %s", exc, exc_info=True)
 
-        # ── 2-A: 포지션 체크 ──
+        # ── 2-A: position check ──
         pos_al = getattr(ctx, "position", None)
         has_pos_al = bool(pos_al and float((pos_al.get("qty") if isinstance(pos_al, dict) else getattr(pos_al, "qty", 0)) or 0) > 0)
 
-        # ── LongHold: 서버 재시작 시 config에서 플래그 복원 ──
+        # ── LongHold: restore flag from config on server restart ──
         if has_pos_al:
             _restore_longhold_flag_from_config(ctx)
-        # ── LongHold 전환 완료 → 회복 체크 후 hold 유지 ──
+        # ── LongHold conversion done → check recovery then keep hold ──
         if has_pos_al and ctx.get_var("longhold_converted", False):
             if not _check_longhold_recovery(ctx, pos_al, price, "AUTOLOOP"):
                 return Decision(signal="hold", reason="autoloop:longhold_active",
@@ -112,8 +112,8 @@ class AutoloopPlugin(StrategyPlugin):
             ctx.set_var("longhold_converted", False)
             _unregister_longhold(getattr(ctx, "market", ""))
 
-        # ── [2026-03-09] selector 신뢰 즉시매수 ──
-        # [2026-03-30] 급락 방어: selector 즉시매수 전 최소 안전장치
+        # ── [2026-03-09] selector trust immediate buy ──
+        # [2026-03-30] crash defense: minimal safeguard before selector immediate buy
         if not has_pos_al:
             _safe_to_enter = True
             _block_reason = ""
@@ -139,7 +139,7 @@ class AutoloopPlugin(StrategyPlugin):
             if not _safe_to_enter:
                 return Decision(signal="hold", reason=f"autoloop:selector_entry_blocked:{_block_reason}",
                                 meta={"selector_blocked": True, "block_reason": _block_reason})
-            # GreenPen PA 확인
+            # GreenPen PA check
             if bool(params.get("greenpen_enabled", False)):
                 from app.strategy.greenpen import check_entry_guard
                 _gp = check_entry_guard("AUTOLOOP", getattr(ctx, "_tick_prices", None) or list(getattr(ctx, "price_history", []) or []), price)
@@ -169,7 +169,7 @@ class AutoloopPlugin(StrategyPlugin):
         # --------------------------------------------------------
         # Sell lock (pairing) — never move sell line down
         # --------------------------------------------------------
-        # entry는 SL/DCA 계산에서도 사용되므로 lock 여부와 무관하게 초기화
+        # entry is also used in SL/DCA calculations, so initialize regardless of lock state
         entry = qty = high = 0.0
         lock_mode = str(params.get("sell_lock_mode", "TRAIL_UP") or "TRAIL_UP").upper()
         lock_enabled = lock_mode not in ("OFF", "DISABLED", "NONE", "0", "FALSE")
@@ -200,35 +200,35 @@ class AutoloopPlugin(StrategyPlugin):
                         or 0.0
                     )
             except (KeyError, AttributeError, TypeError, ValueError):
-                logger.warning("[AUTOLOOP] position 파싱 실패: %s", getattr(ctx, "market", "?"), exc_info=True)
+                logger.warning("[AUTOLOOP] failed to parse position: %s", getattr(ctx, "market", "?"), exc_info=True)
                 entry = qty = high = 0.0
 
             if entry > 0 and qty > 0:
                 try:
                     lock_entry = float(ctx.get_var("al_locked_entry", 0.0) or 0.0)
                 except (TypeError, ValueError):
-                    logger.warning("[AUTOLOOP] lock_entry 파싱 실패: %s", getattr(ctx, "market", "?"), exc_info=True)
+                    logger.warning("[AUTOLOOP] failed to parse lock_entry: %s", getattr(ctx, "market", "?"), exc_info=True)
                     lock_entry = 0.0
                 try:
                     lock_price = float(ctx.get_var("al_locked_sell_price", 0.0) or 0.0)
                 except (TypeError, ValueError):
-                    logger.warning("[AUTOLOOP] lock_price 파싱 실패: %s", getattr(ctx, "market", "?"), exc_info=True)
+                    logger.warning("[AUTOLOOP] failed to parse lock_price: %s", getattr(ctx, "market", "?"), exc_info=True)
                     lock_price = 0.0
 
                 if lock_entry != entry:
-                    # 진입가 변경 시 lock_entry와 lock_price를 원자적으로 초기화
+                    # On entry price change, atomically reset lock_entry and lock_price
                     lock_entry = entry
                     lock_price = 0.0
                     try:
                         ctx.set_var("al_locked_entry", float(lock_entry))
                         ctx.set_var("al_locked_sell_price", 0.0)
                     except (TypeError, ValueError):
-                        logger.warning("[AUTOLOOP] lock 원자적 초기화 실패: %s — TP 계산 과거 가격 사용 위험", getattr(ctx, "market", "?"))
+                        logger.warning("[AUTOLOOP] failed to atomically reset lock: %s — risk of using stale price in TP calc", getattr(ctx, "market", "?"))
 
                 try:
                     tp_pct = float(params.get("tp_pct", params.get("tp", 2.5)) or 2.5)
                 except (KeyError, AttributeError, TypeError, ValueError):
-                    logger.warning("[AUTOLOOP] tp_pct 파싱 실패: %s", getattr(ctx, "market", "?"), exc_info=True)
+                    logger.warning("[AUTOLOOP] failed to parse tp_pct: %s", getattr(ctx, "market", "?"), exc_info=True)
                     tp_pct = 2.5
                 if tp_pct <= 0:
                     tp_pct = 0.5
@@ -239,7 +239,7 @@ class AutoloopPlugin(StrategyPlugin):
                 try:
                     prev_high = float(ctx.get_var("al_high_since_entry", 0.0) or 0.0)
                 except (TypeError, ValueError):
-                    logger.warning("[AUTOLOOP] prev_high 파싱 실패: %s", getattr(ctx, "market", "?"), exc_info=True)
+                    logger.warning("[AUTOLOOP] failed to parse prev_high: %s", getattr(ctx, "market", "?"), exc_info=True)
                     prev_high = 0.0
                 if high <= 0:
                     high = prev_high
@@ -248,22 +248,22 @@ class AutoloopPlugin(StrategyPlugin):
                 try:
                     ctx.set_var("al_high_since_entry", float(high))
                 except (TypeError, ValueError):
-                    logger.warning("[AUTOLOOP] 고점 추적 실패: %s — trailing TP 계산 오류 위험", getattr(ctx, "market", "?"))
+                    logger.warning("[AUTOLOOP] failed to track high: %s — risk of trailing TP calc error", getattr(ctx, "market", "?"))
 
                 try:
                     from app.monitor.time_volatility_adjuster import get_time_volatility_multiplier
                     time_mult = get_time_volatility_multiplier()
                 except (ImportError, AttributeError, TypeError):
-                    logger.warning("[AUTOLOOP] time_volatility_multiplier 가져오기 실패", exc_info=True)
+                    logger.warning("[AUTOLOOP] failed to get time_volatility_multiplier", exc_info=True)
                     time_mult = 1.0
                 try:
                     trail_base = float(params.get("trailing_pct", 1.2) or 1.2)
                 except (KeyError, AttributeError, TypeError, ValueError):
-                    logger.warning("[AUTOLOOP] trail_base 파싱 실패: %s", getattr(ctx, "market", "?"), exc_info=True)
+                    logger.warning("[AUTOLOOP] failed to parse trail_base: %s", getattr(ctx, "market", "?"), exc_info=True)
                     trail_base = 1.2
-                # ── 2-B: Range Guard — 횡보 구간에서 trailing을 넓혀 휩쏘 방지 ──
+                # ── 2-B: Range Guard — widen trailing in ranging market to avoid whipsaw ──
                 if not is_manual and regime == "RANGE":
-                    trail_base = trail_base * 1.5  # 횡보 시 trailing 50% 확대
+                    trail_base = trail_base * 1.5  # widen trailing by 50% when ranging
                 trail_pct = trail_base * time_mult
                 if high > 0 and trail_pct > 0:
                     trail_price = high * (1.0 - trail_pct / 100.0)
@@ -292,7 +292,7 @@ class AutoloopPlugin(StrategyPlugin):
                 except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
                     logger.warning("[AUTOLOOP_PLUGIN] sell lock reset: %s", exc, exc_info=True)
 
-        # lock OFF이어도 SL/DCA에서 entry가 필요하므로 추출
+        # Even with lock OFF, entry is needed for SL/DCA, so extract it
         if not lock_enabled and entry <= 0 and has_pos_al:
             try:
                 _pos = getattr(ctx, "position", None)
@@ -301,7 +301,7 @@ class AutoloopPlugin(StrategyPlugin):
                 elif _pos is not None:
                     entry = float(getattr(_pos, "entry", 0) or getattr(_pos, "avg_price", 0) or 0.0)
             except (KeyError, AttributeError, TypeError, ValueError):
-                logger.warning("[AUTOLOOP] entry 추출 실패 (lock OFF): %s", getattr(ctx, "market", "?"), exc_info=True)
+                logger.warning("[AUTOLOOP] failed to extract entry (lock OFF): %s", getattr(ctx, "market", "?"), exc_info=True)
                 entry = 0.0
 
         # Inject AI score + regime into telemetry
@@ -311,7 +311,7 @@ class AutoloopPlugin(StrategyPlugin):
 
             _inject_candle_1m_telemetry(ctx, meta["telemetry"])
 
-        # ── AUTOLOOP SL 확인 (2틱 연속 — 노이즈 방어) + DCA ──
+        # ── AUTOLOOP SL confirm (2 consecutive ticks — noise defense) + DCA ──
         _al_sl_pct_for_dca = float(params.get("sl_pct", -2.5) or -2.5)
         if _al_sl_pct_for_dca > 0:
             _al_sl_pct_for_dca = -_al_sl_pct_for_dca
@@ -325,11 +325,11 @@ class AutoloopPlugin(StrategyPlugin):
             if _al_sl_streak < _al_sl_confirm_need:
                 return Decision(signal="hold", reason="autoloop:sl_confirming", meta=meta)
             ctx.set_var("al_sl_streak", 0)
-            # DCA 물타기 먼저 시도
+            # Try DCA averaging first
             dca_result = _common_dca_check(ctx, price, entry, params, "al", meta)
             if dca_result is not None:
                 return dca_result
-            # ── DCA 불가 → SL → LongHold 전환 시도 ──
+            # ── DCA not possible → SL → try LongHold conversion ──
             _lh_market = getattr(ctx, "market", "")
             _lh_result = _try_convert_to_longhold(ctx, _lh_market, "AUTOLOOP", entry, price, meta)
             if _lh_result is not None:
@@ -339,7 +339,7 @@ class AutoloopPlugin(StrategyPlugin):
         if not has_pos_al:
             _reset_dca_state(ctx, "al")
 
-        # 주문 보정 (매수/매도 시에만)
+        # Order adjustment (only on buy/sell)
         if sig in ("buy", "sell"):
             market = getattr(ctx, "market", "BTCUSDT")
             amount = meta.get("amount", Q.min_order)

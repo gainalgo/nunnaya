@@ -13,12 +13,12 @@ router = APIRouter(tags=["ui"])
 # NOTE: Root redirect ("/") is defined in app/main.py to avoid duplicate operation_id
 
 
-@router.get("/api/ui/config", summary="UI 설정", description="UI에서 사용할 설정 정보 (기축통화 등)")
+@router.get("/api/ui/config", summary="UI settings", description="Settings info for the UI (quote currency, etc.)")
 def ui_config() -> Dict[str, Any]:
-    """UI 초기화에 필요한 설정 정보를 반환합니다.
-    
+    """Return the settings info needed to initialize the UI.
+
     Returns:
-        quote_currency: 현재 기축통화 설정 (symbol, decimals, min_order 등)
+        quote_currency: current quote currency settings (symbol, decimals, min_order, etc.)
     """
     return {
         "ok": True,

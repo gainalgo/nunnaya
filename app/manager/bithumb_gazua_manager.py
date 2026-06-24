@@ -1,12 +1,14 @@
 # ============================================================
-# Bithumb 현물 FOCUS 매니저 — SpotGazuaManager 상속
+# Bithumb spot FOCUS manager — subclasses SpotGazuaManager
 # ------------------------------------------------------------
-# [2026-06-17 부모] 빗썸 계정으로 같은 봇 한 벌 더.
-# SpotGazuaManager 는 거래소 무관(client + state_path 만 의존)이라
-# 빗썸 client + 별도 state_path 로 그대로 재사용한다. 두뇌(스캔/진입/청산/
-# 점수/예산/경고) 로직 일절 복제 안 함 — client 만 BithumbTradeClient.
+# [2026-06-17 owner] Run one more copy of the same bot on a Bithumb account.
+# SpotGazuaManager is exchange-agnostic (depends only on client + state_path),
+# so reuse it as-is with a Bithumb client + separate state_path. None of the
+# brain logic (scan/entry/exit/scoring/budget/alerts) is duplicated — only the
+# client is BithumbTradeClient.
 #
-# 격리: state/journal 은 runtime/bithumb/ 로 분리 → Upbit 과 자본·상태 완전 독립.
+# Isolation: state/journal live under runtime/bithumb/ → fully independent
+# capital and state from Upbit.
 # ============================================================
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ from app.manager.spot_gazua_manager import SpotGazuaManager
 
 
 class BithumbGazuaManager(SpotGazuaManager):
-    """빗썸 현물 long-only FOCUS. SpotGazuaManager 와 동일 로직, client/state 만 빗썸."""
+    """Bithumb spot long-only FOCUS. Same logic as SpotGazuaManager, only client/state are Bithumb."""
 
     def __init__(self, system: Any = None, client: Any = None, *, state_path: Optional[str] = None):
         if client is None:
@@ -33,5 +35,5 @@ class BithumbGazuaManager(SpotGazuaManager):
                 state_path = os.path.join("runtime", "bithumb", "bithumb_focus_config.json")
                 os.makedirs(os.path.dirname(state_path), exist_ok=True)
         super().__init__(system=system, client=client, state_path=state_path)
-        # 저널도 빗썸 디렉터리·이름으로 (Upbit 기본 이름 덮어쓰기 — 자본/기록 격리)
+        # Journal also uses the Bithumb dir/name (override Upbit default name — capital/record isolation)
         self.journal_path = os.path.join(os.path.dirname(state_path), "bithumb_focus_journal.jsonl")

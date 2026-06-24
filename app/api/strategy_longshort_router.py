@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # Endpoint-specific lock (not shared utility — stays here)
 # ============================================================
-_scope_deploy_lock = threading.Lock()  # 멀티 브라우저 동시 배포 방지
+_scope_deploy_lock = threading.Lock()  # prevent concurrent deploy from multiple browsers
 
 router = APIRouter()
 
@@ -314,8 +314,8 @@ def longshort_scope(
     force_refresh: bool = Query(False, description="Force refresh (skip cache)"),
 ):
     """
-    한 코인 전용 Precision Sniper 분석.
-    8-stage 필터로 신뢰도(0-100%) 산출 + 최적 파라미터 + FIRE 시그널.
+    Precision Sniper analysis for a single coin.
+    8-stage filter producing a confidence score (0-100%) + optimal parameters + FIRE signal.
     """
     import time as _time
 
@@ -329,10 +329,10 @@ def longshort_scope(
         if cached is not None:
             return cached
 
-    # ── 데이터 수집 (캔들 1회만 fetch → 지표 + MTF AI 모두 재사용) ──
+    # ── Data collection (fetch candles once → reused for both indicators and MTF AI) ──
     from app.core.multi_timeframe_ai import fetch_candles, calculate_timeframe_score, _extract_prices_from_candles, _extract_volumes_from_candles
 
-    # 현재가: price_store 우선, 없으면 exchange ticker 직접 조회
+    # Current price: prefer price_store, otherwise query the exchange ticker directly
     current_price = price_store.get_price(market_norm) or 0.0
     if current_price <= 0:
         try:
@@ -344,11 +344,11 @@ def longshort_scope(
                         current_price = float(_tc.get("trade_price") or 0)
                         break
         except Exception as exc:
-            logger.warning("[LONGSHORT_API] 현재가: price_store 우선, 없으면 exchange ticker 직접 조회: %s", exc, exc_info=True)
+            logger.warning("[LONGSHORT_API] current price ticker fallback failed: %s", exc, exc_info=True)
     if current_price <= 0:
         return {"ok": False, "error": "Price not available", "market": market_norm}
 
-    # 캔들 1회 수집 (API 3회만 호출)
+    # Collect candles once (only 3 API calls)
     candles_5m = _fetch_scope_candles_cached(
         market_norm,
         unit=5,
@@ -379,7 +379,7 @@ def longshort_scope(
     if len(prices_5m) < 20:
         return {"ok": False, "error": "Insufficient candle data", "market": market_norm}
 
-    # ── 지표 계산 ──
+    # ── Indicator calculation ──
     rsi_val = indicators.rsi(prices_5m, 14) or 50.0
     rsi_15m = indicators.rsi(prices_15m, 14) if len(prices_15m) >= 15 else None
     rsi_60m = indicators.rsi(prices_60m, 14) if len(prices_60m) >= 15 else None
@@ -422,7 +422,7 @@ def longshort_scope(
         else None
     )
 
-    # 거래량 서지
+    # Volume surge
     vol_surge_ratio = 1.0
     if len(volumes_5m) >= 10:
         recent_vol = sum(volumes_5m[-3:]) / 3.0 if len(volumes_5m) >= 3 else 0
@@ -430,20 +430,20 @@ def longshort_scope(
         if avg_vol > 0:
             vol_surge_ratio = recent_vol / avg_vol
 
-    # 지지/저항 (최근 60m 캔들 기준)
+    # Support/resistance (based on recent 60m candles)
     lows_60m = [float(c.get("low_price") or 0) for c in candles_60m if c.get("low_price")]
     highs_60m = [float(c.get("high_price") or 0) for c in candles_60m if c.get("high_price")]
     support = min(lows_60m) if lows_60m else current_price * 0.95
     resistance = max(highs_60m) if highs_60m else current_price * 1.05
 
-    # N분 최저가 근접도
+    # Proximity to the N-minute low
     lows_5m = [float(c.get("low_price") or 0) for c in candles_5m if c.get("low_price")]
     highs_5m = [float(c.get("high_price") or 0) for c in candles_5m if c.get("high_price")]
     period_low = min(lows_5m) if lows_5m else current_price
     period_high = max(highs_5m) if highs_5m else current_price
     dist_from_low_pct = ((current_price - period_low) / period_low * 100) if period_low > 0 else 999
 
-    # Multi-TF AI (이미 가져온 캔들 재사용 — 추가 API 호출 0)
+    # Multi-TF AI (reuses already-fetched candles — 0 extra API calls)
     tf_scores = []
     for tf_unit, tf_candles in [(5, candles_5m), (15, candles_15m), (60, candles_60m)]:
         if tf_candles:
@@ -458,7 +458,7 @@ def longshort_scope(
         ai_score = 0.5
         ai_signal = "hold"
 
-    # BTC 레짐
+    # BTC regime
     btc_detector = get_btc_leading_detector()
     btc_regime = "TREND"
     btc_signal = None
@@ -482,14 +482,14 @@ def longshort_scope(
     stages = []
     confidence = 0
 
-    # Stage 1: Near low (24 pts) — 가장 우선
+    # Stage 1: Near low (24 pts) — highest priority
     s1_pass = dist_from_low_pct <= 1.8
     s1_score = max(0, 24 - dist_from_low_pct * 8) if dist_from_low_pct <= 3.0 else 0
     stages.append({"stage": 1, "name": "Near Low", "pass": s1_pass, "score": round(s1_score, 1),
                     "detail": f"dist={dist_from_low_pct:.2f}%"})
     confidence += s1_score
 
-    # Stage 2: RSI oversold (22 pts) — 저점 매수 핵심
+    # Stage 2: RSI oversold (22 pts) — core of dip buying
     s2_pass = rsi_val < 38
     s2_score = min(22, max(0, (45 - rsi_val) * 0.9)) if rsi_val < 45 else 0
     stages.append({"stage": 2, "name": "RSI Oversold", "pass": s2_pass, "score": round(s2_score, 1),
@@ -510,29 +510,29 @@ def longshort_scope(
                     "detail": f"ratio={vol_surge_ratio:.2f}x"})
     confidence += s4_score
 
-    # Stage 5: EMA 역배열 — 하락추세 = 저점 환경 (8 pts) [FIX H5: compute_scope_score·multi_scan과 기준 통일]
+    # Stage 5: EMA inversion — downtrend = dip environment (8 pts) [FIX H5: criteria unified with compute_scope_score / multi_scan]
     ema_inverted = bool(ema_short and ema_mid and ema_short < ema_mid)
     s5_pass = ema_inverted
     s5_score = 8 if (ema_inverted and rsi_val < 40) else (4 if ema_inverted else 0)
-    stages.append({"stage": 5, "name": "EMA 역배열", "pass": s5_pass, "score": round(s5_score, 1),
+    stages.append({"stage": 5, "name": "EMA Inversion", "pass": s5_pass, "score": round(s5_score, 1),
                     "detail": f"inverted={ema_inverted}"})
     confidence += s5_score
 
-    # Stage 6: AI Score (7 pts) — 보조 지표
+    # Stage 6: AI Score (7 pts) — auxiliary indicator
     s6_pass = ai_score >= 0.62
     s6_score = min(7, max(0, (ai_score - 0.45) * 40)) if ai_score > 0.45 else 0
     stages.append({"stage": 6, "name": "AI Score", "pass": s6_pass, "score": round(s6_score, 1),
                     "detail": f"ai={ai_score:.3f} ({ai_signal})"})
     confidence += s6_score
 
-    # Stage 7: BTC regime (5 pts) — 안전 필터
+    # Stage 7: BTC regime (5 pts) — safety filter
     s7_pass = btc_regime != "SHOCK"
     s7_score = 5 if btc_regime == "TREND" else (4 if btc_regime == "RECOVERY" else (2 if btc_regime == "DRIFT" else 0))
     stages.append({"stage": 7, "name": "BTC Regime", "pass": s7_pass, "score": round(s7_score, 1),
                     "detail": f"regime={btc_regime}"})
     confidence += s7_score
 
-    # Stage 8: Momentum + MACD (15 pts) — 추세 전환 확인
+    # Stage 8: Momentum + MACD (15 pts) — trend-reversal confirmation
     mom_component = min(8, max(0, (momentum_val + 0.8) * 5.0)) if momentum_val > -0.8 else 0
     macd_component = 0.0
     if macd_line_5 is not None and macd_line_5 > -0.02:
@@ -571,14 +571,14 @@ def longshort_scope(
     elif confidence >= 50:
         fire_level = "READY"
 
-    # ── 파동(Wave) 분석 [FIX L5: 공통 함수 _compute_wave_metrics 사용으로 중복 제거] ──
+    # ── Wave analysis [FIX L5: use shared helper _compute_wave_metrics to remove duplication] ──
     wave_analysis = _compute_wave_metrics(prices_5m, candle_min=5, fee_pct=0.10)
     avg_up_amp = wave_analysis["avg_up_amp_pct"]
     avg_down_amp = wave_analysis["avg_down_amp_pct"]
 
 
-    # ── Optimal parameters (ATR-based, 파동 진폭 반영) ──
-    # Entry/Exit를 파동 진폭 기반으로도 산출하여 더 현실적인 값 사용
+    # ── Optimal parameters (ATR-based, reflecting wave amplitude) ──
+    # Also derive Entry/Exit from wave amplitude for more realistic values
     wave_entry = round(max(0.1, avg_up_amp * 0.15), 2) if avg_up_amp > 0 else 0
     wave_exit = round(max(0.1, avg_up_amp * 0.12), 2) if avg_up_amp > 0 else 0
     range_pct = ((period_high - period_low) / period_low * 100) if period_low > 0 else 2.0
@@ -662,15 +662,15 @@ def _scope_entry_gate_from_deep_result(
     ai_min_score: float = 0.55,
     rsi_entry_max: float = 42.0,
 ) -> Dict[str, Any]:
-    """Precision Scope deep result → 슬롯 배치 적합성 판단.
+    """Precision Scope deep result → suitability for slot placement.
 
-    [2026-03-07 리팩토링]
-    이 함수는 "즉시 매수 가능 여부"가 아니라 "감시 슬롯에 앉힐 가치가 있는가"를 판단.
-    실제 매수 타이밍은 SniperPlugin.decide()가 BPS/RSI/AI 등으로 정밀 판단.
+    [2026-03-07 refactor]
+    This function judges "is it worth seating in a watch slot", not "can it be bought right now".
+    The actual buy timing is decided precisely by SniperPlugin.decide() via BPS/RSI/AI, etc.
 
-    차단 조건 (hard block):
-    - market_flow 문제 (스프레드 과대, 호가 부족 등) → 체결 자체가 불가능
-    경고 조건 (soft — 슬롯 배치는 허용, 매수는 plugin이 결정):
+    Block conditions (hard block):
+    - market_flow issues (excessive spread, insufficient orderbook depth, etc.) → fill itself impossible
+    Warning conditions (soft — slot placement allowed, the buy is decided by the plugin):
     - wave_unprofitable, entry_not_near_low, ai_gate, rsi_entry
     """
     rec = deep_result.get("optimal_params", {}) or {}
@@ -689,7 +689,7 @@ def _scope_entry_gate_from_deep_result(
     rsi_5m = _to_float(indicators_map.get("rsi_5m"), 50.0)
     profitable = bool(wave.get("profitable", False))
 
-    # 모든 이유를 수집 (정보 제공용)
+    # Collect all reasons (informational)
     reasons: List[str] = []
     if not profitable:
         reasons.append("wave_unprofitable")
@@ -706,12 +706,12 @@ def _scope_entry_gate_from_deep_result(
 
     uniq_reasons = list(dict.fromkeys(reasons))
 
-    # 슬롯 배치 판단: market_flow만 hard block, 나머지는 soft warning
-    # → 슬롯에 앉힌 후 실시간 신뢰도 모니터링 → Fire 시점에 plugin이 정밀 판단
+    # Slot placement decision: only market_flow is a hard block, the rest are soft warnings
+    # → after seating in a slot, monitor confidence in real time → the plugin decides precisely at Fire time
     _market_flow_reasons = [r for r in uniq_reasons
                             if r not in ("wave_unprofitable", "entry_not_near_low",
                                          "ai_gate", "rsi_entry")]
-    gate_ok = not _market_flow_reasons  # market_flow 문제 없으면 슬롯 배치 OK
+    gate_ok = not _market_flow_reasons  # OK to place in slot if there are no market_flow issues
 
     return {
         "ok": gate_ok,
@@ -742,7 +742,7 @@ def evaluate_scope_deploy_candidate(
     *,
     force_refresh: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """추천/배치/자동충원이 동일하게 쓰는 Precision Scope 최종 점수."""
+    """Final Precision Scope score shared by recommendation/deploy/autofill."""
     try:
         scope_request = SimpleNamespace(
             app=SimpleNamespace(
@@ -794,7 +794,7 @@ def evaluate_scope_deploy_candidate(
 
 # ============================================================
 # LONG/SHORT Multi-Slot Precision Sniper Scanner
-# [2026-02-24] 다수 코인 동시 스캔 → 수익성 순위 정렬
+# [2026-02-24] scan many coins concurrently → sort by profitability rank
 # ============================================================
 
 @router.get(
@@ -813,8 +813,8 @@ def longshort_multi_scan(
     max_price: float = Query(0, ge=0, description="Maximum coin price (USDT, 0=no limit)"),
 ):
     """
-    다수 마켓 동시 스캔.
-    6-stage 경량 필터(AI/BTC 제외)로 수익성 순위 산출.
+    Scan many markets concurrently.
+    Produce a profitability ranking via a 6-stage lightweight filter (AI/BTC excluded).
     """
     import time as _time
     system = request.app.state.system
@@ -848,7 +848,7 @@ def longshort_multi_scan(
         _extract_volumes_from_candles,
     )
 
-    # ── 1. 마켓 목록 가져오기 (isDetails=true → 지원정지/유의 필터) ──
+    # ── 1. Fetch market list (isDetails=true → filter delisted/caution markets) ──
     try:
         mkt_resp = bybit_get(BYBIT_MARKET_INSTRUMENTS, params={"category": bybit_v5_rest_category()}, timeout=5.0)
         all_instruments = parse_bybit_list(mkt_resp.json())
@@ -876,10 +876,11 @@ def longshort_multi_scan(
     if not markets_all:
         return {"ok": False, "error": "No markets found"}
 
-    # ── 2. 티커 조회(전체 마켓 대상, chunked) ──
+    # ── 2. Fetch tickers (over all markets, chunked) ──
     # NOTE:
-    # 기존 구현은 마켓 목록의 앞 scan_count개만 티커를 조회해 붙박이 후보가 반복됐다.
-    # 전체 마켓에서 거래대금 상위 scan_count개를 선별하도록 변경한다.
+    # The previous implementation fetched tickers only for the first scan_count markets,
+    # so the same candidates kept repeating. Changed to select the top scan_count markets
+    # by trading value across the entire universe.
     tickers = []
     try:
         market_set = set(m.upper() for m in markets_all)
@@ -920,7 +921,7 @@ def longshort_multi_scan(
             "excluded_strategy_occupied": 0,
         }
 
-    # 24h 거래대금 기준 정렬 후 scan_count(0=전체)만큼 선별
+    # Sort by 24h trading value, then select scan_count (0=all)
     sorted_by_liquidity = sorted(
         ticker_map.items(),
         key=lambda kv: float((kv[1] or {}).get("acc_trade_price_24h") or 0.0),
@@ -953,7 +954,7 @@ def longshort_multi_scan(
                                     ticker_map[focus] = _tc
                                 break
             except Exception as exc:
-                logger.warning("[LONGSHORT_API] Optional user focus market: include explicitly even if it is outside liquidity t: %s", exc, exc_info=True)
+                logger.warning("[LONGSHORT_API] focus market ticker fetch failed: %s", exc, exc_info=True)
         if focus in ticker_map and focus not in filtered_markets:
             filtered_markets.append(focus)
     if not filtered_markets:
@@ -967,7 +968,7 @@ def longshort_multi_scan(
             "excluded_strategy_occupied": 0,
         }
 
-    # ── 2b. 이미 ACTIVE/RECOVERY이거나 다른 전략이 점유한 마켓 제외 (전략 간 충돌 방지) ──
+    # ── 2b. Exclude markets that are already ACTIVE/RECOVERY or occupied by another strategy (prevent inter-strategy conflicts) ──
     held_market_set: set = set()
     try:
         tc = getattr(system, "trade_client", None)
@@ -979,7 +980,7 @@ def longshort_multi_scan(
                 if cur and (bal + locked) > 0.0:
                     held_market_set.add(Q.market(cur))
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
-        logger.warning("[LONGSHORT_API] ── 2b. 이미 ACTIVE/RECOVERY이거나 다른 전략이 점유한 마켓 제외 (전략 간 충돌 방지) ──: %s", exc, exc_info=True)
+        logger.warning("[LONGSHORT_API] exclude active/occupied markets failed: %s", exc, exc_info=True)
 
     contexts = getattr(system.coordinator, "contexts", {}) or {}
 
@@ -1000,7 +1001,7 @@ def longshort_multi_scan(
             if market in held_market_set or has_pos:
                 active_set.add(market)
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
-        logger.warning("[LONGSHORT_API] ── 2b. 이미 ACTIVE/RECOVERY이거나 다른 전략이 점유한 마켓 제외 (전략 간 충돌 방지) ──: %s", exc, exc_info=True)
+        logger.warning("[LONGSHORT_API] exclude active/occupied markets failed: %s", exc, exc_info=True)
 
     strategy_occupied_set: set = set()
     try:
@@ -1049,7 +1050,7 @@ def longshort_multi_scan(
             "excluded_strategy_occupied": excluded_strategy_occupied_count,
         }
 
-    # ── 3. 5분 캔들 병렬 수집 ──
+    # ── 3. Collect 5-minute candles in parallel ──
     candle_map: Dict[str, list] = {}
 
     def _fetch(mk: str):
@@ -1073,13 +1074,13 @@ def longshort_multi_scan(
             if candles:
                 candle_map[mk] = candles
 
-    # ── 4. BTC 레짐 (1회) ──
+    # ── 4. BTC regime (once) ──
     btc_detector = get_btc_leading_detector()
     btc_regime = "TREND"
     if btc_detector:
         btc_regime = btc_detector.get_regime_for_lightning()
 
-    # ── 5. 경량 분석 ──
+    # ── 5. Lightweight analysis ──
     FEE_ROUND_TRIP = 0.10
     scored = []
 
@@ -1094,7 +1095,7 @@ def longshort_multi_scan(
         if current_price <= 0:
             continue
 
-        # 지표
+        # Indicators
         rsi_val = indicators.rsi(prices, 14) or 50.0
 
         bb = indicators.bollinger_bands(prices, 20, 2.0)
@@ -1120,7 +1121,7 @@ def longshort_multi_scan(
             else None
         )
 
-        # 거래량 서지
+        # Volume surge
         vol_surge_ratio = 1.0
         if len(volumes) >= 10:
             recent_vol = sum(volumes[-3:]) / 3.0
@@ -1128,14 +1129,14 @@ def longshort_multi_scan(
             if avg_vol > 0:
                 vol_surge_ratio = recent_vol / avg_vol
 
-        # 저점 근접도
+        # Proximity to the low
         lows = [float(c.get("low_price") or 0) for c in candles_5m if c.get("low_price")]
         highs = [float(c.get("high_price") or 0) for c in candles_5m if c.get("high_price")]
         period_low = min(lows) if lows else current_price
         period_high = max(highs) if highs else current_price
         dist_from_low_pct = ((current_price - period_low) / period_low * 100) if period_low > 0 else 999
 
-        # ── 6-Stage 경량 필터 (max 88): 저점/RSI/MACD 우선 ──
+        # ── 6-Stage lightweight filter (max 88): prioritize low/RSI/MACD ──
         confidence_raw = 0.0
 
         # Stage 1: Near Low (24)
@@ -1154,14 +1155,14 @@ def longshort_multi_scan(
         if vol_surge_ratio > 1.0:
             confidence_raw += min(5, max(0, (vol_surge_ratio - 1.0) * 3.5))
 
-        # Stage 5: EMA 역배열 — 하락추세 = 저점 환경 (8)
+        # Stage 5: EMA inversion — downtrend = dip environment (8)
         ema_inverted = bool(ema_short and ema_mid and ema_short < ema_mid)
         if ema_inverted and rsi_val < 40:
             confidence_raw += 8
         elif ema_inverted:
             confidence_raw += 4
 
-        # Stage 6: MACD 히스토그램 반전 (prev<0 → 상승) + 기울기 (15)
+        # Stage 6: MACD histogram reversal (prev<0 → rising) + slope (15)
         macd_hist_turn = (
             prev_macd_hist is not None
             and macd_hist is not None
@@ -1179,21 +1180,21 @@ def longshort_multi_scan(
         regime_mul = {"SHOCK": 0.75, "DRIFT": 0.9, "RECOVERY": 1.02, "TREND": 1.0}.get(btc_regime, 1.0)
         confidence_scaled = round(confidence_scaled * regime_mul, 1)
 
-        # ── Stage 7: 가격대/유동성/스프레드 보정 ──
-        # 저가 코인: 틱 크기가 가격 대비 크므로 스프레드 손실 위험 ↑
-        # 유동성 부족 코인: 슬리피지 위험 ↑
+        # ── Stage 7: price-tier/liquidity/spread adjustment ──
+        # Low-priced coins: tick size is large relative to price, so spread-loss risk ↑
+        # Low-liquidity coins: slippage risk ↑
         tk_data = ticker_map.get(mk, {})
         _acc_vol_24h = float(tk_data.get("acc_trade_price_24h") or 0)
         _high_24h = float(tk_data.get("high_price") or 0)
         _low_24h = float(tk_data.get("low_price") or 0)
 
-        # (a) 가격 페널티: 비활성화 [2026-03-08]
-        # 동적 예산(_calc_dynamic_budget)이 저가/저유동성 코인 리스크를 예산 축소로 처리하므로
-        # 점수 단계에서 이중 감점할 필요 없음. 순수 시그널 기반 판단.
+        # (a) Price penalty: disabled [2026-03-08]
+        # The dynamic budget (_calc_dynamic_budget) handles low-price/low-liquidity coin risk by
+        # shrinking the budget, so there is no need to double-penalize at the scoring stage. Pure signal-based.
         _price_penalty = 1.0
 
-        # (b) 유동성 보너스/페널티: 24h 거래대금 기준
-        # 1M USDT 미만: -10%, 5M USDT 이상: +3%, 20M USDT 이상: +5%
+        # (b) Liquidity bonus/penalty: based on 24h trading value
+        # under 1M USDT: -10%, 5M USDT or more: +3%, 20M USDT or more: +5%
         _liq_mul = 1.0
         if _acc_vol_24h < 1_000_000:
             _liq_mul = 0.90
@@ -1202,11 +1203,11 @@ def longshort_multi_scan(
         elif _acc_vol_24h >= 5_000_000:
             _liq_mul = 1.03
 
-        # (c) 24h 변동성: 일중 변동폭이 너무 크면 리스크
+        # (c) 24h volatility: too wide an intraday range is risky
         _daily_range_pct = ((_high_24h - _low_24h) / _low_24h * 100) if _low_24h > 0 else 0
         _vol_penalty = 1.0
         if _daily_range_pct > 15:
-            _vol_penalty = 0.90  # 극단적 변동성
+            _vol_penalty = 0.90  # extreme volatility
         elif _daily_range_pct > 10:
             _vol_penalty = 0.95
 
@@ -1230,7 +1231,7 @@ def longshort_multi_scan(
         else:
             fire_level = "HOLD"
 
-        # ── 파동 분석 ──
+        # ── Wave analysis ──
         waves = []
         if len(prices) >= 5:
             extremes = []
@@ -1323,7 +1324,7 @@ def longshort_multi_scan(
             },
         })
 
-    # ── 6. 점수 컷 + 정렬 + 상위 N개 ──
+    # ── 6. Score cutoff + sort + top N ──
     scored_pool = [s for s in scored if float(s.get("confidence") or 0.0) >= float(min_confidence)]
 
     scored_pool.sort(
@@ -1430,29 +1431,29 @@ def longshort_multi_scan(
 
     _set_cached(cache_key, result)
 
-    # 점수 소스 통일: multi-scan 결과를 _scope_scan_cache에 동기화
-    # → Active Slots confidence가 추천 테이블과 동일한 출처를 참조하도록 함
+    # Unify the score source: sync multi-scan results into _scope_scan_cache
+    # → so Active Slots confidence references the same source as the recommendation table
     try:
         _sys = getattr(request.app.state, "system", None)
         if _sys is not None:
             _sys._scope_scan_cache = list(top_results)
     except (KeyError, AttributeError, TypeError) as exc:
-        logger.warning("[LONGSHORT_API] → Active Slots confidence가 추천 테이블과 동일한 출처를 참조하도록 함: %s", exc, exc_info=True)
+        logger.warning("[LONGSHORT_API] sync scope scan cache failed: %s", exc, exc_info=True)
 
     return result
 
 
 # ============================================================
 # Precision Sniper Scope — Multi-Slot System
-# [2026-02-24] 파동 수익성 기반 멀티 코인 스캔 + 슬롯 관리
+# [2026-02-24] wave-profitability-based multi-coin scan + slot management
 # ============================================================
 
 def _compute_wave_metrics(prices: list, candle_min: int = 5, fee_pct: float = 0.10) -> dict:
     """
-    파동(Wave) 분석 헬퍼: 로컬 극값 탐색 → 등락폭/주기/순이익 계산.
-    prices: close price 리스트 (oldest first).
-    candle_min: 캔들 간격(분).
-    fee_pct: 왕복 수수료(%).
+    Wave analysis helper: find local extremes → compute amplitude/period/net profit.
+    prices: list of close prices (oldest first).
+    candle_min: candle interval (minutes).
+    fee_pct: round-trip fee (%).
     """
     waves = []
     if len(prices) < 5:
@@ -1524,8 +1525,8 @@ def _compute_wave_metrics(prices: list, candle_min: int = 5, fee_pct: float = 0.
 
 def _evaluate_market_for_scope(market: str, system: Any) -> Optional[dict]:
     """
-    단일 마켓에 대해 wave 분석 + 간이 confidence 산출.
-    Heavy 연산이므로 ThreadPoolExecutor에서 호출.
+    Wave analysis + a simplified confidence score for a single market.
+    Heavy computation, so it is called from a ThreadPoolExecutor.
     """
     from app.core.multi_timeframe_ai import fetch_candles, _extract_prices_from_candles, _extract_volumes_from_candles
 
@@ -1541,7 +1542,7 @@ def _evaluate_market_for_scope(market: str, system: Any) -> Optional[dict]:
                             current_price = float(_tc.get("trade_price") or 0)
                             break
             except Exception as exc:
-                logger.warning("[LONGSHORT_API] strategy_longshort_router._evaluate_market_for_scope fallback: %s", exc, exc_info=True)
+                logger.warning("[LONGSHORT_API] _evaluate_market_for_scope ticker fallback failed: %s", exc, exc_info=True)
         if current_price <= 0:
             return None
 
@@ -1556,7 +1557,7 @@ def _evaluate_market_for_scope(market: str, system: Any) -> Optional[dict]:
         if not wave["profitable"]:
             return None
 
-        # 간이 confidence (lightweight — full scope는 개별 조회용)
+        # Simplified confidence (lightweight — full scope is for individual lookups)
         rsi_val = indicators.rsi(prices_5m, 14) or 50.0
         atr_val = indicators.atr_simplified(prices_5m, 14) or 0.0
         atr_pct = (atr_val / current_price * 100) if current_price > 0 else 0.0
@@ -1587,7 +1588,7 @@ def _evaluate_market_for_scope(market: str, system: Any) -> Optional[dict]:
             else None
         )
 
-        # 간이 점수 (full 8-stage 대비 경량) — 저점 포착 최적화
+        # Simplified score (lightweight vs the full 8-stage) — optimized for catching lows
         score = 0.0
         lows = [float(c.get("low_price") or 0) for c in candles_5m if c.get("low_price")]
         period_low = min(lows) if lows else current_price
@@ -1596,13 +1597,13 @@ def _evaluate_market_for_scope(market: str, system: Any) -> Optional[dict]:
         score += min(22, max(0, (45 - rsi_val) * 0.9)) if rsi_val < 45 else 0
         score += min(14, max(0, (30 - bb_position) * 0.7)) if bb_position < 30 else 0
         score += min(5, max(0, (vol_surge - 1.0) * 3.5)) if vol_surge > 1.0 else 0
-        # Stage 5: EMA 역배열 — 하락추세 = 저점 환경 (8)
+        # Stage 5: EMA inversion — downtrend = dip environment (8)
         ema_inverted = bool(ema_s and ema_m and ema_s < ema_m)
         if ema_inverted and rsi_val < 40:
             score += 8
         elif ema_inverted:
             score += 4
-        # Stage 6: MACD 히스토그램 반전 (prev<0 → 상승) + 기울기 (15)
+        # Stage 6: MACD histogram reversal (prev<0 → rising) + slope (15)
         macd_hist_turn = (
             prev_macd_hist is not None
             and macd_hist is not None
@@ -1616,14 +1617,14 @@ def _evaluate_market_for_scope(market: str, system: Any) -> Optional[dict]:
             macd_component += 5.0
         score += min(15, macd_component)
 
-        # multi-scan과 동일한 BTC regime 배율 적용 — 계산식 통일
+        # Apply the same BTC regime multiplier as multi-scan — unified formula
         _regime_mul = 1.0
         try:
             btc_detector = get_btc_leading_detector()
             _regime = btc_detector.get_regime_for_lightning()
             _regime_mul = {"SHOCK": 0.75, "DRIFT": 0.9, "RECOVERY": 1.02, "TREND": 1.0}.get(_regime, 1.0)
         except (KeyError, AttributeError, TypeError) as exc:
-            logger.warning("[LONGSHORT_API] multi-scan과 동일한 BTC regime 배율 적용 — 계산식 통일: %s", exc, exc_info=True)
+            logger.warning("[LONGSHORT_API] BTC regime multiplier lookup failed: %s", exc, exc_info=True)
         confidence = round(min(100, max(0, score * 100.0 / 88.0 * _regime_mul)), 1)
         profit_score = min(100.0, max(0.0, wave["est_daily_profit_pct"] * 7.0))
         rank_score = round(confidence * 0.7 + profit_score * 0.3, 2)
@@ -1635,7 +1636,7 @@ def _evaluate_market_for_scope(market: str, system: Any) -> Optional[dict]:
         opt_tp = round(max(SNIPER_MIN_TP_PCT, min(8.0, wave["avg_up_amp_pct"] * 0.7 if wave["avg_up_amp_pct"] > 0.5 else atr_pct * 2.0)), 1)
         opt_sl = round(max(SNIPER_MIN_SL_PCT, min(4.0, wave["avg_down_amp_pct"] * 0.6 if wave["avg_down_amp_pct"] > 0.3 else atr_pct * 1.2)), 1)
 
-        # in_use 체크
+        # in_use check
         ctx = system.coordinator.contexts.get(market) if system else None
         in_use = False
         active_strategy = None
@@ -1691,10 +1692,10 @@ def longshort_scope_scan(
     max_price: float = Query(0, ge=0, description="Maximum coin price (USDT, 0=no limit)"),
 ):
     """
-    파동 수익성 기반 멀티 코인 스캔.
-    1) Exchange 마켓 거래량 상위 50개 사전 필터
-    2) 각 코인 wave 분석 (병렬)
-    3) net_profit_per_cycle 기준 정렬 → 상위 N개 반환
+    Wave-profitability-based multi-coin scan.
+    1) Pre-filter the top 50 exchange markets by trading volume
+    2) Wave analysis per coin (parallel)
+    3) Sort by net_profit_per_cycle → return top N
     """
     import time as _time
     system = request.app.state.system
@@ -1720,7 +1721,7 @@ def longshort_scope_scan(
     if cached is not None:
         return cached
 
-    # Phase 1: 사전 필터 — 거래량 상위 마켓
+    # Phase 1: pre-filter — top markets by volume
     try:
         markets_resp = bybit_get(BYBIT_MARKET_INSTRUMENTS, params={"category": bybit_v5_rest_category()}, timeout=5.0)
         all_markets = [Q.normalize(str(m.get("symbol") or "")) for m in parse_bybit_list(markets_resp.json()) if isinstance(m, dict) and str(m.get("symbol") or "")]
@@ -1734,7 +1735,7 @@ def longshort_scope_scan(
         logger.warning("strategy_longshort_router.longshort_scope_scan L1724: %s", e)
         return {"ok": False, "error": f"Market fetch failed: {e}"}
 
-    # 거래대금 정렬 → 상위 50개 (API 부하 제한)
+    # Sort by trading value → top 50 (limit API load)
     tickers.sort(key=lambda t: float(t.get("acc_trade_price_24h") or 0), reverse=True)
     prefilter_tickers = tickers[:50]
     if min_price_eff > 0:
@@ -1743,7 +1744,7 @@ def longshort_scope_scan(
         prefilter_tickers = [t for t in prefilter_tickers if float(t.get("trade_price") or 0) <= max_price_eff]
     prefilter_markets = [t.get("market") for t in prefilter_tickers if t.get("market")]
 
-    # exclude_active 필터
+    # exclude_active filter
     if exclude_active and system:
         active_set = set()
         try:
@@ -1752,10 +1753,10 @@ def longshort_scope_scan(
                 if st in (MarketState.ACTIVE, MarketState.RECOVERY):
                     active_set.add(m)
         except (AttributeError, TypeError) as exc:
-            logger.warning("[LONGSHORT_API] exclude_active 필터: %s", exc, exc_info=True)
+            logger.warning("[LONGSHORT_API] exclude_active filter failed: %s", exc, exc_info=True)
         prefilter_markets = [m for m in prefilter_markets if m not in active_set]
 
-    # Phase 2: 병렬 wave 분석
+    # Phase 2: parallel wave analysis
     results = []
     with ThreadPoolExecutor(max_workers=min(4, len(prefilter_markets) or 1)) as pool:
         futures = {pool.submit(_evaluate_market_for_scope, m, system): m for m in prefilter_markets}
@@ -1766,9 +1767,9 @@ def longshort_scope_scan(
                     if r["wave"]["est_daily_profit_pct"] >= min_profit:
                         results.append(r)
             except (KeyError, AttributeError, TypeError) as exc:
-                logger.warning("[LONGSHORT_API] Phase 2: 병렬 wave 분석: %s", exc, exc_info=True)
+                logger.warning("[LONGSHORT_API] Phase 2 parallel wave analysis failed: %s", exc, exc_info=True)
 
-    # Phase 3: 추천 기준(기술점수 + 파동수익) 복합 정렬
+    # Phase 3: composite sort by recommendation criteria (technical score + wave profit)
     results.sort(
         key=lambda x: (
             x.get("rank_score", 0.0),
@@ -1779,11 +1780,11 @@ def longshort_scope_scan(
     )
     items = results[:limit]
 
-    # 순위 부여
+    # Assign ranks
     for i, item in enumerate(items, 1):
         item["rank"] = i
 
-    # BTC Regime 정보 추가
+    # Add BTC regime info
     btc_detector = get_btc_leading_detector()
     btc_regime = "TREND"
     if btc_detector:
@@ -1821,12 +1822,12 @@ def longshort_scope_deploy(
     slicing: bool = Body(False, description="Enable order slicing for large orders"),
 ):
     """
-    스캔 결과에서 선택된 마켓들을 일괄 Precision Sniper 슬롯으로 배치.
-    내부적으로 기존 SNIPER setup 로직 재사용.
+    Deploy the markets selected from scan results as Precision Sniper slots in bulk.
+    Internally reuses the existing SNIPER setup logic.
     """
     from app.manager.sniper_position_store import sniper_store, generate_sniper_id
 
-    # 멀티 브라우저 동시 호출 시 레이스 컨디션 방지
+    # Prevent race conditions on concurrent calls from multiple browsers
     if not _scope_deploy_lock.acquire(blocking=False):
         return {"ok": False, "error": "deploy_in_progress", "results": []}
 
@@ -2175,7 +2176,7 @@ def _longshort_scope_deploy_inner(
             logger.warning("[LONGSHORT_API] strategy_longshort_router._scope_eval_from_cache fallback: %s", exc, exc_info=True)
         return None
 
-    for raw_market in markets[:20]:  # 최대 20개 제한
+    for raw_market in markets[:20]:  # cap at 20
         market = Q.normalize(raw_market.strip().upper())
 
         if _is_scope_market_deployed(market):
@@ -2184,8 +2185,8 @@ def _longshort_scope_deploy_inner(
 
         manual_overflow_add = False
 
-        # 1) 우선 deploy 가능성 검사(실패 시 기존 슬롯 건드리지 않음)
-        in_use_by = _is_market_in_use_by_other_strategy(market)  # [FIX N1] 미할당 NameError 수정
+        # 1) First check deploy feasibility (on failure, do not touch existing slots)
+        in_use_by = _is_market_in_use_by_other_strategy(market)  # [FIX N1] fix unassigned NameError
         if in_use_by:
             results.append({"market": market, "ok": False, "reason": f"in_use_by_{in_use_by}"})
             continue
@@ -2215,10 +2216,10 @@ def _longshort_scope_deploy_inner(
             })
             continue
 
-        # 슬롯 정책:
-        # - target 미만: 일반 추가
-        # - target 이상: 수동 overflow 추가 허용 (최대 +2)
-        # [2026-03-07] 수동 overflow 상한 MANUAL_OVERFLOW_MAX(+2) 적용
+        # Slot policy:
+        # - below target: normal add
+        # - at or above target: allow manual overflow add (up to +2)
+        # [2026-03-07] apply manual overflow cap MANUAL_OVERFLOW_MAX(+2)
         if scope_target > 0:
             current_scope_slots = _current_scope_slot_count()
             if current_scope_slots >= scope_target:
@@ -2235,7 +2236,7 @@ def _longshort_scope_deploy_inner(
                 manual_overflow_add = True
 
         try:
-            # 이미 SNIPER로 운영 중이면 skip
+            # Skip if already running as SNIPER
             existing = sniper_store.get_positions_by_market(market)
             if existing:
                 results.append({"market": market, "ok": False, "reason": "already_deployed"})
@@ -2281,21 +2282,21 @@ def _longshort_scope_deploy_inner(
 
             requested_budget = max(5.0, _to_float(budget_per_slot, 100.0))
             cap_budget = _snipers_budget_cap_by_price(current_price)
-            # scope/deploy는 사용자가 직접 지정한 수동 예산이므로 캡을 강제하지 않는다.
+            # scope/deploy uses a manual budget set by the user, so the cap is not enforced.
             applied_budget = requested_budget
 
-            # OMA 상태 ACTIVE 설정
+            # Set OMA state to ACTIVE
             system.oma_set_market(
                 market=market,
                 state=MarketState.ACTIVE,
                 reason=["precision_scope_deploy"],
             )
 
-            # 예산 설정
+            # Set budget
             current_state = system.oma_registry.get_state(market) or MarketState.ACTIVE
             system.oma_registry.set_state(market, current_state, reason=["precision_scope_budget"], budget_usdt=applied_budget)
 
-            # SNIPER 파라미터 구성
+            # Build SNIPER parameters
             params = {
                 "profile": "SNIPERS",
                 "side": "LONG",
@@ -2328,7 +2329,7 @@ def _longshort_scope_deploy_inner(
                 "dca_step_pct": max(0.1, min(5.0, _to_float(getattr(system, "sniper_dca_step_pct", 0.2), 0.2))),
                 "dca_add_ratio": max(0.1, min(2.0, _to_float(getattr(system, "sniper_dca_add_ratio", 0.5), 0.5))),
                 "dca_max_depth_pct": max(0.2, min(10.0, _to_float(getattr(system, "sniper_dca_max_depth_pct", 1.0), 1.0))),
-                # probe/confirm에서 일부 예산을 남겨 DCA가 실제로 집행되도록 한다.
+                # Leave some budget at probe/confirm so DCA can actually be executed.
                 "dca_reserve_ratio": max(0.0, min(0.6, _to_float(getattr(system, "sniper_dca_reserve_ratio", 0.2), 0.2))),
                 "time_stop_min": 45,
                 "time_filter_enabled": False,
@@ -2344,8 +2345,8 @@ def _longshort_scope_deploy_inner(
                 "source": "precision_scope",
                 "deploy_confidence": _to_float(eval_result.get("confidence"), 0.0),
                 "deploy_rank_score": _to_float(eval_result.get("rank_score"), 0.0),
-                "scope_deploy_ts": float(time_now() or 0.0),  # [FIX M1] 배포 시간 기록
-                "buy_now": False,  # [FIX L4] manual_swap_out dead code 제거 (always False)
+                "scope_deploy_ts": float(time_now() or 0.0),  # [FIX M1] record deploy time
+                "buy_now": False,  # [FIX L4] remove manual_swap_out dead code (always False)
             }
             if manual_overflow_add:
                 now_ts = float(time_now() or 0.0)
@@ -2355,7 +2356,7 @@ def _longshort_scope_deploy_inner(
                     "scope_overflow_ttl_min": scope_overflow_ttl_min,
                 })
 
-            # Strategy context 설정
+            # Set up the strategy context
             ctx = system.coordinator.get_context(market)
             if not ctx:
                 ctx = system.coordinator.ensure_market(market)
@@ -2402,16 +2403,16 @@ def _longshort_scope_deploy_inner(
             ctx.strategy_mode = "SNIPER(s)"
             system._save_context_state()
 
-            # Position store 저장
+            # Save to position store
             sniper_store.save_position(sniper_id, {
                 "budget_usdt": applied_budget,
                 "params": params,
             })
 
-            # Precision Scope 슬롯은 추천 점수 기반 선발이므로 배치 직후 즉시 매수 시도.
-            # 사용자 요청: 슬롯 배치 후 SCANNING 지연 없이 바로 진입.
+            # Precision Scope slots are selected by recommendation score, so attempt to buy immediately after placement.
+            # User request: enter right after slot placement with no SCANNING delay.
             buy_now_result = None
-            buy_now_reason = "scope_deploy_buy_now"  # [FIX L4] manual_swap_out dead code 제거
+            buy_now_reason = "scope_deploy_buy_now"  # [FIX L4] remove manual_swap_out dead code
             should_buy_now = True
             if should_buy_now:
                 has_pos = False
@@ -2440,8 +2441,8 @@ def _longshort_scope_deploy_inner(
                             "msg": str(msg),
                             "price": current_price,
                         }
-                        # [FIX M12] LIVE 체결: position은 FSM apply_fill_buy()에서 실제 체결가 기준으로 기록됨
-                        # open_position() 선호출 시 예상가로 중복 기록되어 entry price가 틀어짐
+                        # [FIX M12] LIVE fill: the position is recorded by FSM apply_fill_buy() at the actual fill price
+                        # Pre-calling open_position() records a duplicate at the expected price, skewing the entry price
                     elif str(getattr(system, "trading_mode", "")).upper() == "PAPER":
                         if current_price > 0:
                             try:
@@ -2458,7 +2459,7 @@ def _longshort_scope_deploy_inner(
                                 )
                                 system._save_context_state()
                             except (AttributeError, TypeError) as exc:
-                                logger.warning("[LONGSHORT_API] open_position() 선호출 시 예상가로 중복 기록되어 entry price가 틀어짐: %s", exc, exc_info=True)
+                                logger.warning("[LONGSHORT_API] paper open_position failed: %s", exc, exc_info=True)
                             buy_now_result = {"ok": True, "msg": "paper_filled", "price": current_price}
                         else:
                             buy_now_result = {"ok": False, "msg": "no_price_for_paper"}
@@ -2469,7 +2470,7 @@ def _longshort_scope_deploy_inner(
                 "market": market,
                 "ok": True,
                 "sniper_id": sniper_id,
-                "swap_out_market": "",  # [FIX L4] manual_swap_out dead code 제거
+                "swap_out_market": "",  # [FIX L4] remove manual_swap_out dead code
                 "manual_overflow_add": manual_overflow_add,
                 "buy_now_result": buy_now_result,
                 "buy_now_reason": buy_now_reason,
@@ -2507,11 +2508,11 @@ def _longshort_scope_deploy_inner(
 )
 def longshort_scope_slots(request: Request):
     """
-    현재 운영 중인 LONG/SHORT SNIPER(s) 슬롯 현황.
+    Current status of running LONG/SHORT SNIPER(s) slots.
 
-    기준:
-    - profile == SNIPERS 이고 source == precision_scope 인 슬롯만 포함
-    - sniper_store 우선 + store 누락 시 context 보강
+    Criteria:
+    - include only slots where profile == SNIPERS and source == precision_scope
+    - sniper_store first + supplement from context when missing in the store
     """
     from app.manager.sniper_position_store import sniper_store
 
@@ -2531,7 +2532,7 @@ def longshort_scope_slots(request: Request):
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
         logger.warning("[LONGSHORT_API] strategy_longshort_router.longshort_scope_slots fallback: %s", exc, exc_info=True)
 
-    # Exchange 잔고 1회 조회 → {currency: {avg_buy_price, balance, locked}} 캐시
+    # Query exchange balances once → cache as {currency: {avg_buy_price, balance, locked}}
     _exchange_balances: Dict[str, Dict[str, Any]] = {}
     try:
         tc = getattr(system, "trade_client", None)
@@ -2541,10 +2542,10 @@ def longshort_scope_slots(request: Request):
                 if cur:
                     _exchange_balances[cur] = acc
     except (KeyError, AttributeError, TypeError) as exc:
-        logger.warning("[LONGSHORT_API] Exchange 잔고 1회 조회 → {currency: {avg_buy_price, balance, locked}} 캐시: %s", exc, exc_info=True)
+        logger.warning("[LONGSHORT_API] exchange balance fetch failed: %s", exc, exc_info=True)
 
-    # 모든 슬롯 마켓의 현재가를 price_store에서 먼저 수집,
-    # price_store에 없는 마켓은 exchange ticker API 1회로 보충
+    # Collect current prices for all slot markets from price_store first,
+    # then supplement markets missing from price_store with one exchange ticker API call
     _all_markets = list({
         str(p.get("market") or "").strip().upper()
         for p in all_positions if p.get("market")
@@ -2566,7 +2567,7 @@ def longshort_scope_slots(request: Request):
                 _tp = float(t.get("trade_price") or 0)
                 if _mk and _tp > 0:
                     _price_cache[_mk] = _tp
-                    # price_store에도 보충하여 다음 호출 시 즉시 사용 가능
+                    # Also populate price_store so it is immediately usable on the next call
                     price_store.set_price(_mk, _tp)
             _still_missing = [m for m in _missing_markets if m not in _price_cache]
             if _still_missing:
@@ -2597,14 +2598,14 @@ def longshort_scope_slots(request: Request):
         confidence = live_cached_conf if live_cached_conf > 0 else (param_live_conf if param_live_conf > 0 else deploy_conf)
         rank_score = live_cached_rank if live_cached_rank > 0 else (param_live_rank if param_live_rank > 0 else deploy_rank)
 
-        # 1) context position에서 qty/entry 조회
+        # 1) Look up qty/entry from the context position
         if ctx:
             pos = getattr(ctx, "position", None) or {}
             if pos:
                 qty = float(pos.get("qty", 0) or 0)
                 entry_price = float(pos.get("entry", 0) or 0)
 
-        # 2) context가 없거나 entry=0 → exchange 잔고 폴백
+        # 2) No context or entry=0 → fall back to exchange balance
         coin = Q.extract_base(market)
         if coin in _exchange_balances:
             bal = _exchange_balances[coin]
@@ -2613,7 +2614,7 @@ def longshort_scope_slots(request: Request):
             if entry_price <= 0:
                 entry_price = float(bal.get("avg_buy_price", 0) or 0)
 
-        # 3) PnL 계산 — current_price가 0이면 계산 불가 (price_store 미수신)
+        # 3) PnL calculation — cannot compute if current_price is 0 (price_store not received)
         if qty > 0 and entry_price > 0:
             invested_usdt = qty * entry_price
             if current_price > 0:
@@ -2621,10 +2622,10 @@ def longshort_scope_slots(request: Request):
                 pnl_amount = current_val - invested_usdt
                 pnl_pct = (pnl_amount / invested_usdt * 100) if invested_usdt > 0 else 0
 
-        # [2026-03-08] 슬롯 상태 정의:
-        # ACTIVE = 보유 중 (체결 완료, 정상 운용)
-        # HOLDING = 주문 체결 대기 (슬리피지/미체결 상태)
-        # WAITING = 빈 슬롯 (즉시매수 구조에서는 나타나지 않아야 함)
+        # [2026-03-08] Slot state definitions:
+        # ACTIVE = holding (fill complete, operating normally)
+        # HOLDING = waiting for order fill (slippage/unfilled state)
+        # WAITING = empty slot (should not appear in the buy-immediately design)
         state_str = "WAITING"
         _has_pending_order = False
         if ctx:
@@ -2712,20 +2713,20 @@ def longshort_scope_slots(request: Request):
             if mgr is not None and hasattr(mgr, "mark_cooldown"):
                 mgr.mark_cooldown(market, minutes=max(0, cooldown_min), reason="scope_waiting_slot_gc")
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[LONGSHORT_API] Avoid immediate same-market re-pick after exit; keep replacement opportunities o: %s", exc, exc_info=True)
+            logger.warning("[LONGSHORT_API] scope waiting slot cooldown failed: %s", exc, exc_info=True)
 
         if removed:
             try:
                 system._save_context_state()
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-                logger.warning("[LONGSHORT_API] Avoid immediate same-market re-pick after exit; keep replacement opportunities o: %s", exc, exc_info=True)
+                logger.warning("[LONGSHORT_API] save context state failed: %s", exc, exc_info=True)
 
     slots: List[Dict[str, Any]] = []
     seen_keys = set()
     seen_markets = set()
 
-    # 1) sniper_store 기반: profile=SNIPERS + source=precision_scope만 포함
-    # [2026-03-08] 고아 포지션 GC: 전략 비활성 + 잔고 없음 → store에서 제거
+    # 1) Based on sniper_store: include only profile=SNIPERS + source=precision_scope
+    # [2026-03-08] Orphan position GC: strategy disabled + no balance → remove from store
     _gc_remove_ids: List[str] = []
     for stored in all_positions:
         market = str(stored.get("market") or "").strip().upper()
@@ -2741,7 +2742,7 @@ def longshort_scope_slots(request: Request):
         if sniper_id in seen_keys or market in seen_markets:
             continue
 
-        # 전략 활성 여부 확인
+        # Check whether the strategy is enabled
         ctx = contexts.get(market)
         _strat_enabled = False
         if ctx:
@@ -2749,7 +2750,7 @@ def longshort_scope_slots(request: Request):
             _st = _ctrl.get("strategy", {}) or {}
             _strat_enabled = bool(_st.get("enabled"))
 
-        # 잔고(HOLDING) 여부 확인
+        # Check for balance (HOLDING)
         coin = Q.extract_base(market)
         _has_balance = False
         if coin in _exchange_balances:
@@ -2757,7 +2758,7 @@ def longshort_scope_slots(request: Request):
             _locked = float(_exchange_balances[coin].get("locked", 0) or 0)
             _has_balance = (_bal + _locked) > 0
 
-        # 전략 비활성 + 잔고 없음 → 고아 포지션, store에서 제거
+        # Strategy disabled + no balance → orphan position, remove from store
         if not _strat_enabled and not _has_balance:
             _gc_remove_ids.append(sniper_id)
             logger.info(f"[scope_slots GC] removing orphan: {sniper_id} ({market})")
@@ -2769,14 +2770,14 @@ def longshort_scope_slots(request: Request):
         seen_keys.add(sniper_id)
         seen_markets.add(market)
 
-    # 고아 포지션 일괄 제거
+    # Remove orphan positions in bulk
     for _rid in _gc_remove_ids:
         try:
             sniper_store.remove_position(_rid)
         except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-            logger.warning("[LONGSHORT_API] 고아 포지션 일괄 제거: %s", exc, exc_info=True)
+            logger.warning("[LONGSHORT_API] orphan position removal failed: %s", exc, exc_info=True)
 
-    # 2) store 누락 보강: context에서 profile=SNIPERS + source=precision_scope 활성 전략 추가
+    # 2) Supplement store gaps: add active strategies from context with profile=SNIPERS + source=precision_scope
     for market, ctx in list(contexts.items()):
         if market in seen_markets:
             continue
@@ -2799,7 +2800,7 @@ def longshort_scope_slots(request: Request):
         slots.append(_build_slot(sniper_id=market, market=market, params=params, budget=budget))
         seen_markets.add(market)
 
-    # 수익률 순 정렬
+    # Sort by PnL percentage
     slots.sort(key=lambda s: s["pnl_pct"], reverse=True)
 
     total_budget = sum(s["budget_usdt"] for s in slots)

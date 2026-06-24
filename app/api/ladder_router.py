@@ -11,12 +11,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ladder", tags=["ladder"])
 # ------------------------------------------------------------
-# 통합 액션: LADDER 종료 + 예약취소 + (시장가매도) + GAZUA 이동
+# Combined action: stop LADDER + cancel pending orders + (market sell) + move to GAZUA
 # ------------------------------------------------------------
 
 class ExitSellMode(str, Enum):
-    hold = "hold"           # 잔고 유지
-    market_sell = "market_sell"  # 시장가 전량매도
+    hold = "hold"           # keep balance
+    market_sell = "market_sell"  # market-sell entire balance
 
 class ExitAndMoveIn(BaseModel):
     market: str
@@ -33,7 +33,7 @@ class LongHoldConfigIn(BaseModel):
     stop_loss_pct: Optional[float] = None
 
 class LongHoldDeployIn(BaseModel):
-    """Deploy 요청 스키마"""
+    """Deploy request schema"""
     market: str
     budget_usdt: float = 100
     strategy: str = "GAZUA"  # GAZUA | LADDER | LIGHTNING | CONTRARIAN
@@ -42,22 +42,22 @@ class LongHoldDeployIn(BaseModel):
 
 @router.post(
     "/exit_and_move",
-    summary="LADDER 종료+예약취소+시장가매도+GAZUA 이동 (통합)",
+    summary="Stop LADDER + cancel orders + market sell + move to GAZUA (combined)",
     responses={
-        200: {"description": "통합 액션 처리 결과"},
-        400: {"description": "입력 오류/상태 오류"},
-        500: {"description": "서버 오류"},
+        200: {"description": "Combined action result"},
+        400: {"description": "Input error / state error"},
+        500: {"description": "Server error"},
     },
 )
 def exit_and_move(request: Request, body: ExitAndMoveIn) -> Dict[str, Any]:
     """
-    LADDER 전략 종료 + 예약취소 + (시장가매도) + GAZUA 이동을 한 번에 처리
+    Handle LADDER strategy stop + cancel orders + (market sell) + move to GAZUA in one call
     """
     mgr = _get_mgr(request)
     system = request.app.state.system
     market = body.market.upper()
     steps = []
-    # 1. 전략 일시정지 (enabled=False)
+    # 1. Pause strategy (enabled=False)
     try:
         cfg = mgr.get_config(market)
         if cfg.get("enabled"):
@@ -70,7 +70,7 @@ def exit_and_move(request: Request, body: ExitAndMoveIn) -> Dict[str, Any]:
         logger.warning("ladder_router.exit_and_move L69: %s", e)
         return {"ok": False, "error": "STOP_FAILED", "detail": str(e), "steps": steps}
 
-    # 2. 예약 전체취소
+    # 2. Cancel all pending orders
     try:
         cancel_result = mgr.cancel_ladder_orders(cfg)
         steps.append("orders_cancelled")
@@ -78,14 +78,14 @@ def exit_and_move(request: Request, body: ExitAndMoveIn) -> Dict[str, Any]:
         logger.warning("ladder_router.exit_and_move L76: %s", e)
         return {"ok": False, "error": "CANCEL_FAILED", "detail": str(e), "steps": steps}
 
-    # 3. (옵션) 시장가 전량매도
+    # 3. (Optional) market-sell entire balance
     if body.sell_mode == ExitSellMode.market_sell:
         try:
-            # 시장가 전량매도 (mgr.market_sell_all이 구현되어 있다고 가정)
+            # Market-sell entire balance (assumes mgr.market_sell_all is implemented)
             if hasattr(mgr, "market_sell_all"):
                 sell_result = mgr.market_sell_all(market)
             else:
-                # fallback: trade_client 직접 호출
+                # fallback: call trade_client directly
                 tc = getattr(system, "trade_client", None) or getattr(system, "exchange", None)
                 if tc is None:
                     raise Exception("No trade_client/exchange found on system")
@@ -101,26 +101,26 @@ def exit_and_move(request: Request, body: ExitAndMoveIn) -> Dict[str, Any]:
     else:
         steps.append("hold")
 
-    # 3.5 OMA 상태 해제 (GAZUA 배치를 위해 슬롯 비우기)
+    # 3.5 Clear OMA state (free the slot for GAZUA deployment)
     try:
         from app.manager.oma_market_registry import MarketState
         system.oma_set_market(market, MarketState.WATCH, reason=["ladder_exit_and_move"])
     except (KeyError, AttributeError, TypeError) as exc:
-        logger.warning("[LADDER_API] 3.5 OMA 상태 해제 (GAZUA 배치를 위해 슬롯 비우기): %s", exc, exc_info=True)
+        logger.warning("[LADDER_API] 3.5 clear OMA state (free slot for GAZUA deployment): %s", exc, exc_info=True)
 
-    # 4. 전략 GAZUA로 이동 (Active)
+    # 4. Move strategy to GAZUA (Active)
     try:
-        # 예산 계산: order_usdt(한 계단) * max_levels(계단 수) = 총 운영 규모 추정
-        # 값이 없으면 기본 10 USDT
+        # Budget estimate: order_usdt (per step) * max_levels (step count) = total operating size
+        # Defaults to 10 USDT if not set
         unit_usdt = int(cfg.get("order_usdt") or 10)
         levels = int(cfg.get("max_levels") or 10)
         total_budget = unit_usdt * levels
         if total_budget < 50:
-            total_budget = 100  # 최소 안전장치 ($100 USDT)
+            total_budget = 100  # minimum safeguard ($100 USDT)
 
         deploy_body = LongHoldDeployIn(market=market, budget_usdt=total_budget, strategy="GAZUA", params={})
-        
-        # 직접 함수 호출 (FastAPI 내부)
+
+        # Direct function call (within FastAPI)
         deploy_result = longhold_deploy(request, deploy_body)
         if deploy_result.get("ok"):
             steps.append("strategy_changed")
@@ -136,8 +136,8 @@ def exit_and_move(request: Request, body: ExitAndMoveIn) -> Dict[str, Any]:
 
 # ------------------------------------------------------------
 # Minimal schemas (router-level)
-# - Manager가 Pydantic 모델을 갖고 있다면 그대로 반환해도 되지만,
-#   MVP 단계에서는 dict 기반으로 주고받아도 충분합니다.
+# - If the Manager has Pydantic models, those can be returned as-is, but
+#   at the MVP stage exchanging plain dicts is sufficient.
 # ------------------------------------------------------------
 class LadderConfigIn(BaseModel):
     market: str
@@ -168,8 +168,8 @@ class LadderConfigIn(BaseModel):
 
 def _get_mgr(request: Request):
     """
-    system에 ladder_manager를 붙여두는 패턴(oma_registry 등과 유사).
-    초기화 위치가 아직 없으면 요청 시 lazy init.
+    Pattern of attaching ladder_manager to system (similar to oma_registry, etc.).
+    Lazy-init on request if there is no initialization point yet.
     """
     system = request.app.state.system
 
@@ -178,9 +178,9 @@ def _get_mgr(request: Request):
         return mgr
 
     # Lazy init (MVP)
-    # 실제 프로젝트에서는 hyper_system 초기화 시점에 붙이는 걸 권장
+    # In a real project, attaching it at hyper_system init time is recommended
     try:
-        from app.manager.ladder_manager import LadderManager  # path는 프로젝트에 맞게
+        from app.manager.ladder_manager import LadderManager  # adjust path to your project
     except (ImportError, AttributeError, TypeError) as e:
         logger.warning("ladder_router._get_mgr L180: %s", e)
         raise HTTPException(status_code=500, detail={"error": "LADDER_MANAGER_IMPORT_FAILED", "detail": str(e)})
@@ -231,7 +231,7 @@ def get_config(
     """
     mgr = _get_mgr(request)
     try:
-        return mgr.get_config(market)  # dict 형태 권장
+        return mgr.get_config(market)  # dict form recommended
     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as e:
         logger.warning("ladder_router.get_config L228: %s", e)
         raise HTTPException(status_code=500, detail={"error": "GET_CONFIG_FAILED", "detail": str(e)})
@@ -255,7 +255,7 @@ def save_config(request: Request, cfg: LadderConfigIn) -> Dict[str, Any]:
     """
     mgr = _get_mgr(request)
 
-    # 서버 상호배타 검증(필수)
+    # Server-side mutual-exclusion check (required)
     try:
         mgr.validate_exclusive_mode(cfg.market)
     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as e:
@@ -292,11 +292,11 @@ def list_ladder_configs(request: Request) -> Dict[str, Any]:
 # ------------------------------------------------------------
 @router.get(
     "/icag/diagnostics",
-    summary="ICAG 진단: 마켓별 앵커, 존, 바이어스, ATR 등",
+    summary="ICAG diagnostics: per-market anchor, zone, bias, ATR, etc.",
 )
 def icag_diagnostics(
     request: Request,
-    market: str = Query(None, description="특정 마켓 (미지정시 전체)"),
+    market: str = Query(None, description="Specific market (all if unspecified)"),
 ) -> Dict[str, Any]:
     grid_v3 = _get_grid_v3(request)
     mgr = _get_mgr(request)
@@ -321,14 +321,14 @@ def icag_diagnostics(
     except (KeyError, AttributeError, TypeError) as exc:
         logger.warning("[LADDER_API] Show all enabled LADDER markets (from config + OMA ACTIVE/LADDER): %s", exc, exc_info=True)
 
-    # OMA에서 LADDER 전략으로 ACTIVE인 마켓도 포함 (config 미등록이어도 표시)
+    # Also include markets ACTIVE under the LADDER strategy in OMA (shown even if not in config)
     try:
         from app.manager.oma_market_registry import MarketState
         system = request.app.state.system
         oma = getattr(system, "oma_registry", None)
         if oma:
             snapshot = oma.snapshot()
-            # snapshot은 {"active": [{"market":"...", "strategy":"...", ...}], ...} 형태
+            # snapshot has the form {"active": [{"market":"...", "strategy":"...", ...}], ...}
             active_list = snapshot.get("active", [])
             if isinstance(active_list, list):
                 for info in active_list:
@@ -341,7 +341,7 @@ def icag_diagnostics(
                     if strat != "LADDER":
                         continue
 
-                    # [FIX 2026-03-10] controls가 LADDER가 아니면 자동 복구
+                    # [FIX 2026-03-10] Auto-recover if controls are not LADDER
                     try:
                         ctx = system.coordinator.contexts.get(mk)
                         if ctx is not None:
@@ -352,7 +352,7 @@ def icag_diagnostics(
                                 from app.manager.market_controls import apply_engine_controls
                                 apply_engine_controls(system, mk, "LADDER")
                     except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                        logger.warning("[LADDER_API] [FIX 2026-03-10] controls가 LADDER가 아니면 자동 복구: %s", exc, exc_info=True)
+                        logger.warning("[LADDER_API] [FIX 2026-03-10] auto-recover if controls are not LADDER: %s", exc, exc_info=True)
 
                     diag = grid_v3.get_diagnostics(mk)
                     cfg = mgr.get_config(mk)
@@ -360,17 +360,17 @@ def icag_diagnostics(
                     diag["order_usdt"] = cfg.get("order_usdt", 0)
                     diag["max_levels"] = cfg.get("max_levels", 0)
                     diag["config_enabled"] = bool(cfg.get("enabled"))
-                    diag["oma_only"] = True  # config 없이 OMA에서만 온 마켓 표시
+                    diag["oma_only"] = True  # mark market that came only from OMA, not config
                     results[mk] = diag
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
-        logger.warning("[LADDER_API] [FIX 2026-03-10] controls가 LADDER가 아니면 자동 복구: %s", exc, exc_info=True)
+        logger.warning("[LADDER_API] include OMA-only LADDER markets: %s", exc, exc_info=True)
 
     return {"ok": True, "markets": results}
 
 
 @router.post(
     "/icag/sync",
-    summary="ICAG 수동 그리드 동기화",
+    summary="ICAG manual grid sync",
 )
 def icag_manual_sync(
     request: Request,
@@ -387,13 +387,13 @@ def icag_manual_sync(
 
 @router.post(
     "/icag/bootstrap",
-    summary="업비트 포지션 스캔 → LADDER 자동 등록 + 현재가 중심 그리드",
+    summary="Scan Upbit positions -> auto-register LADDER + grid centered on current price",
 )
 def icag_bootstrap(
     request: Request,
-    budget_usdt: float = Query(100, description="마켓당 기본 예산"),
-    order_usdt: float = Query(10, description="1회 주문금액"),
-    max_levels: int = Query(10, description="최대 레벨 수"),
+    budget_usdt: float = Query(100, description="Default budget per market"),
+    order_usdt: float = Query(10, description="Order amount per fill"),
+    max_levels: int = Query(10, description="Maximum number of levels"),
 ) -> Dict[str, Any]:
     grid_v3 = _get_grid_v3(request)
     try:
@@ -410,7 +410,7 @@ def icag_bootstrap(
 
 @router.post(
     "/icag/cancel-all",
-    summary="ICAG 마켓의 모든 주문 취소",
+    summary="Cancel all orders for an ICAG market",
 )
 def icag_cancel_all(
     request: Request,
@@ -422,7 +422,7 @@ def icag_cancel_all(
     canceled = grid_v3._cancel_all_orders(mkt)
     removed = False
     if remove:
-        # 그리드 설정에서도 제거
+        # Remove from grid config as well
         try:
             if hasattr(grid_v3, 'grids') and mkt in grid_v3.grids:
                 del grid_v3.grids[mkt]
@@ -432,7 +432,7 @@ def icag_cancel_all(
             elif hasattr(grid_v3, 'save_config'):
                 grid_v3.save_config()
         except (KeyError, AttributeError, TypeError) as exc:
-            logger.warning("[LADDER_API] 그리드 설정에서도 제거: %s", exc, exc_info=True)
+            logger.warning("[LADDER_API] remove from grid config as well: %s", exc, exc_info=True)
     return {"ok": True, "market": mkt, "canceled": canceled, "removed": removed}
 
 
@@ -484,7 +484,7 @@ def market_stats(
     """
     mgr = _get_mgr(request)
     try:
-        # spacing 정보를 주면 suggested_max_levels 계산에 사용
+        # if spacing info is provided, use it to compute suggested_max_levels
         sm = spacing_mode or None
         try:
             sv = float(spacing_value) if spacing_value not in ("", None) else None
@@ -522,7 +522,7 @@ def seed_orders(
     """
     mgr = _get_mgr(request)
 
-    # 서버 상호배타 검증(필수)
+    # Server-side mutual-exclusion check (required)
     try:
         mgr.validate_exclusive_mode(market)
     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as e:
@@ -538,16 +538,16 @@ def seed_orders(
     if not bool(cfg.get("enabled")):
         raise HTTPException(status_code=400, detail={"error": "LADDER_DISABLED", "market": market})
 
-    # MVP: seed 전에 reconcile(중복 방지)
+    # MVP: reconcile before seeding (prevent duplicates)
     try:
         _ = mgr.reconcile(market)
     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError):
         logger.warning("ladder_router.seed_orders L526 except", exc_info=True)
-        # reconcile 실패는 seed 자체를 막는 편이 안전하지만,
-        # 프로젝트 상황에 따라 완화 가능. MVP는 막습니다.
+        # Blocking seed on reconcile failure is safer, but
+        # can be relaxed depending on the project. MVP blocks it.
         raise HTTPException(status_code=500, detail={"error": "RECONCILE_FAILED", "market": market})
 
-    # 현재가 확보
+    # Obtain current price
     try:
         current_price = mgr.get_current_price(market)
     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as e:
@@ -557,7 +557,7 @@ def seed_orders(
     if not current_price or float(current_price) <= 0:
         raise HTTPException(status_code=400, detail={"error": "NO_PRICE", "market": market})
 
-    # 수수료/슬리피지 기반 경고 (MVP: 경고만 반환)
+    # Fee/slippage-based warnings (MVP: return warnings only)
     warnings = []
     try:
         warnings = mgr.compute_warnings(cfg, float(current_price))
@@ -574,7 +574,7 @@ def seed_orders(
     if not current_price or float(current_price) <= 0:
         raise HTTPException(status_code=400, detail={"error":"NO_PRICE","market":market})
 
-    # seed 실행 (MVP: 매수 주문만)
+    # Run seed (MVP: buy orders only)
     try:
         summary = mgr.seed_buy_orders(cfg, float(current_price))
     except (TypeError, ValueError) as e:
@@ -696,7 +696,7 @@ def cancel_orders(
     """
     mgr = _get_mgr(request)
 
-    # 서버 상호배타 검증(필수)
+    # Server-side mutual-exclusion check (required)
     try:
         mgr.validate_exclusive_mode(market)
     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as e:
@@ -734,7 +734,7 @@ class LongHoldConfigIn(BaseModel):
 
 
 class LongHoldDeployIn(BaseModel):
-    """Deploy 요청 스키마"""
+    """Deploy request schema"""
     market: str
     budget_usdt: float = 100
     strategy: str = "GAZUA"  # GAZUA | LADDER | LIGHTNING | CONTRARIAN
@@ -743,7 +743,7 @@ class LongHoldDeployIn(BaseModel):
 
 def _check_budget_available(system, required_usdt: float) -> tuple[bool, float, float]:
     """
-    예산 가용 여부 확인
+    Check budget availability
     Returns: (available, remaining_usdt, total_deployable_usdt)
     """
     try:
@@ -751,7 +751,7 @@ def _check_budget_available(system, required_usdt: float) -> tuple[bool, float, 
         deploy_ratio = float(getattr(system, "deploy_ratio", 0.8) or 0.8)
         total_deployable = equity * deploy_ratio
         
-        # 현재 배치된 금액 계산
+        # Compute the amount currently deployed
         deployed_usdt = 0.0
         oma = getattr(system, "oma_registry", None)
         if oma and hasattr(oma, "snapshot"):
@@ -761,8 +761,8 @@ def _check_budget_available(system, required_usdt: float) -> tuple[bool, float, 
                     b_usdt = float(item.get("budget_usdt", 0) or 0)
                     strat = str(item.get("strategy") or "").upper()
                     
-                    # [User Request] LADDER는 그리드 특성상 예산을 즉시 다 쓰지 않음.
-                    # 따라서 장부상으로는 30%만 점유한 것으로 계산하여 '오버부킹'을 허용함.
+                    # [User Request] Due to its grid nature, LADDER does not use its entire budget at once.
+                    # So it is counted as occupying only 30% on the books, allowing 'overbooking'.
                     if strat == "LADDER":
                         deployed_usdt += b_usdt * 0.3
                     else:
@@ -772,20 +772,20 @@ def _check_budget_available(system, required_usdt: float) -> tuple[bool, float, 
         return remaining >= required_usdt, remaining, total_deployable
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
         logger.error("[BUDGET_CHECK] budget check failed, DENYING entry: %s", exc, exc_info=True)
-        return False, 0.0, 0.0  # 체크 실패 시 차단 (안전 방향)
+        return False, 0.0, 0.0  # block on check failure (fail-safe direction)
 
 
 def _notify_budget_exhausted(market: str, strategy: str, required_usdt: float, remaining_usdt: float):
-    """예산 부족 시 텔레그램 알림"""
+    """Telegram notification when budget is insufficient"""
     try:
         from app.notify.telegram import send_telegram
         send_telegram(
-            f"⚠️ *예산 부족 - 배치 대기*\n\n"
-            f"📌 마켓: {market}\n"
-            f"📊 전략: {strategy}\n"
-            f"💰 필요: {required_usdt:,.2f} USDT\n"
-            f"💵 잔여: {remaining_usdt:,.2f} USDT\n\n"
-            f"_예산 확보 시 수동 배치 필요_"
+            f"⚠️ *Budget insufficient - deployment pending*\n\n"
+            f"📌 Market: {market}\n"
+            f"📊 Strategy: {strategy}\n"
+            f"💰 Required: {required_usdt:,.2f} USDT\n"
+            f"💵 Remaining: {remaining_usdt:,.2f} USDT\n\n"
+            f"_Manual deployment needed once budget is available_"
         )
     except (AttributeError, TypeError, ValueError) as exc:
         logger.warning("[LADDER_API] ladder_router._notify_budget_exhausted fallback: %s", exc, exc_info=True)
@@ -860,7 +860,7 @@ def longhold_deploy(request: Request, body: LongHoldDeployIn) -> Dict[str, Any]:
     strategy = body.strategy.upper()
     params = body.params or {}
     
-    # 1. 이미 배치되어 있는지 확인
+    # 1. Check if already deployed
     try:
         oma = getattr(system, "oma_registry", None)
         if oma and hasattr(oma, "snapshot"):
@@ -877,9 +877,9 @@ def longhold_deploy(request: Request, body: LongHoldDeployIn) -> Dict[str, Any]:
                     "market": market
                 }
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
-        logger.warning("[LADDER_API] 1. 이미 배치되어 있는지 확인: %s", exc, exc_info=True)
-    
-    # 2. 예산 체크
+        logger.warning("[LADDER_API] 1. check if already deployed: %s", exc, exc_info=True)
+
+    # 2. Budget check
     available, remaining_usdt, total_deployable = _check_budget_available(system, budget_usdt)
     
     if not available:
@@ -894,7 +894,7 @@ def longhold_deploy(request: Request, body: LongHoldDeployIn) -> Dict[str, Any]:
             "total_deployable_usdt": total_deployable
         }
     
-    # 3. LongHold config 저장
+    # 3. Save LongHold config
     try:
         tp_pct = params.get("tp", params.get("tp_pct", 5.0))
         config_data = {
@@ -910,7 +910,7 @@ def longhold_deploy(request: Request, body: LongHoldDeployIn) -> Dict[str, Any]:
         logger.warning("ladder_router.longhold_deploy L881: %s", e)
         return {"ok": False, "error": "CONFIG_SAVE_FAILED", "detail": str(e), "market": market}
     
-    # 4. OMA에 ACTIVE로 등록
+    # 4. Register as ACTIVE in OMA
     try:
         from app.manager.oma_market_registry import MarketState
         reason = [f"longhold_deploy:{strategy}", f"budget:{budget_usdt}"]
@@ -919,44 +919,44 @@ def longhold_deploy(request: Request, body: LongHoldDeployIn) -> Dict[str, Any]:
         logger.warning("ladder_router.longhold_deploy L889: %s", e)
         return {"ok": False, "error": "OMA_SET_FAILED", "detail": str(e), "market": market}
     
-    # 5. [2026-02-01] context_state에 전략 설정 등록 (GAZUA 조건 추가)
-    # LongHold 코인은 user_sell_only=True로 자동매매에서 완전 제외
+    # 5. [2026-02-01] Register strategy settings in context_state (add GAZUA condition)
+    # LongHold coins are fully excluded from auto-trading via user_sell_only=True
     try:
         from app.manager.market_controls import apply_engine_controls
         apply_engine_controls(system, market, strategy)
-        
+
         ctx = system.coordinator.ensure_market(market)
-        
-        # LongHold용 특수 설정: 자동매매 완전 비활성화
-        # - user_sell_only=True: TP/SL 자동 매도 비활성화 (사용자만 매도 가능)
-        # - sl=-50: 사실상 SL 비활성화 (장기 보유 의도 존중)
+
+        # Special LongHold settings: fully disable auto-trading
+        # - user_sell_only=True: disable automatic TP/SL selling (only the user can sell)
+        # - sl=-50: effectively disable SL (respect long-hold intent)
         longhold_params = {
             "tp": tp_pct,
-            "sl": params.get("sl", -50.0),  # LongHold 기본 SL: -50%
-            "user_sell_only": True,  # [CRITICAL] 자동매매 완전 제외
+            "sl": params.get("sl", -50.0),  # LongHold default SL: -50%
+            "user_sell_only": True,  # [CRITICAL] fully exclude from auto-trading
             "hold_sell": False,
             "buy_now": params.get("buy_now", False),
         }
-        
+
         patch = {"strategy": {"params": longhold_params}}
         ctx.update_controls(patch)
         system._save_context_state()
     except (KeyError, AttributeError, TypeError) as e:
-        # 전략 설정 실패해도 OMA 등록은 성공했으므로 경고만
+        # OMA registration already succeeded even if strategy setup fails, so warn only
         import logging
         logging.warning(f"LongHold strategy setup warning for {market}: {e}")
-    
-    # 6. 성공 알림
+
+    # 6. Success notification
     try:
         from app.notify.telegram import send_telegram
         send_telegram(
-            f"🚀 *{strategy} 배치 완료*\n\n"
-            f"📌 마켓: {market}\n"
-            f"💰 예산: {budget_usdt:,.2f} USDT\n"
+            f"🚀 *{strategy} deployment complete*\n\n"
+            f"📌 Market: {market}\n"
+            f"💰 Budget: {budget_usdt:,.2f} USDT\n"
             f"🎯 TP: {params.get('tp', 5.0)}%"
         )
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
-        logger.warning("[LADDER_API] 6. 성공 알림: %s", exc, exc_info=True)
+        logger.warning("[LADDER_API] 6. success notification: %s", exc, exc_info=True)
     
     return {
         "ok": True,
@@ -989,17 +989,17 @@ def longhold_stop(request: Request, market: str = Query(...), action: str = Quer
 
     try:
         if action == "delete":
-            # OMA에서 제거
+            # Remove from OMA
             try:
                 from app.manager.oma_market_registry import MarketState
                 system.oma_set_market(market, MarketState.DISABLED, reason=["longhold_delete"])
             except (KeyError, AttributeError, TypeError) as exc:
-                logger.warning("[LADDER_API] OMA에서 제거: %s", exc, exc_info=True)
-            # Config 제거
+                logger.warning("[LADDER_API] remove from OMA: %s", exc, exc_info=True)
+            # Remove config
             mgr.remove_longhold_config(market)
             return {"ok": True, "market": market, "action": "deleted"}
         else:
-            # Config만 비활성화
+            # Disable config only
             cfg = mgr.get_longhold_config(market) or {}
             cfg["enabled"] = False
             mgr.save_longhold_config(cfg)
@@ -1188,7 +1188,7 @@ def longhold_sync(request: Request) -> Dict[str, Any]:
     return {"ok": True}
 
 
-@router.post("/grid/sync", summary="ICAG V3: 그리드 동기화")
+@router.post("/grid/sync", summary="ICAG V3: grid sync")
 def grid_sync(
     request: Request,
     market: str = Query(..., description="Market code (e.g., BTCUSDT)"),
@@ -1201,7 +1201,7 @@ def grid_sync(
         raise HTTPException(status_code=500, detail={"error": "GRID_SYNC_FAILED", "detail": str(e)})
 
 
-@router.get("/grid/state", summary="ICAG V3: 그리드 상태 조회")
+@router.get("/grid/state", summary="ICAG V3: get grid state")
 def grid_state(
     request: Request,
     market: str = Query(..., description="Market code"),
@@ -1261,12 +1261,12 @@ def grid_state(
 
 @router.post(
     "/backfill",
-    summary="과거 체결 주문 소급 기록",
+    summary="Backfill records of past filled orders",
     responses={200: {"description": "Backfill result"}},
 )
 def backfill_filled_orders(
     request: Request,
-    since: str = Query("2026-02-08T00:01:00+09:00", description="소급 시작 시각 (ISO 8601)"),
+    since: str = Query("2026-02-08T00:01:00+09:00", description="Backfill start time (ISO 8601)"),
 ) -> Dict[str, Any]:
     from datetime import datetime
     mgr = _get_mgr(request)
@@ -1281,19 +1281,19 @@ def backfill_filled_orders(
 
 
 # --- Auto Tuner ---
-@router.get("/tune/status", summary="Auto-tuner 상태 조회")
+@router.get("/tune/status", summary="Get auto-tuner status")
 def tune_status(request: Request) -> Dict[str, Any]:
-    """현재 auto-tuner 상태 (각 마켓별 마지막 튜닝 결과)"""
+    """Current auto-tuner status (last tuning result per market)"""
     from app.manager.ladder_auto_tuner import LadderAutoTuner
     mgr = _get_mgr(request)
     tuner = LadderAutoTuner(mgr, system=request.app.state.system)
     return {"ok": True, "history": tuner.get_recent_history(limit=20)}
 
-@router.post("/tune/run", summary="수동 Auto-tune 실행")
+@router.post("/tune/run", summary="Run manual auto-tune")
 def tune_run(
     request: Request,
-    market: str = Query(None, description="특정 마켓 (미지정시 전체)"),
-    dry_run: bool = Query(False, description="True면 적용 안하고 결과만 반환"),
+    market: str = Query(None, description="Specific market (all if unspecified)"),
+    dry_run: bool = Query(False, description="If True, return results without applying"),
 ) -> Dict[str, Any]:
     from app.manager.ladder_auto_tuner import LadderAutoTuner
     mgr = _get_mgr(request)
@@ -1305,10 +1305,10 @@ def tune_run(
         results = tuner.tune_all(dry_run=dry_run)
         return {"ok": True, "results": {k: v.__dict__ if hasattr(v, '__dict__') else v for k, v in results.items()}}
 
-@router.get("/tune/history", summary="튜닝 이력 조회")
+@router.get("/tune/history", summary="Get tuning history")
 def tune_history(
     request: Request,
-    market: str = Query(None, description="특정 마켓 필터"),
+    market: str = Query(None, description="Filter by specific market"),
     limit: int = Query(50, ge=1, le=200),
 ) -> Dict[str, Any]:
     from app.manager.ladder_auto_tuner import LadderAutoTuner
@@ -1333,7 +1333,7 @@ def _get_grid_v2(request: Request):
     return v2
 
 
-@router.get("/grid/circuit-breaker", summary="Circuit Breaker 상태 조회")
+@router.get("/grid/circuit-breaker", summary="Get Circuit Breaker status")
 def circuit_breaker_status(request: Request) -> Dict[str, Any]:
     v2 = _get_grid_v2(request)
     return v2.get_circuit_breaker_status()
@@ -1349,7 +1349,7 @@ def circuit_breaker_toggle(
     return {"ok": True, "enabled": enabled}
 
 
-@router.post("/grid/circuit-breaker/threshold", summary="Circuit Breaker 임계값 설정")
+@router.post("/grid/circuit-breaker/threshold", summary="Set Circuit Breaker threshold")
 def circuit_breaker_threshold(
     request: Request,
     threshold: float = Query(..., ge=1.0, description="Threshold value"),

@@ -2,7 +2,7 @@
 # File: app/api/strategy_lightning_router.py
 # Extracted from strategy_router.py — Phase 1-C (file diet)
 #
-# LIGHTNING 전략 셋업/조회/중지 엔드포인트
+# LIGHTNING strategy setup/query/stop endpoints
 # ============================================================
 
 from fastapi import APIRouter, Request, Query
@@ -23,12 +23,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # ============================================================
-# LIGHTNING Guards — 영속(runtime/guards/lightning_guards.json) + ctx.controls 실제 적용
-# 실제 적용 경로 (검증):
-#   - guards 버킷  → hs_mixin_intent _g_bool/_g_float (per-market enforcement)
+# LIGHTNING Guards — persistence (runtime/guards/lightning_guards.json) + actual ctx.controls application
+# Actual enforcement paths (verified):
+#   - guards bucket  → hs_mixin_intent _g_bool/_g_float (per-market enforcement)
 #   - strategy.params → plugin_lightning + nunnaya_engine/intent (per-market)
-#   ※ drawdown_guard / entry_global_gap_sec 는 글로벌 attr 라 per-market 불가 → 제외
-#   ※ deep_sl 는 어디서도 enforcement 안 됨(no-op) → 제외
+#   ※ drawdown_guard / entry_global_gap_sec are global attrs, not per-market → excluded
+#   ※ deep_sl is not enforced anywhere (no-op) → excluded
 # ============================================================
 _LTG_GUARDS_PATH = os.path.join("runtime", "guards", "lightning_guards.json")
 _LTG_GUARD_KEYS = ("entry_ob_guard_enabled", "entry_ceiling_guard", "exit_profit_guard",
@@ -55,7 +55,7 @@ def _ltg_persist_guards(values: Dict[str, Any]) -> None:
 
 
 def _ltg_controls_patch(values: Dict[str, Any]) -> Dict[str, Any]:
-    """저장된 guard 값 → ctx.update_controls patch (guards 버킷 + strategy.params)."""
+    """Saved guard values → ctx.update_controls patch (guards bucket + strategy.params)."""
     g = {k: values[k] for k in _LTG_GUARD_KEYS if values.get(k) is not None}
     p = {k: values[k] for k in _LTG_PARAM_KEYS if values.get(k) is not None}
     patch: Dict[str, Any] = {}
@@ -98,7 +98,7 @@ def setup_lightning_market(req: LightningSetupRequest, request: Request):
     system = request.app.state.system
     market = req.market.strip().upper()
 
-    # [2026-03-07] 수동 주문 슬롯 초과 체크 (+2 한도)
+    # [2026-03-07] Manual order slot overflow check (+2 limit)
     overflow_check = _check_manual_overflow(system, "LIGHTNING", market)
     coin_warnings = _generate_coin_warnings(system, market, "LIGHTNING")
     if not overflow_check["allowed"]:
@@ -121,12 +121,12 @@ def setup_lightning_market(req: LightningSetupRequest, request: Request):
 
     # Override with user inputs
     ctx = system.coordinator.ensure_market(market)
-    # [2026-06-01] 수동 배포 마커 → list 의 A/M 컬럼 (autopilot 자동 배치는 이 마커 없음 = A)
+    # [2026-06-01] Manual deploy marker → A/M column in list (autopilot auto-placement has no marker = A)
     patch = {"strategy": {"params": {"tp": req.tp_pct, "sl": req.sl_pct, "entry_source": "manual"}}}
     ctx.update_controls(patch)
     _sync_policy_tp_sl(ctx, tp=req.tp_pct, sl=req.sl_pct)
 
-    # 저장된 LIGHTNING guards 를 새 배포 마켓에도 적용 (배포마다 일관 — 실제 적용)
+    # Apply saved LIGHTNING guards to the newly deployed market too (consistent per deploy — actual effect)
     saved_patch = _ltg_controls_patch(_ltg_load_guards())
     if saved_patch:
         ctx.update_controls(saved_patch)
@@ -189,7 +189,7 @@ def list_lightning_markets(request: Request):
             items.append({
                 "market": market,
                 "state": getattr(ctx, "market_state", "UNKNOWN"),
-                "am": "M" if (params.get("entry_source") == "manual") else "A",   # 수동(M) / autopilot 자동(A)
+                "am": "M" if (params.get("entry_source") == "manual") else "A",   # manual (M) / autopilot auto (A)
                 "budget": getattr(ctx, "allocated_capital", 0.0),
                 "params": {
                     "tp": params.get("tp", 5.0),
@@ -268,19 +268,19 @@ def stop_lightning_market(req: StrategyStopRequest, request: Request):
 
 
 # ============================================================
-# LIGHTNING Guards — 저장(전 LIGHTNING 마켓 ctx.controls 실시간 적용) / 조회
+# LIGHTNING Guards — save (live ctx.controls application to all LIGHTNING markets) / query
 # ============================================================
 class LightningGuardsRequest(BaseModel):
     # → ctx.controls["guards"] (per-market enforcement: hs_mixin_intent _g_bool/_g_float)
     entry_ob_guard_enabled: Optional[bool] = None
     entry_ceiling_guard: Optional[bool] = None
     exit_profit_guard: Optional[bool] = None
-    exit_min_net_profit_pct: Optional[float] = None   # exit_profit_guard ON 시 평가
-    exit_slippage_guard_bps: Optional[float] = None   # exit_profit_guard ON 시 평가
+    exit_min_net_profit_pct: Optional[float] = None   # evaluated when exit_profit_guard is ON
+    exit_slippage_guard_bps: Optional[float] = None   # evaluated when exit_profit_guard is ON
     # → ctx.controls["strategy"]["params"] (per-market)
     min_order_usdt: Optional[float] = None
-    user_sell_only: Optional[bool] = None             # 절대 매도금지
-    hold_sell: Optional[bool] = None                  # HOLD (TP 자동매도만 차단, SL 허용)
+    user_sell_only: Optional[bool] = None             # never sell
+    hold_sell: Optional[bool] = None                  # HOLD (block only TP auto-sell, allow SL)
 
 
 @router.post(
@@ -288,10 +288,10 @@ class LightningGuardsRequest(BaseModel):
     summary="Apply LIGHTNING guards to all LIGHTNING markets (real per-market effect)",
 )
 def save_lightning_guards(req: LightningGuardsRequest, request: Request):
-    """LIGHTNING Guards 저장 + 현재 모든 LIGHTNING 마켓 ctx.controls 에 실시간 적용.
+    """Save LIGHTNING Guards + apply live to ctx.controls of all current LIGHTNING markets.
 
-    - guards 버킷/strategy.params 는 hs_mixin_intent / plugin 이 per-market 로 읽어 enforcement.
-    - runtime/guards/lightning_guards.json 영속 → 이후 setup(배포) 시 자동 재적용.
+    - guards bucket / strategy.params are read per-market and enforced by hs_mixin_intent / plugin.
+    - Persisted to runtime/guards/lightning_guards.json → auto-reapplied on later setup (deploy).
     """
     system = request.app.state.system
     values = {k: v for k, v in req.dict().items() if v is not None}

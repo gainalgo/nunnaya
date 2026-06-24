@@ -2,15 +2,15 @@
 # File: app/engine/pingpong_strategy.py
 # Strategy Module — PingPong (LIVE-SAFE)
 # ------------------------------------------------------------
-# 목적:
-# - BUY / SELL / HOLD "판단"만 제공한다.
-# - 실행(주문)은 HyperSystem(Order FSM)이 담당한다.
+# Purpose:
+# - Provide BUY / SELL / HOLD "decisions" only.
+# - Execution (orders) is handled by HyperSystem (Order FSM).
 #
 # ✅ 2025-12-25 PATCH (Plan 1~5)
-# - 역마진(비싸게 사서 싸게 파는) 현상 해결:
-#   기존 구현의 "항상 buy / 항상 sell" 강제 로직을 제거.
-# - 수수료/스프레드까지 고려한 최소 목표폭(min_roundtrip_pct)을 반영.
-# - anchor(SMA) 기반 mean-reversion + SL(손절) 지원.
+# - Fixes the negative-margin (buy high / sell low) behavior:
+#   removes the old implementation's forced "always buy / always sell" logic.
+# - Honors a minimum target spread (min_roundtrip_pct) that accounts for fees/spread.
+# - anchor(SMA)-based mean-reversion + SL (stop-loss) support.
 # ============================================================
 
 from __future__ import annotations
@@ -175,41 +175,41 @@ def _volatility_pct(prices: List[float], *, window: int) -> Optional[float]:
 
 
 def compute_levels(context: Any, price: float, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """현재 price 기준으로 PingPong 레벨(진입/청산/손절) + (옵션) 피크-근접 Exit 메타를 계산한다.
+    """Compute PingPong levels (entry/exit/stop-loss) + (optional) peak-proximal exit meta from the current price.
 
-    목적:
-    - decide()가 사용할 '레벨'을 계산하고, UI/원장 관측(meta)을 함께 제공한다.
-    - 실행(주문)은 HyperSystem(Order FSM)이 담당한다.
+    Purpose:
+    - Compute the 'levels' that decide() uses, and provide UI/ledger observations (meta) alongside.
+    - Execution (orders) is handled by HyperSystem (Order FSM).
 
-    params (지원 키: baseline)
-      - pp_anchor_window / anchor_window (int)    : anchor(SMA) 계산 구간 (default=20)
-      - pp_entry_gap_pct / gap_pct / gap (float) : 진입 갭 % (default=0.35)
-      - pp_exit_gap_pct / pp_tp_pct (float)      : 청산 갭 % (default=entry_gap)
-      - pp_min_roundtrip_pct / min_roundtrip_pct : 왕복 최소 목표 % (default=0.25)
-      - pp_sl_pct / sl (float)                   : 손절 % (default=-0.8)
+    params (supported keys: baseline)
+      - pp_anchor_window / anchor_window (int)    : anchor(SMA) computation window (default=20)
+      - pp_entry_gap_pct / gap_pct / gap (float) : entry gap % (default=0.35)
+      - pp_exit_gap_pct / pp_tp_pct (float)      : exit gap % (default=entry_gap)
+      - pp_min_roundtrip_pct / min_roundtrip_pct : minimum round-trip target % (default=0.25)
+      - pp_sl_pct / sl (float)                   : stop-loss % (default=-0.8)
 
-    params (추가: PingPong ExitPolicy v1 — peak-proximal)
-      - pp_exit_enabled (bool)                   : 기본 True
-      - pp_exit_lookback (int)                   : 지표/고점 계산 구간 (default=60)
-      - pp_exit_dampen_need (int 1~3)            : 둔화 히트 N-of-3 (default=2)
-      - pp_exit_trail_min_pct / max_pct (float)  : trail% 최소/최대 (default 0.4~1.0)
+    params (additional: PingPong ExitPolicy v1 — peak-proximal)
+      - pp_exit_enabled (bool)                   : default True
+      - pp_exit_lookback (int)                   : indicator/high computation window (default=60)
+      - pp_exit_dampen_need (int 1~3)            : dampen hits N-of-3 (default=2)
+      - pp_exit_trail_min_pct / max_pct (float)  : trail% min/max (default 0.4~1.0)
       - pp_exit_trail_vol_mult (float)           : trail% = vol_mult * vol_pct (clamp) (default=0.6)
-      - pp_exit_trail_vol_window (int)           : 변동성 계산 창 (default=30)
-      - pp_exit_rsi_len (int)                    : RSI 기간 (default=14)
-      - pp_exit_rsi_drop_ratio (float)           : RSI_peak 대비 하락비율 (default=0.08)
-      - pp_exit_macd_fast/slow/signal (int)      : MACD 파라미터 (default=12/26/9)
-      - pp_exit_macd_down_streak (int)           : MACD hist 하락 연속 (default=2)
-      - pp_exit_band_len / band_k                : Bollinger 파라미터 (default=20/2.0)
-      - pp_exit_min_profit_pct (float)           : 이익 최소 조건(선택) (default=0.0)
+      - pp_exit_trail_vol_window (int)           : volatility computation window (default=30)
+      - pp_exit_rsi_len (int)                    : RSI period (default=14)
+      - pp_exit_rsi_drop_ratio (float)           : drop ratio vs RSI_peak (default=0.08)
+      - pp_exit_macd_fast/slow/signal (int)      : MACD parameters (default=12/26/9)
+      - pp_exit_macd_down_streak (int)           : MACD hist down-streak (default=2)
+      - pp_exit_band_len / band_k                : Bollinger parameters (default=20/2.0)
+      - pp_exit_min_profit_pct (float)           : minimum profit condition (optional) (default=0.0)
 
-    params (추가: Entry Enhancement)
-      - pp_buy_band_enabled (bool)               : 볼린저 하단 매수 활성화 (default=False)
-      - pp_buy_band_len / k                      : 매수용 밴드 설정 (default=20/2.0)
-      - pp_check_squeeze (bool)                  : 스퀴즈 감지 여부 (default=True)
-      - pp_squeeze_lookback (int)                : 스퀴즈 판단 기간 (default=20)
-      - pp_squeeze_action (str)                  : 스퀴즈 시 동작 "suspend"|"ignore" (default="suspend")
+    params (additional: Entry Enhancement)
+      - pp_buy_band_enabled (bool)               : enable lower-Bollinger buy (default=False)
+      - pp_buy_band_len / k                      : buy-side band settings (default=20/2.0)
+      - pp_check_squeeze (bool)                  : whether to detect squeeze (default=True)
+      - pp_squeeze_lookback (int)                : squeeze detection window (default=20)
+      - pp_squeeze_action (str)                  : action on squeeze "suspend"|"ignore" (default="suspend")
 
-    반환:
+    Returns:
       dict(valid, price, buy_price, sell_price, stop_price, exit, ...)
     """
     params = dict(params or {})
@@ -259,35 +259,35 @@ def compute_levels(context: Any, price: float, params: Optional[Dict[str, Any]] 
     exit_gap_pct = _f("pp_exit_gap_pct", _f("pp_tp_pct", float(entry_gap_pct)))
     min_roundtrip_pct = _f("pp_min_roundtrip_pct", _f("min_roundtrip_pct", 0.25))
 
-    # [2026-03-30] PINGPONG Regime-Aware: BTC 레짐별 entry/exit gap 조정
-    # pp_regime_aware 파라미터로 ON/OFF (기본 ON)
+    # [2026-03-30] PINGPONG Regime-Aware: adjust entry/exit gap per BTC regime
+    # ON/OFF via the pp_regime_aware parameter (default ON)
     _regime_aware = bool(params.get("pp_regime_aware", True))
     if _regime_aware:
         try:
             _regime = str(params.get("_btc_regime", "")).upper()
             if not _regime:
-                # price_store에서 BTC 레짐 조회 (HTTP 호출 없음, 캐시만)
+                # Read BTC regime from price_store (no HTTP call, cache only)
                 from app.core.market_regime import RegimeDetector
                 _det = getattr(compute_levels, "_regime_det", None)
                 if _det is None:
                     _det = RegimeDetector()
-                    compute_levels._regime_det = _det  # 싱글톤 캐시
+                    compute_levels._regime_det = _det  # singleton cache
                 _regime = str(_det.detect("BTCUSDT") or "SIDEWAYS").upper()
             if _regime == "BULL":
-                entry_gap_pct *= 0.8   # 빨리 사기
-                exit_gap_pct *= 1.3    # 더 보유
+                entry_gap_pct *= 0.8   # buy sooner
+                exit_gap_pct *= 1.3    # hold longer
             elif _regime == "BEAR":
-                entry_gap_pct *= 1.3   # 깊이 빠진 후 매수
-                exit_gap_pct *= 0.7    # 빨리 청산
+                entry_gap_pct *= 1.3   # buy after a deeper dip
+                exit_gap_pct *= 0.7    # exit sooner
             elif _regime == "VOLATILE":
-                entry_gap_pct *= 1.2   # 노이즈 무시
+                entry_gap_pct *= 1.2   # ignore noise
                 exit_gap_pct *= 1.2
-            # SIDEWAYS: 변경 없음
+            # SIDEWAYS: no change
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[PINGPONG] SIDEWAYS: 변경 없음: %s", exc, exc_info=True)
+            logger.warning("[PINGPONG] regime-aware gap adjust failed: %s", exc, exc_info=True)
 
-    # 손절 퍼센트는 음수/양수 모두 입력 허용: 2.5 또는 -2.5 → -2.5로 정규화
-    # 2026-01-30: 기본값 -0.8% → -2.5%로 완화 (너무 타이트하면 사자마자 손절됨)
+    # Stop-loss percent accepts both negative and positive input: 2.5 or -2.5 → normalized to -2.5
+    # 2026-01-30: default relaxed from -0.8% → -2.5% (too tight stops out right after buying)
     sl_raw = params.get("pp_sl_pct", params.get("sl", -2.5))
     try:
         sl_pct = float(sl_raw)
@@ -297,11 +297,11 @@ def compute_levels(context: Any, price: float, params: Optional[Dict[str, Any]] 
     if sl_pct > 0:
         sl_pct = -abs(sl_pct)
 
-    # 최소값 가드
+    # minimum-value guard
     entry_gap_eff = max(abs(float(entry_gap_pct)), 0.01)
     exit_gap_eff = max(abs(float(exit_gap_pct)), abs(float(min_roundtrip_pct)), 0.01)
 
-    # 기본값 삽입 헬퍼 (엔진/설정에서 누락되더라도 동작)
+    # default-insertion helper (works even when missing from engine/config)
     def _get_param(k: str, default: Any) -> Any:
         try:
             return params.get(k, default)
@@ -366,19 +366,19 @@ def compute_levels(context: Any, price: float, params: Optional[Dict[str, Any]] 
     squeeze_info = None
     bb_lower_entry = None
 
-    # 밴드 계산을 위해 현재가 포함된 히스토리 준비
+    # Prepare history including the current price for band computation
     if buy_band_enabled or check_squeeze:
         try:
             hist_full = getattr(context, "_tick_prices", None) or list(getattr(context, "price_history", []) or [])
-            # 현재가 p를 포함하여 최신 상태 반영
+            # Include the current price p to reflect the latest state
             full_series = _clean_prices(hist_full + [float(p)], max_n=max(200, squeeze_lookback + buy_band_len))
-            
+
             if buy_band_enabled:
                 bb_res = indicators.bollinger_bands(full_series, length=buy_band_len, k=buy_band_k)
                 if bb_res:
                     bb_lower_entry = float(bb_res["lower"])
-                    # 기존 SMA 기준 매수가와 밴드 하단 중 '더 높은 가격(더 빨리 사지는 가격)'을 선택
-                    # (공격적 진입: 밴드가 좁아져서 하단이 올라오면 거기서 매수)
+                    # Between the SMA-based buy price and the band lower, pick the 'higher (buys sooner) price'
+                    # (aggressive entry: when the band tightens and the lower rises, buy there)
                     buy_price = max(buy_price, bb_lower_entry)
 
             if check_squeeze:
@@ -387,7 +387,7 @@ def compute_levels(context: Any, price: float, params: Optional[Dict[str, Any]] 
                     bw, is_sq = sq_res
                     squeeze_info = {"bandwidth": bw, "is_squeeze": is_sq}
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[PINGPONG] 공격적 진입: 밴드가 좁아져서 하단이 올라오면 거기서 매수: %s", exc, exc_info=True)
+            logger.warning("[PINGPONG] band entry/squeeze computation failed: %s", exc, exc_info=True)
 
     if has_position and entry > 0.0:
         sell_price = float(entry) * (1.0 + (exit_gap_eff / 100.0))
@@ -413,7 +413,7 @@ def compute_levels(context: Any, price: float, params: Optional[Dict[str, Any]] 
         try:
             context.set_var("pp_high_since_entry", float(high))
         except (TypeError, ValueError) as exc:
-            logger.warning("[PINGPONG] since-entry high (persisted on ctx): %s", exc, exc_info=True)
+            logger.warning("[PINGPONG] since-entry high persist failed: %s", exc, exc_info=True)
 
         # 2) indicator input series
         try:
@@ -577,7 +577,7 @@ def compute_levels(context: Any, price: float, params: Optional[Dict[str, Any]] 
         trail_max = _ff("pp_exit_trail_max_pct", 1.0)
 
 
-        # 시간대별 변동성 배율 적용
+        # Apply time-of-day volatility multiplier
         time_mult = get_time_volatility_multiplier()
         if vol_pct is not None:
             trail_pct = max(trail_min, min(trail_max, float(vol_mult) * float(vol_pct) * time_mult))
@@ -711,29 +711,29 @@ def compute_levels(context: Any, price: float, params: Optional[Dict[str, Any]] 
 
 
 def decide(context: Any, price: float, params: Optional[Dict[str, Any]] = None) -> Signal:
-    """PingPong 신호를 결정한다."""
+    """Decide the PingPong signal."""
     levels = compute_levels(context, price, params)
 
     if not levels.get("valid"):
         return "hold"
 
-    # (defensive) 재진입 쿨다운은 System에서 enforce가 원칙이지만,
-    # strategy 레벨에서도 1차 hold 처리하여 잡음/과매매를 줄인다.
+    # (defensive) reentry cooldown is enforced by the System in principle, but
+    # the strategy level also applies a first-pass hold to reduce noise/over-trading.
     if levels.get("reentry_blocked"):
         return "hold"
 
     # --------------------------------------------------------
     # Squeeze Guard
     # --------------------------------------------------------
-    # 스퀴즈(변동성 축소) 발생 시 횡보 전략은 위험(Breakout 역매매)할 수 있으므로
-    # 신규 진입을 보류한다.
+    # During a squeeze (volatility contraction) a range strategy can be risky
+    # (breakout counter-trade), so new entries are held off.
     squeeze = levels.get("squeeze")
     if squeeze and squeeze.get("is_squeeze"):
         action = "suspend"
         if params:
             action = params.get("pp_squeeze_action", "suspend")
         
-        # 포지션이 없을 때만 진입 제한 (이미 잡은 포지션은 청산 로직 따름)
+        # Restrict entry only when there is no position (existing positions follow exit logic)
         if action == "suspend" and not levels.get("has_position"):
             return "hold"
 
@@ -743,7 +743,7 @@ def decide(context: Any, price: float, params: Optional[Dict[str, Any]] = None) 
         buy_price = float(levels.get("buy_price") or 0.0)
         if buy_price > 0 and p <= buy_price:
             # --------------------------------------------------------
-            # PATCH: 잔고 부족 시 매수 신호 억제 (로그 스팸 방지)
+            # PATCH: suppress buy signal when capital is insufficient (avoid log spam)
             # --------------------------------------------------------
             capital = 0.0
             try:

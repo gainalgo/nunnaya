@@ -1,36 +1,36 @@
 # ============================================================
 # File: app/strategy/indicators.py
 # ------------------------------------------------------------
-# 기술적 지표 계산 함수 모음.
-# StrategyBrain 이 시장 분석을 할 때 호출하는 모듈.
+# Collection of technical indicator calculation functions.
+# Module called by StrategyBrain when performing market analysis.
 # ============================================================
 
 from __future__ import annotations
 from typing import List, Dict, Tuple, Optional
 
 # ============================================================
-# [PERF-TELEMETRY] 인디케이터 호출 횟수 카운터 (2026-03-21)
+# [PERF-TELEMETRY] Indicator call-count counter (2026-03-21)
 # ============================================================
 _call_counts: Dict[str, int] = {}
 
 def _count(name: str) -> None:
-    """인디케이터 함수 진입 시 호출. 틱 시작 시 reset_call_counts()로 리셋."""
+    """Called on indicator-function entry. Reset via reset_call_counts() at tick start."""
     _call_counts[name] = _call_counts.get(name, 0) + 1
 
 def reset_call_counts() -> None:
-    """틱 사이클 시작 전에 호출하여 카운터 리셋."""
+    """Reset the counter; call before the start of a tick cycle."""
     _call_counts.clear()
 
 def get_call_counts() -> Dict[str, int]:
-    """현재 틱의 인디케이터 호출 횟수 반환 (복사본)."""
+    """Return the current tick's indicator call counts (a copy)."""
     return dict(_call_counts)
 
 
 # ============================================================
-# [PERF] Per-Tick 캐시 연동 (2026-03-21)
+# [PERF] Per-tick cache integration (2026-03-21)
 # ============================================================
 def _cache_key(name: str, data, *params) -> tuple:
-    """Content-based 캐시 키. 3-point sampling(first/mid/last) + length로 충돌 저항."""
+    """Content-based cache key. 3-point sampling (first/mid/last) + length for collision resistance."""
     n = len(data) if data else 0
     return (name, n, data[-1] if n else 0, data[0] if n else 0,
             data[n // 2] if n > 2 else 0, *params)
@@ -40,7 +40,7 @@ try:
 except ImportError:
     import logging as _logging
     _logging.getLogger(__name__).warning("indicator_cache module not available, caching disabled", exc_info=True)
-    # 캐시 모듈 없으면 바이패스
+    # Bypass if the cache module is unavailable
     def _cache_get(key, fn):  # type: ignore
         return fn()
 
@@ -105,15 +105,15 @@ def _macd_impl(
     k_slow = 2.0 / (slow + 1)
     k_sig = 2.0 / (signal + 1)
 
-    # Fast EMA 초기화 (SMA of first `fast` points) → slow-1 시점까지 갱신
+    # Fast EMA init (SMA of first `fast` points) -> update up to the slow-1 point
     ema_fast = sum(data[:fast]) / fast
     for p in data[fast:slow]:
         ema_fast = p * k_fast + ema_fast * (1.0 - k_fast)
 
-    # Slow EMA 초기화 (SMA of first `slow` points)
+    # Slow EMA init (SMA of first `slow` points)
     ema_slow = sum(data[:slow]) / slow
 
-    # data[slow:] 구간에서 MACD line 이력 수집
+    # Collect MACD line history over the data[slow:] range
     macd_values: List[float] = []
     for p in data[slow:]:
         ema_fast = p * k_fast + ema_fast * (1.0 - k_fast)
@@ -155,8 +155,8 @@ def ema(data: List[float], length: int = 14) -> float | None:
     return _cache_get(_cache_key("ema", data, length), lambda: _ema_impl(data, length))
 
 def _ema_impl(data: List[float], length: int) -> float | None:
-    # EMA는 과거 데이터 의존도가 높으므로 가능한 많이 사용하거나
-    # 여기서는 간단히 최근 데이터로 계산 (실제로는 전체 히스토리 권장)
+    # EMA depends heavily on past data, so use as much as possible, or
+    # here we simply compute over recent data (full history is recommended in practice)
     arr = data[-length*2:] if len(data) > length*2 else data
     k = 2 / (length + 1)
     ema_val = arr[0]
@@ -166,10 +166,10 @@ def _ema_impl(data: List[float], length: int) -> float | None:
 
 
 # ============================================================
-# 변동성(표준편차 기반)
+# Volatility (standard-deviation based)
 # ============================================================
 def volatility(data: List[float], length: int = 14) -> float | None:
-    """수익률의 표준편차(%)를 계산한다. (AI 학습 데이터와 일치)"""
+    """Compute the standard deviation (%) of returns. (Matches the AI training data)"""
     _count("volatility")
     if not data or len(data) < length + 1:
         return None
@@ -177,7 +177,7 @@ def volatility(data: List[float], length: int = 14) -> float | None:
 
 def _volatility_impl(data: List[float], length: int) -> float | None:
     # Calculate returns: (p_t - p_{t-1}) / p_{t-1}
-    # length개의 수익률을 얻기 위해 length+1개의 가격 데이터 사용
+    # Use length+1 price points to obtain length returns
     window = data[-(length + 1):]
     rets = [(window[i] - window[i-1]) / window[i-1] for i in range(1, len(window)) if window[i-1] > 0]
 
@@ -192,7 +192,7 @@ def _volatility_impl(data: List[float], length: int) -> float | None:
 
 
 # ============================================================
-# 추세(% 변화)
+# Trend (% change)
 # ============================================================
 def trend(data: List[float], length: int = 14) -> float | None:
     _count("trend")
@@ -203,7 +203,7 @@ def trend(data: List[float], length: int = 14) -> float | None:
 
 
 # ============================================================
-# 모멘텀
+# Momentum
 # ============================================================
 def momentum(data: List[float], length: int = 14) -> float | None:
     _count("momentum")
@@ -214,7 +214,7 @@ def momentum(data: List[float], length: int = 14) -> float | None:
 
 
 # ============================================================
-# 볼린저 밴드
+# Bollinger Bands
 # ============================================================
 def bollinger_bands(data: List[float], length: int = 20, k: float = 2.0) -> Dict[str, float] | None:
     _count("bollinger_bands")
@@ -226,14 +226,14 @@ def _bollinger_bands_impl(data: List[float], length: int, k: float) -> Dict[str,
     arr = data[-length:]
     mid = sum(arr) / length
 
-    # 표준편차 (Population StdDev)
+    # Standard deviation (population StdDev)
     var = sum((p - mid) ** 2 for p in arr) / length
     std = var ** 0.5
 
     upper = mid + std * k
     lower = mid - std * k
 
-    # 밴드폭 (Bandwidth) = (Upper - Lower) / Mid
+    # Bandwidth = (Upper - Lower) / Mid
     bandwidth = 0.0
     if mid > 0:
         bandwidth = (upper - lower) / mid
@@ -251,24 +251,24 @@ def _bollinger_bands_impl(data: List[float], length: int, k: float) -> Dict[str,
 # ATR (Simplified: Close-to-Close)
 # ============================================================
 def atr_simplified(data: List[float], length: int = 14) -> float | None:
-    """고가/저가 정보 없이 종가(Close)만으로 계산하는 근사 ATR."""
+    """Approximate ATR computed from close prices only, without high/low data."""
     _count("atr_simplified")
     if not data or len(data) < length + 1:
         return None
     return _cache_get(_cache_key("atr_simplified", data, length), lambda: _atr_simplified_impl(data, length))
 
 def _atr_simplified_impl(data: List[float], length: int) -> float | None:
-    # True Range 근사치: abs(current - prev)
+    # True Range approximation: abs(current - prev)
     tr_list = [abs(data[i] - data[i-1]) for i in range(1, len(data))]
 
     # Wilder's Smoothing (RMA)
     if len(tr_list) < length:
         return None
 
-    # 첫 값은 SMA
+    # First value is the SMA
     atr_val = sum(tr_list[:length]) / length
 
-    # 이후는 Smoothing
+    # Subsequent values use smoothing
     for tr in tr_list[length:]:
         atr_val = (atr_val * (length - 1) + tr) / length
 
@@ -276,25 +276,25 @@ def _atr_simplified_impl(data: List[float], length: int) -> float | None:
 
 
 # ============================================================
-# 볼린저 밴드 스퀴즈 (Squeeze)
+# Bollinger Band Squeeze
 # ============================================================
 def bollinger_squeeze(data: List[float], length: int = 20, k: float = 2.0, lookback: int = 20) -> Tuple[float, bool] | None:
     """
-    현재 밴드폭과 스퀴즈(Squeeze) 발생 여부를 반환한다.
-    Squeeze: 현재 밴드폭이 최근 lookback 기간 중 최저점일 때 (변동성 극소)
+    Return the current bandwidth and whether a squeeze is occurring.
+    Squeeze: when the current bandwidth is the lowest over the recent lookback period (minimal volatility)
     """
     _count("bollinger_squeeze")
     if not data or len(data) < length + lookback:
         return None
 
-    # 현재 밴드폭 계산 (캐시 활용)
+    # Compute the current bandwidth (using the cache)
     bb_now = bollinger_bands(data, length, k)
     if not bb_now:
         return None
     bw_now = bb_now["bandwidth"]
 
-    # [PERF] 과거 lookback bandwidth를 직접 계산 (dict 할당 21회 → 0회)
-    # bollinger_bands() 전체 호출 대신 bandwidth만 계산
+    # [PERF] Compute past lookback bandwidth directly (dict allocations 21 -> 0)
+    # Compute only bandwidth instead of the full bollinger_bands() call
     is_squeeze = True
     for i in range(1, lookback + 1):
         end = len(data) - i
@@ -314,9 +314,9 @@ def bollinger_squeeze(data: List[float], length: int = 20, k: float = 2.0, lookb
 
 
 # ============================================================
-# [PERF] Series 함수 (autoloop 통합용, 2026-03-21 Phase 2)
-# autoloop_strategy.py의 private 구현을 정확히 포팅.
-# 기존 rsi()/ema()/macd()와 seeding 방식이 다르므로 별도 유지.
+# [PERF] Series functions (for autoloop integration, 2026-03-21 Phase 2)
+# Exact port of the private implementations in autoloop_strategy.py.
+# Kept separate because the seeding method differs from the existing rsi()/ema()/macd().
 # ============================================================
 
 def ema_series(data: List[float], length: int = 14) -> List[float]:
@@ -450,8 +450,8 @@ def _macd_hist_series_impl(data: List[float], fast: int, slow: int, signal: int)
 
 
 # ============================================================
-# Ichimoku Cloud (일목균형표)
-# WHALE 전략용: 구름대 위/아래 판단
+# Ichimoku Cloud
+# For the WHALE strategy: determine above/below the cloud
 # ============================================================
 def ichimoku_cloud(
     highs: List[float],
@@ -461,27 +461,27 @@ def ichimoku_cloud(
     kijun: int = 26,
     senkou_b_period: int = 52,
 ) -> Optional[Dict]:
-    """일목균형표 구름대 계산.
+    """Ichimoku cloud calculation.
 
-    현재 봉에서 보이는 구름 (senkou_a/b는 kijun 기간 전에 계산된 값):
+    The cloud visible at the current bar (senkou_a/b are values computed kijun periods ago):
     - cloud_top   : max(senkou_a, senkou_b)
     - cloud_bottom: min(senkou_a, senkou_b)
-    - above_cloud : 현재가 > cloud_top
-    - below_cloud : 현재가 < cloud_bottom
+    - above_cloud : current price > cloud_top
+    - below_cloud : current price < cloud_bottom
     """
     _count("ichimoku_cloud")
-    min_len = kijun + senkou_b_period  # 최소 78캔들 필요
+    min_len = kijun + senkou_b_period  # at least 78 candles required
     if (len(closes) < min_len or len(highs) < min_len or len(lows) < min_len):
         return None
 
     def _mid(h: List[float], l: List[float]) -> float:
         return (max(h) + min(l)) / 2.0
 
-    # 현재 전환선/기준선
+    # Current tenkan/kijun lines
     tenkan_val = _mid(highs[-tenkan:], lows[-tenkan:])
     kijun_val  = _mid(highs[-kijun:],  lows[-kijun:])
 
-    # 현재 봉에 표시되는 구름 = kijun 기간 전에 계산된 senkou
+    # The cloud shown at the current bar = senkou computed kijun periods ago
     # senkou_a[-kijun] = (tenkan[-kijun] + kijun[-kijun]) / 2
     t_hi = highs[-tenkan - kijun: -kijun]
     t_lo = lows [-tenkan - kijun: -kijun]
@@ -517,7 +517,7 @@ def ichimoku_cloud(
 
 # ============================================================
 # Stochastic RSI
-# WHALE 전략용: %K(빨강)가 %D(파랑) 위로 교차 = 진입 신호
+# For the WHALE strategy: %K (red) crossing above %D (blue) = entry signal
 # ============================================================
 def stochastic_rsi(
     prices: List[float],
@@ -526,26 +526,26 @@ def stochastic_rsi(
     k_smooth: int = 3,
     d_smooth: int = 3,
 ) -> Optional[Dict]:
-    """Stochastic RSI 계산.
+    """Stochastic RSI calculation.
 
     Returns:
-        k        : %K 현재값 (빨강선, 0~100)
-        d        : %D 현재값 (파랑선, 0~100)
-        crossover: True = %K가 %D를 방금 위로 교차 (매수 신호)
-        crossunder: True = %K가 %D를 방금 아래로 교차 (매도 신호)
+        k        : current %K value (red line, 0~100)
+        d        : current %D value (blue line, 0~100)
+        crossover: True = %K just crossed above %D (buy signal)
+        crossunder: True = %K just crossed below %D (sell signal)
     """
     _count("stochastic_rsi")
     min_len = rsi_period + stoch_period + k_smooth + d_smooth + 5
     if len(prices) < min_len:
         return None
 
-    # Step 1: RSI 시리즈 계산 — O(N) single-pass (was O(N²) loop)
+    # Step 1: Compute RSI series — O(N) single-pass (was O(N²) loop)
     rsi_vals = rsi_series(prices, rsi_period)
 
     if len(rsi_vals) < stoch_period + k_smooth + d_smooth:
         return None
 
-    # Step 2: RSI에 스토캐스틱 적용 → raw %K
+    # Step 2: Apply stochastic to RSI -> raw %K
     raw_k: List[float] = []
     for i in range(stoch_period, len(rsi_vals) + 1):
         window   = rsi_vals[i - stoch_period: i]
@@ -559,7 +559,7 @@ def stochastic_rsi(
     if len(raw_k) < k_smooth + d_smooth:
         return None
 
-    # Step 3: %K 스무딩 (SMA)
+    # Step 3: %K smoothing (SMA)
     k_series: List[float] = []
     for i in range(k_smooth, len(raw_k) + 1):
         k_series.append(sum(raw_k[i - k_smooth: i]) / k_smooth)
@@ -567,7 +567,7 @@ def stochastic_rsi(
     if len(k_series) < d_smooth + 1:
         return None
 
-    # Step 4: %D = %K의 SMA
+    # Step 4: %D = SMA of %K
     d_series: List[float] = []
     for i in range(d_smooth, len(k_series) + 1):
         d_series.append(sum(k_series[i - d_smooth: i]) / d_smooth)
@@ -583,8 +583,8 @@ def stochastic_rsi(
     return {
         "k":          k,
         "d":          d,
-        "crossover":  prev_k <= prev_d and k > d,   # 빨강이 파랑 위로 (매수)
-        "crossunder": prev_k >= prev_d and k < d,   # 빨강이 파랑 아래로 (매도)
+        "crossover":  prev_k <= prev_d and k > d,   # red above blue (buy)
+        "crossunder": prev_k >= prev_d and k < d,   # red below blue (sell)
     }
 
 
@@ -598,15 +598,15 @@ def adx(highs: List[float], lows: List[float], closes: List[float],
     Parameters
     ----------
     highs, lows, closes : List[float]
-        H4 (또는 원하는 TF) OHLC 시리즈. 길이 동일해야 함.
+        H4 (or any desired TF) OHLC series. Must be of equal length.
     period : int
-        기본 14.
+        Default 14.
 
     Returns
     -------
     dict | None
         {"adx": float, "plus_di": float, "minus_di": float, "adx_rising": bool}
-        데이터 부족 시 None.
+        None if insufficient data.
     """
     _count("adx")
     n = len(closes)
@@ -621,7 +621,7 @@ def adx(highs: List[float], lows: List[float], closes: List[float],
 
 def _adx_impl(highs: List[float], lows: List[float], closes: List[float],
               period: int) -> Optional[Dict]:
-    """ADX 내부 구현 — Wilder smoothing."""
+    """ADX internal implementation — Wilder smoothing."""
     series = _adx_series_impl(highs, lows, closes, period)
     if len(series) < 2:
         return None
@@ -633,13 +633,13 @@ def _adx_impl(highs: List[float], lows: List[float], closes: List[float],
 
 def adx_series(highs: List[float], lows: List[float], closes: List[float],
                period: int = 14) -> List[Dict]:
-    """ADX 전체 시리즈.
+    """Full ADX series.
 
     Returns
     -------
     List[Dict]
-        각 항목: {"adx": float, "plus_di": float, "minus_di": float}
-        첫 유효값은 index 0이며, 원본 대비 ``2*period`` 만큼 뒤에서 시작.
+        Each item: {"adx": float, "plus_di": float, "minus_di": float}
+        The first valid value is at index 0 and starts ``2*period`` later than the source.
     """
     _count("adx_series")
     n = len(closes)
@@ -653,11 +653,11 @@ def adx_series(highs: List[float], lows: List[float], closes: List[float],
 
 def _adx_series_impl(highs: List[float], lows: List[float],
                       closes: List[float], period: int) -> List[Dict]:
-    """Wilder's ADX 시리즈 전체 계산.
+    """Compute the full Wilder's ADX series.
 
-    알고리즘:
-    1) True Range, +DM, -DM 계산
-    2) Wilder smoothing (period) 으로 ATR14, +DM14, -DM14
+    Algorithm:
+    1) Compute True Range, +DM, -DM
+    2) Wilder smoothing (period) to get ATR14, +DM14, -DM14
     3) +DI = +DM14/ATR14 * 100,  -DI = -DM14/ATR14 * 100
     4) DX  = |+DI - -DI| / (+DI + -DI) * 100
     5) ADX = Wilder smooth of DX (period)
@@ -684,7 +684,7 @@ def _adx_series_impl(highs: List[float], lows: List[float],
         plus_dm_list.append(plus_dm)
         minus_dm_list.append(minus_dm)
 
-    # --- Step 2: 첫 period 구간 단순합 → Wilder smoothing -----------
+    # --- Step 2: simple sum over the first period -> Wilder smoothing ---
     if len(tr_list) < 2 * period:
         return []
 
@@ -728,7 +728,7 @@ def _adx_series_impl(highs: List[float], lows: List[float],
     adx_val = sum(dx_list[:period]) / period
     results: List[Dict] = []
 
-    # 첫 ADX (period 번째 DX까지 사용)
+    # First ADX (uses DX up to the period-th value)
     rec = di_records[period - 1].copy()
     rec["adx"] = round(adx_val, 4)
     results.append(rec)

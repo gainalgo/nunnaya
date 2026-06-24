@@ -43,9 +43,9 @@ class ICAGConfig:
     bias_cooldown_sec: int = 60
 
     # --- Orders ---
-    max_orders_core: int = 3              # 코어 존 최대 주문 수 (6→3)
-    max_orders_expansion: int = 0         # 확장 존 비활성 (4→0, 코어만 운영)
-    requote_cooldown_sec: int = 60        # 그리드 재계산 쿨다운 (15s→60s)
+    max_orders_core: int = 3              # max orders in core zone (6→3)
+    max_orders_expansion: int = 0         # expansion zone disabled (4→0, core only)
+    requote_cooldown_sec: int = 60        # grid recompute cooldown (15s→60s)
 
     # --- Fee-aware profit ---
     fee_rate: float = 0.0005              # 0.05% per trade

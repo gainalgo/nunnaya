@@ -36,7 +36,7 @@ class ReservedQueue:
 
         # History (Approved/Rejected/Autopilot Promote/Demote logs)
         # - Persisted alongside the queue so operators can answer:
-        #   "AutoApprove가 켜져 있는데 왜 Reserved가 비어있지?" (→ 방금 승격/강등됨)
+        #   "AutoApprove is on, so why is Reserved empty?" (→ just promoted/demoted)
         # - Keep bounded to avoid unbounded growth.
         self._history_max = 200
         try:

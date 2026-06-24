@@ -1,13 +1,13 @@
 # ============================================================
-# Twin Battle — 형(兄)↔동생(弟) 서버 성과 비교 시스템
+# Twin Battle — server-to-server performance comparison system
 # ------------------------------------------------------------
-# 형 서버가 동생 서버에게 주는 선물.
-# 동일한 FOCUS 전략을 돌리는 두 서버가 서로의 성과를
-# 표준 포맷으로 내보내고, 대결 결과를 비교한다.
+# A gift from one agent to a sibling session.
+# Two servers running the same FOCUS strategy export their
+# performance in a standard format and compare the results.
 #
-# READ-ONLY: 거래 행동에는 절대 개입하지 않는다.
+# READ-ONLY: never interferes with trading behavior.
 #
-# 사용:
+# Usage:
 #   from app.manager.twin_battle import twin_battle
 #   snap = twin_battle.export_snapshot()
 #   result = twin_battle.compare(other_server_snapshot)
@@ -26,18 +26,18 @@ from app.core.io_utils import safe_write_json, safe_load_json
 
 logger = logging.getLogger(__name__)
 
-# ── 경로 ─────────────────────────────────────────────────────
+# ── Paths ────────────────────────────────────────────────────
 JOURNAL_PATH = os.path.join("runtime", "focus_harpoon_journal.jsonl")
 CONFIG_PATH = os.path.join("runtime", "focus_config.json")
 TWIN_CONFIG_PATH = os.path.join("runtime", "twin_config.json")
 TWIN_SNAPSHOT_DIR = os.path.join("runtime", "twin_snapshots")
 
-# ── 07:00 KST = 22:00 UTC 리셋 기준 ─────────────────────────
+# ── 07:00 KST = 22:00 UTC reset boundary ────────────────────
 _RESET_HOUR_UTC = 22
 
 
 def _today_reset_ts() -> float:
-    """오늘 07:00 KST (22:00 UTC) 리셋 타임스탬프 반환."""
+    """Return today's 07:00 KST (22:00 UTC) reset timestamp."""
     now_utc = _dt.datetime.now(_dt.timezone.utc)
     boundary = now_utc.replace(hour=_RESET_HOUR_UTC, minute=0, second=0, microsecond=0)
     if now_utc.hour < _RESET_HOUR_UTC:
@@ -46,7 +46,7 @@ def _today_reset_ts() -> float:
 
 
 def _today_date_label() -> str:
-    """오늘 거래일 라벨 (KST 기준 YYYY-MM-DD)."""
+    """Today's trading-day label (KST-based YYYY-MM-DD)."""
     now_utc = _dt.datetime.now(_dt.timezone.utc)
     boundary = now_utc.replace(hour=_RESET_HOUR_UTC, minute=0, second=0, microsecond=0)
     if now_utc.hour < _RESET_HOUR_UTC:
@@ -55,10 +55,10 @@ def _today_date_label() -> str:
     return kst.strftime("%Y-%m-%d")
 
 
-# ── Helper: 저널 읽기 ────────────────────────────────────────
+# ── Helper: journal reading ──────────────────────────────────
 
 def _read_all_exits() -> List[Dict]:
-    """저널에서 모든 EXIT 거래 로드."""
+    """Load all EXIT trades from the journal."""
     exits: List[Dict] = []
     if not os.path.exists(JOURNAL_PATH):
         return exits
@@ -75,18 +75,18 @@ def _read_all_exits() -> List[Dict]:
                 except json.JSONDecodeError:
                     continue
     except OSError as exc:
-        logger.warning("[TwinBattle] 저널 읽기 실패: %s", exc)
+        logger.warning("[TwinBattle] failed to read journal: %s", exc)
     return exits
 
 
 def _read_today_exits() -> List[Dict]:
-    """오늘 07:00 KST 이후 EXIT 거래만 필터."""
+    """Filter only EXIT trades after today's 07:00 KST."""
     reset_ts = _today_reset_ts()
     return [t for t in _read_all_exits() if t.get("ts", 0) >= reset_ts]
 
 
 def _read_today_blocked() -> List[Dict]:
-    """오늘 BLOCKED 이벤트 로드."""
+    """Load today's BLOCKED events."""
     reset_ts = _today_reset_ts()
     blocked: List[Dict] = []
     if not os.path.exists(JOURNAL_PATH):
@@ -104,22 +104,22 @@ def _read_today_blocked() -> List[Dict]:
                 except json.JSONDecodeError:
                     continue
     except OSError as exc:
-        logger.warning("[TwinBattle] BLOCKED 읽기 실패: %s", exc)
+        logger.warning("[TwinBattle] failed to read BLOCKED: %s", exc)
     return blocked
 
 
 def _read_active_positions() -> List[Dict]:
-    """focus_config.json에서 현재 보유 포지션 읽기."""
+    """Read currently held positions from focus_config.json."""
     positions: List[Dict] = []
     data = safe_load_json(CONFIG_PATH, default={})
-    # ★ Phase H (2026-04-20 형 letter#3 A-11): isinstance 가드 — 외부 도구로 수정 시 type 깨질 수 있음
+    # ★ Phase H (2026-04-20 this agent letter#3 A-11): isinstance guard — type may break when edited by external tools
     if not isinstance(data, dict):
         return positions
     state = data.get("state", {})
     if not isinstance(state, dict):
         return positions
 
-    # multi-position 리스트
+    # multi-position list
     raw_positions = state.get("positions", [])
     if not isinstance(raw_positions, list):
         raw_positions = []
@@ -129,14 +129,14 @@ def _read_active_positions() -> List[Dict]:
                 "coin": p.get("market", ""),
                 "direction": p.get("direction", ""),
                 "entry_price": p.get("entry_price", 0.0),
-                "current_pnl_pct": 0.0,  # 실시간 가격 없이 placeholder
+                "current_pnl_pct": 0.0,  # placeholder, no live price
                 "hold_min": round((time.time() - p.get("entry_ts", time.time())) / 60, 1),
                 "conviction": p.get("conviction_score", 0),
                 "leverage": p.get("leverage", 1),
                 "qty": p.get("qty", 0.0),
             })
 
-    # Legacy single position 호환
+    # Legacy single-position compatibility
     legacy = state.get("position")
     if legacy and legacy.get("market") and legacy.get("entry_price", 0) > 0:
         already = {p["coin"] for p in positions}
@@ -156,7 +156,7 @@ def _read_active_positions() -> List[Dict]:
 
 
 def _calc_today_coin_summary(exits: List[Dict]) -> Dict[str, Dict]:
-    """코인별 오늘 성과 요약."""
+    """Per-coin summary of today's performance."""
     by_coin: Dict[str, Dict] = defaultdict(lambda: {
         "trades": 0, "pnl": 0.0, "wins": 0,
     })
@@ -180,18 +180,18 @@ def _calc_today_coin_summary(exits: List[Dict]) -> Dict[str, Dict]:
 
 
 def _calc_blocked_counts(blocked_entries: List[Dict]) -> Dict[str, int]:
-    """BLOCKED 이벤트를 사유별로 카운트."""
+    """Count BLOCKED events by reason."""
     counts: Dict[str, int] = defaultdict(int)
     for entry in blocked_entries:
         reason = entry.get("exit_reason", "unknown")
-        # 간략화: 세부 내용 제거
+        # Simplify: drop the detail portion
         key = reason.split(":")[0] if ":" in reason else reason
         counts[key] += 1
     return dict(counts)
 
 
 def _calc_exposure(positions: List[Dict]) -> float:
-    """총 노출 금액 (notional value) 계산."""
+    """Compute total exposure (notional value)."""
     total = 0.0
     for p in positions:
         price = p.get("entry_price", 0)
@@ -200,78 +200,78 @@ def _calc_exposure(positions: List[Dict]) -> float:
     return round(total, 2)
 
 
-# ── 대결 메시지 생성 ─────────────────────────────────────────
+# ── Rivalry message generation ───────────────────────────────
 
 _RIVALRY_MESSAGES = {
     "dominant": [
-        "{winner}이(가) 압도적! {loser} 분발해라~",
-        "{winner} 완승! {loser}은(는) 오늘 반성문 써라",
-        "오늘은 {winner}의 날. {loser}은(는) 조용히 공부해",
+        "{winner} dominates! {loser}, step it up~",
+        "{winner} wins big! {loser} owes an apology note today",
+        "Today belongs to {winner}. {loser}, go study quietly",
     ],
     "close": [
-        "엎치락뒤치락! {winner}이(가) 간신히 앞서는 중",
-        "거의 동점! 아직 모른다, {loser} 역전 가능",
-        "치열한 접전 — {winner}이(가) 살짝 리드",
+        "Neck and neck! {winner} is barely ahead",
+        "Almost tied! Still anyone's game, {loser} can come back",
+        "Fierce battle — {winner} leads by a hair",
     ],
     "tied": [
-        "쌍둥이답게 완전 동점! 진짜 넌나야~",
-        "형제의 기운이 하나로... 수익도 같다",
-        "DNA가 같으니 성과도 같나보다",
+        "Dead even, like twins! Truly Nunnaya~",
+        "The brothers' energy is as one... profits match too",
+        "Same DNA, so same results, it seems",
     ],
     "no_data": [
-        "아직 비교할 데이터가 없어. 열심히 거래하자!",
-        "데이터 모이면 그때 승부!",
+        "No data to compare yet. Let's trade hard!",
+        "Once the data piles up, then we duel!",
     ],
 }
 
 
 def _pick_message(category: str, **kwargs) -> str:
-    """카테고리에서 랜덤(시간 기반) 메시지 선택."""
+    """Pick a (time-based) message from a category."""
     messages = _RIVALRY_MESSAGES.get(category, _RIVALRY_MESSAGES["no_data"])
-    # 시간 기반 순환 (deterministic)
+    # Time-based rotation (deterministic)
     idx = int(time.time() / 3600) % len(messages)
     return messages[idx].format(**kwargs)
 
 
 def _find_biggest_diff_coin(coin_battles: List[Dict]) -> str:
-    """코인 대결에서 가장 큰 PnL 차이 코인 찾기."""
+    """Find the coin with the largest PnL difference in the battles."""
     if not coin_battles:
         return ""
     best = max(coin_battles, key=lambda x: abs(x.get("diff", 0)))
     return best.get("coin", "")
 
 
-# ── TwinBattle 메인 클래스 ───────────────────────────────────
+# ── TwinBattle main class ────────────────────────────────────
 
 class TwinBattle:
-    """형↔동생 서버 성과 비교 매니저.
+    """Server-to-server performance comparison manager.
 
-    READ-ONLY 시스템: 거래에 절대 간섭하지 않는다.
-    export_snapshot()으로 표준 데이터를 내보내고,
-    compare()로 상대방 데이터와 비교한다.
+    READ-ONLY system: never interferes with trading.
+    Exports standard data via export_snapshot() and
+    compares against the other server via compare().
     """
 
     def __init__(self, server_name: str = "server-a"):
-        # twin_config.json에서 이름 로드 (없으면 기본값)
+        # Load name from twin_config.json (fallback to default)
         cfg = safe_load_json(TWIN_CONFIG_PATH, default={})
         self._server_name: str = cfg.get("server_name", server_name)
         self._last_export_ts: float = 0.0
         self._boot_ts: float = time.time()
         os.makedirs(TWIN_SNAPSHOT_DIR, exist_ok=True)
-        logger.info("[TwinBattle] 초기화: server_name=%s", self._server_name)
+        logger.info("[TwinBattle] initialized: server_name=%s", self._server_name)
 
     # ── Server Name ──────────────────────────────────────────
 
     def set_server_name(self, name: str):
-        """서버 이름 변경 및 저장."""
+        """Change and persist the server name."""
         self._server_name = name
         cfg = safe_load_json(TWIN_CONFIG_PATH, default={})
         cfg["server_name"] = name
         safe_write_json(TWIN_CONFIG_PATH, cfg)
-        logger.info("[TwinBattle] 서버 이름 변경: %s", name)
+        logger.info("[TwinBattle] server name changed: %s", name)
 
     def get_status(self) -> Dict[str, Any]:
-        """현재 상태 반환."""
+        """Return current status."""
         return {
             "server_name": self._server_name,
             "last_export_ts": self._last_export_ts,
@@ -282,10 +282,10 @@ class TwinBattle:
     # ── Export Snapshot ──────────────────────────────────────
 
     def export_snapshot(self) -> Dict[str, Any]:
-        """표준 성과 스냅샷 내보내기 — 쌍둥이 비교의 핵심 함수.
+        """Export a standard performance snapshot — core of the twin comparison.
 
         Returns:
-            표준화된 성과 dict (다른 서버에서 compare()에 전달 가능)
+            A standardized performance dict (can be passed to compare() on another server)
         """
         now = time.time()
         all_exits = _read_all_exits()
@@ -308,7 +308,7 @@ class TwinBattle:
         today_wins = sum(1 for t in today_exits if (t.get("pnl_net", 0) or 0) > 0)
         today_wr = round(today_wins / len(today_exits) * 100, 1) if today_exits else 0.0
 
-        # 금액 기준 승률 (amt_win_rate)
+        # Amount-based win rate (amt_win_rate)
         win_pnl = sum(t.get("pnl_net", 0) or 0 for t in all_exits if (t.get("pnl_net", 0) or 0) > 0)
         loss_pnl = abs(sum(t.get("pnl_net", 0) or 0 for t in all_exits if (t.get("pnl_net", 0) or 0) <= 0))
         amt_wr = round(win_pnl / (win_pnl + loss_pnl) * 100, 1) if (win_pnl + loss_pnl) > 0 else 0.0
@@ -323,7 +323,7 @@ class TwinBattle:
         # ── Blocked Counts ──
         blocked_counts = _calc_blocked_counts(today_blocked)
 
-        # ── Daily Plans / SL Count (focus_config에서 읽기) ──
+        # ── Daily Plans / SL Count (read from focus_config) ──
         focus_data = safe_load_json(CONFIG_PATH, default={})
         focus_state = focus_data.get("state", {})
         daily_plans_used = focus_state.get("daily_plans_used", 0)
@@ -353,7 +353,7 @@ class TwinBattle:
             # === Coin Overlap ===
             "coin_summary_today": coin_summary,
             # === Timing Analysis ===
-            "avg_entry_delay_sec": 0.0,  # placeholder — 추후 cross-server 비교용
+            "avg_entry_delay_sec": 0.0,  # placeholder — for future cross-server comparison
             # === System Health ===
             "uptime_sec": round(now - self._boot_ts, 1),
             "blocked_today": blocked_counts,
@@ -368,19 +368,19 @@ class TwinBattle:
     # ── Compare ──────────────────────────────────────────────
 
     def compare(self, other_snapshot: Dict) -> Dict[str, Any]:
-        """이 서버 vs 상대 서버 성과 비교.
+        """Compare this server vs the other server's performance.
 
         Args:
-            other_snapshot: 상대 서버의 export_snapshot() 결과
+            other_snapshot: the other server's export_snapshot() result
 
         Returns:
-            대결 결과 dict — PnL 차이, 코인별 승부, 요약 메시지 포함
+            A battle-result dict — PnL diff, per-coin outcomes, and summary message
         """
         my_snap = self.export_snapshot()
         my_name = my_snap.get("server_name", "server-a")
         other_name = other_snapshot.get("server_name", "server-b")
 
-        # ── PnL 비교 ──
+        # ── PnL comparison ──
         my_today_pnl = my_snap.get("today_pnl", 0)
         other_today_pnl = other_snapshot.get("today_pnl", 0)
         pnl_diff = round(my_today_pnl - other_today_pnl, 4)
@@ -389,16 +389,16 @@ class TwinBattle:
         other_total_pnl = other_snapshot.get("total_pnl", 0)
         total_diff = round(my_total_pnl - other_total_pnl, 4)
 
-        winner_today = my_name if pnl_diff > 0 else (other_name if pnl_diff < 0 else "무승부")
-        winner_total = my_name if total_diff > 0 else (other_name if total_diff < 0 else "무승부")
+        winner_today = my_name if pnl_diff > 0 else (other_name if pnl_diff < 0 else "tie")
+        winner_total = my_name if total_diff > 0 else (other_name if total_diff < 0 else "tie")
 
-        # ── 승률 비교 ──
+        # ── Win-rate comparison ──
         wr_diff = round(
             (my_snap.get("today_win_rate", 0) or 0) - (other_snapshot.get("today_win_rate", 0) or 0),
             1,
         )
 
-        # ── 코인별 대결 (양쪽 모두 거래한 코인) ──
+        # ── Per-coin battles (coins traded by both) ──
         my_coins = my_snap.get("coin_summary_today", {})
         other_coins = other_snapshot.get("coin_summary_today", {})
         overlap_coins = set(my_coins.keys()) & set(other_coins.keys())
@@ -419,7 +419,7 @@ class TwinBattle:
                 coin_winner = other_name
                 other_coin_wins += 1
             else:
-                coin_winner = "무승부"
+                coin_winner = "tie"
 
             battle = {
                 "coin": coin,
@@ -432,11 +432,11 @@ class TwinBattle:
 
         coin_battle_score = f"{my_name} {my_coin_wins} : {other_name} {other_coin_wins}"
 
-        # ── 거래 수 비교 ──
+        # ── Trade-count comparison ──
         my_today_trades = my_snap.get("today_trades", 0)
         other_today_trades = other_snapshot.get("today_trades", 0)
 
-        # ── 요약 메시지 생성 (형제간 라이벌리!) ──
+        # ── Build summary message (sibling rivalry!) ──
         summary = _build_summary_message(
             my_name=my_name,
             other_name=other_name,
@@ -456,13 +456,13 @@ class TwinBattle:
                 "winner_today": winner_today,
                 "winner_total": winner_total,
                 "win_rate_diff": wr_diff,
-                # 코인 대결
+                # Coin battles
                 "coin_battles": coin_battles,
                 "coin_battle_score": coin_battle_score,
-                # 거래 수
+                # Trade counts
                 f"{my_name}_trades": my_today_trades,
                 f"{other_name}_trades": other_today_trades,
-                # 요약
+                # Summary
                 "summary": summary,
             }
         }
@@ -470,20 +470,20 @@ class TwinBattle:
     # ── Private ──────────────────────────────────────────────
 
     def _save_snapshot(self, snapshot: Dict):
-        """스냅샷을 twin_snapshots/ 에 저장 (추세 비교용)."""
+        """Save the snapshot to twin_snapshots/ (for trend comparison)."""
         try:
             date_str = snapshot.get("export_date", "unknown")
             ts_suffix = int(snapshot.get("export_ts", time.time()))
             path = os.path.join(TWIN_SNAPSHOT_DIR, f"{date_str}_{ts_suffix}.json")
             safe_write_json(path, snapshot)
         except Exception as exc:
-            logger.warning("[TwinBattle] 스냅샷 저장 실패: %s", exc)
+            logger.warning("[TwinBattle] failed to save snapshot: %s", exc)
 
 
-# ── Private Helpers (모듈 레벨) ──────────────────────────────
+# ── Private Helpers (module level) ───────────────────────────
 
 def _find_best_trade(exits: List[Dict]) -> Dict:
-    """가장 좋은 거래 찾기."""
+    """Find the best trade."""
     if not exits:
         return {}
     best = max(exits, key=lambda t: t.get("pnl_net", 0) or 0)
@@ -498,7 +498,7 @@ def _find_best_trade(exits: List[Dict]) -> Dict:
 
 
 def _find_worst_trade(exits: List[Dict]) -> Dict:
-    """가장 나쁜 거래 찾기."""
+    """Find the worst trade."""
     if not exits:
         return {}
     worst = min(exits, key=lambda t: t.get("pnl_net", 0) or 0)
@@ -523,24 +523,24 @@ def _build_summary_message(
     my_today_trades: int,
     other_today_trades: int,
 ) -> str:
-    """형제 대결 요약 메시지 생성 (한국어, 재미있게!)."""
+    """Build the sibling-battle summary message (fun tone!)."""
 
-    # 데이터 없음
+    # No data
     if my_today_trades == 0 and other_today_trades == 0:
         return _pick_message("no_data")
 
-    # 상대방 데이터 없음
+    # Other side has no data
     if other_today_trades == 0:
-        return f"{my_name}만 거래 중 (${abs(pnl_diff):+.2f}). {other_name}은(는) 아직 출발 전!"
+        return f"Only {my_name} is trading (${abs(pnl_diff):+.2f}). {other_name} hasn't started yet!"
 
-    # 내 데이터 없음
+    # This side has no data
     if my_today_trades == 0:
-        return f"{other_name}만 거래 중. {my_name}은(는) 아직 출발 전!"
+        return f"Only {other_name} is trading. {my_name} hasn't started yet!"
 
-    # 승자/패자 결정
+    # Decide winner/loser
     abs_diff = abs(pnl_diff)
     if abs_diff < 0.01:
-        # 동점
+        # Tied
         msg = _pick_message("tied")
     else:
         winner = my_name if pnl_diff > 0 else other_name
@@ -551,18 +551,18 @@ def _build_summary_message(
         else:
             msg = _pick_message("close", winner=winner, loser=loser)
 
-    # 코인 대결 스코어 추가
+    # Append the coin-battle score
     if coin_battles:
         biggest_coin = _find_biggest_diff_coin(coin_battles)
         if biggest_coin:
-            msg += f" {biggest_coin}에서 가장 큰 차이."
+            msg += f" Biggest gap on {biggest_coin}."
 
-    # PnL 수치 추가
+    # Append PnL figures
     if abs_diff >= 0.01:
         winner = my_name if pnl_diff > 0 else other_name
-        msg = f"{winner}이(가) +${abs_diff:.2f} 앞서는 중. 코인 대결 {my_coin_wins}:{other_coin_wins}. {msg}"
+        msg = f"{winner} leads by +${abs_diff:.2f}. Coin battle {my_coin_wins}:{other_coin_wins}. {msg}"
     else:
-        msg = f"PnL 동점! 코인 대결 {my_coin_wins}:{other_coin_wins}. {msg}"
+        msg = f"PnL tied! Coin battle {my_coin_wins}:{other_coin_wins}. {msg}"
 
     return msg
 

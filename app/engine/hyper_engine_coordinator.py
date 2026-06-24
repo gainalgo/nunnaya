@@ -3,14 +3,14 @@
 # Autocoin OS v3-H — Engine Coordinator (ORDER-AWARE)
 # ------------------------------------------------------------
 # - Warm-up + StrategySelector + RiskClassifier
-# - LIVE에서도 exit(청산) 판단이 가능하도록: risk_unlock 없이도
-#   포지션 보유 / RECOVERY 모드에서는 engine tick을 허용한다.
-# - PATCH 4/5: Suspicion v1 + Defensive Mode 통합
+# - So that exit decisions remain possible even in LIVE: even without
+#   risk_unlock, engine tick is allowed when holding a position / in RECOVERY mode.
+# - PATCH 4/5: Suspicion v1 + Defensive Mode integration
 #
 # NOTE:
-# - v3-H 구조에서는 엔진은 HyperNunnayaEngine 하나뿐이다.
-# - pingpong/ladder/gazua 등은 "전략"이며,
-#   Coordinator는 이를 실행하지 않는다.
+# - In the v3-H architecture there is only one engine, HyperNunnayaEngine.
+# - pingpong/ladder/gazua etc. are "strategies",
+#   and the Coordinator does not execute them.
 # ============================================================
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ def _dbg_enabled() -> bool:
 class HyperEngineCoordinator:
     def __init__(
         self,
-        engine: HyperEngineBase,  # 반드시 HyperNunnayaEngine
+        engine: HyperEngineBase,  # must be HyperNunnayaEngine
         *,
         ema_alpha: float = 0.2,
         strategy_refresh_sec: float = 3.0,
@@ -56,7 +56,7 @@ class HyperEngineCoordinator:
         # Some components expect coordinator.min_ticks / coordinator.min_seconds
         # to exist. They are also used as defaults for new market contexts.
         # If you change these, do so deliberately and re-test warmup/readiness.
-        # 기본은 self.min_ticks 100, self.min_seconds 300 이었음
+        # Defaults were self.min_ticks 100, self.min_seconds 300
         # -----------------------------------------------------------------
         self.min_ticks: int = int(os.getenv("WARMUP_MIN_TICKS", "100") or 100)
         self.min_seconds: int = int(os.getenv("WARMUP_MIN_SECONDS", "300") or 300)
@@ -75,7 +75,7 @@ class HyperEngineCoordinator:
         self.defensive_red_ratio: float = 0.0
 
     # --------------------------------------------------------
-    # Context 관리
+    # Context management
     # --------------------------------------------------------
     def ensure_market(self, market: str) -> HyperEngineContext:
         with self._lock:
@@ -95,8 +95,8 @@ class HyperEngineCoordinator:
                 self.contexts[market] = ctx
             else:
                 ctx = self.contexts[market]
-                # 기존 context도 coordinator 기본값 이하면 강제 갱신
-                # (ENV 변경 후 재부팅 시 이전 값이 복원되는 문제 방지)
+                # Force-update an existing context if it is below the coordinator default
+                # (prevents the old value being restored after an ENV change + reboot)
                 _coord_min = int(getattr(self, "min_ticks", 100) or 100)
                 if getattr(ctx, "min_ticks", 0) < _coord_min:
                     ctx.min_ticks = _coord_min
@@ -124,14 +124,14 @@ class HyperEngineCoordinator:
     def tick(self, market: str, price: float, volume: float = 0.0) -> Dict[str, Any]:
         ctx = self.ensure_market(market)
 
-        # [PERF-TELEMETRY] 컴포넌트별 타이밍 (2026-03-21)
+        # [PERF-TELEMETRY] per-component timing (2026-03-21)
         _t0_tick = time.perf_counter()
 
-        # 1) 가격 기록 (Single Source of Truth)
-        # - 엔진이 아닌 Coordinator가 가격 기록을 전담한다.
-        # - 엔진은 context에 이미 기록된 가격 히스토리를 참조한다.
+        # 1) Record price (Single Source of Truth)
+        # - The Coordinator, not the engine, is solely responsible for recording prices.
+        # - The engine references the price history already recorded in the context.
         ctx.record_price(price)
-        # [PERF] 틱당 1회 스냅샷 — 14+ list() 복사 제거
+        # [PERF] one snapshot per tick — removes 14+ list() copies
         ctx._tick_prices = list(ctx.price_history)
         ctx.record_volume(volume)
         ctx.compute_unrealized(price)
@@ -151,27 +151,27 @@ class HyperEngineCoordinator:
                 rdy = False
             print(f"[READY-CHECK] market={market} ready={rdy} ticks={ctx.ticks} min_ticks={ctx.min_ticks}")
 
-        # 2) READY 이전 → Warm-up
-        # [2026-02-02] 최적화: is_ready()는 _warmup_done 플래그가 True면 O(1)로 반환
-        # ACTIVE 마켓은 force_ready() 호출로 플래그가 설정되어 있음
+        # 2) Before READY → Warm-up
+        # [2026-02-02] optimization: is_ready() returns in O(1) when the _warmup_done flag is True
+        # ACTIVE markets have the flag set via the force_ready() call
         warmup_mode = (not ctx.is_ready())
         if warmup_mode:
             ctx.last_signal = "warmup"
-            # 워밍업 중에는 risk 분류만 수행 (엔진 tick은 아래에서 계속)
+            # During warm-up only risk classification runs (engine tick continues below)
 
 
         now = time.time()
-        # 3) 전략 선택 (어떤 전략을 쓸지 결정)
+        # 3) Strategy selection (decide which strategy to use)
         #
         # NOTE:
-        # - StrategySelector는 "추천 전략"을 고른다(telemetry/스코어링 목적).
-        # - 그러나 Dashboard/관리자에서 per-market 전략을 강제로 지정한 경우
-        #   (ctx.controls.strategy.enabled + mode), 그 값이 "실제 실행 전략"이다.
-        # - 여기에서 selected/bias를 manual mode로 동기화해 UI/로그가 일치하도록 한다.
+        # - StrategySelector picks a "recommended strategy" (for telemetry/scoring purposes).
+        # - However, when the Dashboard/admin has forced a per-market strategy
+        #   (ctx.controls.strategy.enabled + mode), that value is the "actual executing strategy".
+        # - Here we sync selected/bias to manual mode so the UI/logs stay consistent.
         _t_selector_ms = 0.0  # [PERF-TELEMETRY]
         if ctx.strategy_ts is None or (now - ctx.strategy_ts) >= self.strategy_refresh_sec:
             _t_sel_start = time.perf_counter()  # [PERF-TELEMETRY]
-            # 3-1) 관리자 수동 전략 오버라이드 감지
+            # 3-1) Detect admin manual strategy override
             manual_mode = None
             try:
                 controls = getattr(ctx, "controls", {}) or {}
@@ -185,15 +185,15 @@ class HyperEngineCoordinator:
                 logger.warning("[Coordinator] manual strategy mode read failed", exc_info=True)
                 manual_mode = None
 
-            # 3-2) Selector 실행 (점수/근거 수집 목적)
+            # 3-2) Run selector (to collect scores/rationale)
             result = self.selector.select(ctx)
 
-            # 3-3) EMA/BIAS 갱신
+            # 3-3) Update EMA/BIAS
             ctx.update_ema(result.ema_scores, alpha=self.ema_alpha)
             ranked = sorted(ctx.ema_scores.items(), key=lambda x: x[1], reverse=True)
 
             if manual_mode:
-                # 수동 지정이 있으면 실행 전략을 그쪽으로 강제
+                # If manually specified, force the executing strategy to that
                 ctx.bias = manual_mode
                 ctx.confidence = 1.0
             else:
@@ -206,7 +206,7 @@ class HyperEngineCoordinator:
                     ctx.bias = None
                     ctx.confidence = None
 
-            # 3-4) Snapshot 저장 (UI/API contract)
+            # 3-4) Save snapshot (UI/API contract)
             chosen = manual_mode or result.chosen
             reason = dict(result.reason or {})
             if manual_mode:
@@ -246,8 +246,8 @@ class HyperEngineCoordinator:
         # ----------------------------------------------------
         # 5) Engine tick gate
         # ----------------------------------------------------
-        # LEGACY (보존):
-        # 신규 진입은 아래 조건을 만족할 때만 엔진 tick 허용
+        # LEGACY (preserved):
+        # New entries allow engine tick only when the conditions below are met
         #
         # allow_engine_tick = bool(self.engine.status.is_active) and (
         #     ctx.position is not None
@@ -258,13 +258,13 @@ class HyperEngineCoordinator:
         # ----------------------------------------------------
         # TEST / OBSERVABILITY OVERRIDE
         # ----------------------------------------------------
-        # 목적:
-        # - 엔진 판단 파이프라인을 항상 실행하여 관측 가능성 확보
-        # - warm-up / risk / defensive 상태에서도 "왜 안 됐는지"를 로그로 확인
+        # Purpose:
+        # - Always run the engine decision pipeline to ensure observability
+        # - Even in warm-up / risk / defensive states, log "why it didn't happen"
         #
-        # 주의:
-        # - 실제 주문 안전성은 HyperSystem._handle_intent()에서 보장된다.
-        # - 이 블록은 엔진 호출만 허용할 뿐, 주문을 강제하지 않는다.
+        # Caution:
+        # - Actual order safety is guaranteed in HyperSystem._handle_intent().
+        # - This block only allows the engine call; it does not force an order.
 
         controls = getattr(ctx, "controls", {}) or {}
 
@@ -297,7 +297,7 @@ class HyperEngineCoordinator:
             if isinstance(out, dict):
                 engine_out = out
                 ctx.last_signal = out.get("signal", ctx.last_signal)
-                # strategy_router(/last) 호환: 엔진 AI 결과 보관
+                # strategy_router(/last) compatibility: keep engine AI result
                 try:
                     ctx.last_ai = out.get("ai")
 
@@ -348,13 +348,13 @@ class HyperEngineCoordinator:
                     logger.warning("[COORDINATOR] engine AI/strategy bridge: %s", exc, exc_info=True)
             # ------------------------------------------------
             # WARMUP SAFETY:
-            # - 워밍업 중엔 엔진이 intent를 내더라도 실제 주문은 막는다.
-            # - 목적: 지표/상태는 준비하되 거래는 시작하지 않기.
+            # - During warm-up, block actual orders even if the engine emits an intent.
+            # - Purpose: prepare indicators/state but do not start trading.
             # ------------------------------------------------
             if 'warmup_mode' in locals() and warmup_mode:
                 try:
                     if isinstance(engine_out, dict):
-                        # System은 engine_out.intent를 보고 주문을 실행하므로 제거한다.
+                        # System executes orders based on engine_out.intent, so remove it.
                         engine_out = dict(engine_out)
                         engine_out.pop("intent", None)
                 except (KeyError, AttributeError, TypeError) as exc:
@@ -369,10 +369,10 @@ class HyperEngineCoordinator:
                 pass
 
         else:
-            # 엔진 비활성 상태
+            # Engine inactive state
             ctx.last_signal = "hold"
 
-        # [PERF-TELEMETRY] 컴포넌트별 소요 시간을 ctx에 저장 (TICK_DIAG에서 읽음)
+        # [PERF-TELEMETRY] save per-component elapsed time to ctx (read by TICK_DIAG)
         _t_total_coord_ms = (time.perf_counter() - _t0_tick) * 1000
         ctx._perf_selector_ms = _t_selector_ms
         ctx._perf_risk_ms = _t_risk_ms

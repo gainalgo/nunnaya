@@ -2,7 +2,7 @@
 # File: app/strategy/strategy_judge.py
 # ------------------------------------------------------------
 # StrategyJudge
-# - Brain 분석결과 + 정책 기반으로 buy/sell/hold 의사결정을 수행한다.
+# - Makes buy/sell/hold decisions based on Brain analysis results + policy.
 # ============================================================
 
 from __future__ import annotations
@@ -17,11 +17,11 @@ from .strategy_types import (
 
 class StrategyJudge:
     """
-    BrainOutput + Policy 조합으로 매수/매도/홀드 신호를 판단하는 모듈.
+    Module that determines buy/sell/hold signals from a combination of BrainOutput + Policy.
     """
 
     # --------------------------------------------------------
-    # 메인 판단 함수
+    # Main decision function
     # --------------------------------------------------------
     def decide(
         self,
@@ -31,7 +31,7 @@ class StrategyJudge:
         brain: StrategyBrainOutput
     ) -> StrategySignal:
         """
-        매수/매도/홀드 결정을 내리는 핵심 로직.
+        Core logic that makes the buy/sell/hold decision.
         """
 
         rsi_val = brain.rsi
@@ -39,7 +39,7 @@ class StrategyJudge:
         trend_val = brain.trend
 
         # --------------------------
-        # 간단한 RSI 기반 조건
+        # Simple RSI-based condition
         # --------------------------
         if rsi_val is not None:
             if rsi_val < policy.get("rsi_low", 30):
@@ -48,7 +48,7 @@ class StrategyJudge:
                 return StrategySignal("sell")
 
         # --------------------------
-        # MACD Histogram 기반 모멘텀 판단
+        # MACD Histogram-based momentum decision
         # --------------------------
         if macd_hist is not None:
             if macd_hist > 0:
@@ -59,6 +59,6 @@ class StrategyJudge:
                     return StrategySignal("sell")
 
         # --------------------------
-        # 기본: Hold
+        # Default: Hold
         # --------------------------
         return StrategySignal("hold")

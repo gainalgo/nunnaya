@@ -1,4 +1,4 @@
-"""Binance Exchange Adapter — BybitAdapter 미러. 시장조회는 BinanceSpotTradeClient 재활용."""
+"""Binance Exchange Adapter — mirrors BybitAdapter. Reuses BinanceSpotTradeClient for market lookups."""
 import logging
 from decimal import Decimal
 

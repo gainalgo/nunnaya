@@ -16,18 +16,18 @@ from collections import defaultdict as _defaultdict
 logger = logging.getLogger(__name__)
 
 
-# ── [2026-04-09 보안] 거래 엔드포인트 Rate Limiting ──────────────
+# ── [2026-04-09 security] Rate limiting for trade endpoints ──────────────
 _RATE_LIMIT: Dict[str, list] = _defaultdict(list)  # ip → [timestamp, ...]
-_RATE_LIMIT_MAX = 30   # 분당 최대 요청
-_RATE_LIMIT_WINDOW = 60  # 초
+_RATE_LIMIT_MAX = 30   # max requests per minute
+_RATE_LIMIT_WINDOW = 60  # seconds
 
 
 def _check_rate_limit(request: Request, limit: int = _RATE_LIMIT_MAX) -> bool:
-    """True = 허용, False = 차단"""
+    """True = allowed, False = blocked"""
     ip = request.client.host if request.client else "unknown"
     now = _time.time()
     window = now - _RATE_LIMIT_WINDOW
-    # 오래된 기록 제거
+    # Drop old records
     _RATE_LIMIT[ip] = [t for t in _RATE_LIMIT[ip] if t > window]
     if len(_RATE_LIMIT[ip]) >= limit:
         return False
@@ -132,12 +132,12 @@ def set_engine_controls(
     ctx = system.coordinator.get_context(market)
 
     # --------------------------------------------------------
-    # 세팅: UI/API에서 넘어온 controls 를 "단일 소스"로 적용
-    # - ctx.controls 는 표시(STATUS)와 실행(tick)에서 그대로 사용
-    # - 서버 재기동 후에도 동일하게 복원되도록 저장까지 보장
+    # Settings: apply controls from UI/API as the "single source"
+    # - ctx.controls is used as-is in both display (STATUS) and execution (tick)
+    # - Persisted so it is restored identically after a server restart
     # --------------------------------------------------------
     if hasattr(ctx, "update_controls"):
-        # 신규 경로(권장): 안전한 deep-merge + alias(config->params)
+        # New path (recommended): safe deep-merge + alias(config->params)
         prev_manual_enabled = bool(((ctx.controls or {}).get("manual") or {}).get("enabled"))
         ctx.update_controls(controls)
         new_manual_enabled = bool(((ctx.controls or {}).get("manual") or {}).get("enabled"))
@@ -153,7 +153,7 @@ def set_engine_controls(
             except (KeyError, AttributeError, TypeError) as exc:
                 logger.warning("[ENGINE_API] Manual mode OMA state change: %s", exc, exc_info=True)
     else:
-        # 구형 경로(호환): 일부 키만 덮어쓰기
+        # Legacy path (compat): overwrite only selected keys
         if "baseline" in controls:
             ctx.controls["baseline"] = controls["baseline"]
         if "ai" in controls:
@@ -169,7 +169,7 @@ def set_engine_controls(
 
     _sync_policy_tp_sl(ctx)
 
-    # 변경 이력 남기기
+    # Record the change history
     try:
         system.ledger.append(
             "ENGINE_CONTROLS_SET",
@@ -179,9 +179,9 @@ def set_engine_controls(
     except (AttributeError, TypeError) as exc:
         logger.warning("[ENGINE_API] ledger append controls: %s", exc)
 
-    # 즉시 저장(재기동 직전에도 세팅 보존)
+    # Persist immediately (settings preserved even right before a restart)
     try:
-        system._save_context_state()  # noqa: SLF001 (의도적 호출)
+        system._save_context_state()  # noqa: SLF001 (intentional call)
     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
         logger.warning("[ENGINE_API] save context state after controls: %s", exc, exc_info=True)
 
@@ -192,7 +192,7 @@ def set_engine_controls(
     }
 
 # ------------------------------------------------------------
-# 2026-03-10: OMA 상태 강제 변경 API
+# 2026-03-10: API to force OMA state change
 # ------------------------------------------------------------
 
 @router.post(
@@ -259,7 +259,7 @@ def manual_order(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
 
     Rate-limited: 30 requests/minute per IP.
     """
-    # [2026-04-09 보안] 거래 Rate Limiting
+    # [2026-04-09 security] Trade rate limiting
     if not _check_rate_limit(request):
         return {"ok": False, "error": "rate_limited", "message": "Too many requests. Max 30/min."}
     system = request.app.state.system
@@ -295,7 +295,7 @@ def manual_order(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     if expected_price <= 0 and side == "sell" and mode in ("usdt",):
         return {"ok": False, "error": "no_price", "message": "no price available (cannot convert quote to qty)"}
 
-    # [2026-04-09 보안] Emergency stop은 절대 우회 불가
+    # [2026-04-09 security] Emergency stop can never be bypassed
     if side == "buy" and getattr(system, "emergency_stop", False):
         return {"ok": False, "error": "emergency_stop", "message": "emergency_stop is active. Resume via /api/system/emergency/resume first."}
 
@@ -340,12 +340,12 @@ def manual_order(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
         if mode not in ("pct_pos", "pct", "usdt", "qty", "all"):
             return {"ok": False, "error": "bad_request", "message": f"invalid sell mode: {mode}"}
 
-        # 시스템 포지션 확인
+        # Check the system position
         pos = getattr(ctx, "position", None) or {}
         pos_qty = float(pos.get("qty") or 0.0)
-        focus_pos = None  # FOCUS 포지션 참조 (청산 후 상태 정리용)
+        focus_pos = None  # FOCUS position reference (for state cleanup after exit)
 
-        # 🔧 시스템 포지션이 없으면 FOCUS 포지션 확인
+        # 🔧 If there is no system position, check the FOCUS position
         if pos_qty <= 0:
             try:
                 fm = getattr(system, "focus_manager", None)
@@ -359,7 +359,7 @@ def manual_order(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
             except Exception as exc:
                 logger.debug("[ENGINE_API] FOCUS position check: %s", exc)
 
-        # 🔧 그래도 없으면 Bybit 실제 포지션 조회
+        # 🔧 If still none, query the actual Bybit position
         if pos_qty <= 0:
             try:
                 import os, hashlib, hmac, time as _t, requests as _req
@@ -424,7 +424,7 @@ def manual_order(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
             
         if ok:
             system.ledger.append("MANUAL_ORDER", market=market, side="sell", mode=mode, value=value, qty=qty, order_type=order_type)
-            # Precision Scope 슬롯에서 수동 전량매도 시, 슬롯을 즉시 해제해 추천 후보로 복귀시킨다.
+            # On a manual full sell from a Precision Scope slot, release the slot immediately so it returns to the recommendation pool.
             try:
                 is_full_exit = (
                     mode == "all"
@@ -473,7 +473,7 @@ def manual_order(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
                         system._save_context_state()
                     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
                         logger.warning("[ENGINE_API] save_context_state after scope sell: %s", exc, exc_info=True)
-                # 2026-03-10: 수동 전량매도 후 즉시 DISABLED + 컨텍스트 제거
+                # 2026-03-10: After a manual full sell, set DISABLED immediately + remove context
                 elif is_full_exit:
                     try:
                         _strat_name = str(s_mode or "").upper() if 's_mode' in dir() else ""
@@ -488,13 +488,13 @@ def manual_order(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
                         system.coordinator.remove_market(market)
                     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
                         logger.warning("[ENGINE_API] manual full_exit remove_market: %s", exc, exc_info=True)
-        # ★ FOCUS 포지션 청산 시 로컬 상태 정리
+        # ★ Clean up local state when a FOCUS position is exited
         if ok and focus_pos and is_full_exit:
             try:
                 fm = getattr(system, "focus_manager", None)
                 if fm:
                     fm.positions = [p for p in fm.positions if p.market.upper() != market.upper()]
-                    fm.position = fm.positions[0] if fm.positions else None  # ★ 레거시 필드 동기화
+                    fm.position = fm.positions[0] if fm.positions else None  # ★ keep legacy field in sync
                     if not fm.positions:
                         from app.manager.focus_manager import FocusState
                         fm.state = FocusState.DORMANT
@@ -691,7 +691,7 @@ def manual_batch(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
                             system._save_context_state()
                         except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
                             logger.warning("[ENGINE_API] batch save_context_state: %s", exc, exc_info=True)
-                    # 2026-03-10: batch 수동 전량매도 후 즉시 DISABLED + 컨텍스트 제거
+                    # 2026-03-10: After a batch manual full sell, set DISABLED immediately + remove context
                     elif is_full_exit:
                         try:
                             system.oma_set_market(
@@ -761,16 +761,16 @@ def start_engine(
 
     engine = system.engine
     try:
-        engine.start()      # ✅ 기본형
+        engine.start()      # ✅ default form
     except TypeError:
         logger.warning("engine_router.start_engine L683 except", exc_info=True)
-        engine.start(market)  # (혹시 market 받는 구현 대비)
+        engine.start(market)  # (in case the implementation takes a market arg)
 
-    # 핵심: OMA ACTIVE로 올려서
-    # - registry 반영
-    # - coordinator/context 보장
-    # - pricefeed 재구독
-    # - allocation 리밸런싱
+    # Key: raise OMA to ACTIVE to
+    # - reflect in the registry
+    # - guarantee coordinator/context
+    # - re-subscribe pricefeed
+    # - rebalance allocation
     # - context_state flush
     system.oma_set_market(
         market=market,
@@ -812,7 +812,7 @@ def stop_engine(request: Request):
     responses={200: {"description": "Actual balances from Exchange"}},
 )
 def get_exchange_balances(request: Request):
-    """Exchange 실제 잔액 조회 (시스템 포지션 아님)."""
+    """Query actual exchange balances (not system positions)."""
     system = request.app.state.system
     if not system.trade_client:
         return {"ok": False, "error": "trade_client not available"}
@@ -840,7 +840,7 @@ def get_exchange_balances(request: Request):
             market = Q.market(currency)
             price = float(price_store.get_price(market) or 0)
             
-            # Fallback: avg_buy_price 또는 exchange API에서 직접 가져오기
+            # Fallback: use avg_buy_price or fetch directly from the exchange API
             if price <= 0:
                 price = float(acc.get("avg_buy_price") or 0)
             if price <= 0:
@@ -894,13 +894,13 @@ def get_exchange_balances(request: Request):
 )
 def force_sell_exchange(request: Request, payload: Dict[str, Any]):
     """
-    Exchange 실제 잔액으로 강제 매도 (시스템 포지션 무시).
+    Force sell using actual exchange balance (ignores system position).
 
     Payload:
-    - currency: 코인 심볼 (예: "BTC", "ETH")
-    - pct: 매도 비율 (기본 100%)
+    - currency: coin symbol (e.g., "BTC", "ETH")
+    - pct: sell ratio (default 100%)
     """
-    # [2026-04-09 보안] 거래 Rate Limiting
+    # [2026-04-09 security] Trade rate limiting
     if not _check_rate_limit(request, limit=10):
         return {"ok": False, "error": "rate_limited", "message": "Too many force_sell requests. Max 10/min."}
     system = request.app.state.system
@@ -921,11 +921,11 @@ def force_sell_exchange(request: Request, payload: Dict[str, Any]):
         
         sell_qty = free_qty * (pct / 100.0)
         market = Q.market(currency)
-        
-        # 최소 주문 금액 체크
+
+        # Check the minimum order amount
         price = float(price_store.get_price(market) or 0)
         if price <= 0:
-            # 가격 직접 조회
+            # Query the price directly
             try:
                 from app.core.constants import (
                         BYBIT_MARKET_TICKERS,
@@ -949,7 +949,7 @@ def force_sell_exchange(request: Request, payload: Dict[str, Any]):
         if value_usdt < Q.min_order:
             return {"ok": False, "error": f"Value too small: {value_usdt:.2f} USDT (min min order)", "value_usdt": value_usdt}
         
-        # 강제 매도 실행
+        # Execute the force sell
         sell_ok, order = system.trade_client.sell_market(market, sell_qty)
         
         if not sell_ok:
@@ -957,7 +957,7 @@ def force_sell_exchange(request: Request, payload: Dict[str, Any]):
         
         order_id = order.get("uuid") or order.get("id") if isinstance(order, dict) else str(order)
         
-        # 시스템 포지션도 정리
+        # Also clear the system position
         ctx = system.coordinator.get_context(market)
         if ctx and ctx.position:
             ctx.position = None
@@ -992,7 +992,7 @@ def force_sell_exchange(request: Request, payload: Dict[str, Any]):
     responses={200: {"description": "Dust cleared"}},
 )
 def clear_dust_positions(request: Request, threshold: float = Query(1000.0, description="USDT threshold (default 1000)")):
-    """시스템에서 threshold USDT 이하 포지션(찌꺼기) 정리."""
+    """Clear positions (residue) under the threshold USDT from the system."""
     from app.manager.oma_market_registry import MarketState
     
     system = request.app.state.system
@@ -1003,21 +1003,21 @@ def clear_dust_positions(request: Request, threshold: float = Query(1000.0, desc
         if not ctx:
             continue
         
-        # position이 없거나 qty가 0 이하면 바로 정리
+        # If there is no position or qty <= 0, clear immediately
         pos = getattr(ctx, "position", None)
         qty = float(pos.get("qty") or 0) if pos else 0
         entry = float(pos.get("entry") or 0) if pos else 0
-        
-        # 현재가로 가치 계산
+
+        # Compute value at the current price
         price = float(price_store.get_price(market) or entry or 0)
         current_value = qty * price if price else (qty * entry)
-        
-        # threshold 이하면 정리 (<=로 변경)
+
+        # Clear if at or below threshold (changed to <=)
         if current_value <= threshold:
-            # position 제거
+            # Remove the position
             ctx.position = None
-            
-            # OMA registry에서도 DISABLED로 변경
+
+            # Also set DISABLED in the OMA registry
             try:
                 system.oma_set_market(
                     market=market,
@@ -1027,7 +1027,7 @@ def clear_dust_positions(request: Request, threshold: float = Query(1000.0, desc
             except (KeyError, AttributeError, TypeError) as exc:
                 logger.warning("[ENGINE_API] clear_dust OMA DISABLED: %s", exc, exc_info=True)
 
-            # coordinator에서 제거
+            # Remove from the coordinator
             try:
                 system.coordinator.remove_market(market)
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
@@ -1040,7 +1040,7 @@ def clear_dust_positions(request: Request, threshold: float = Query(1000.0, desc
 
 
 # ============================================================
-# [2026-02-01] 진짜 먼지 청소기: 최소 매수 후 전량 매도
+# [2026-02-01] True dust vacuum: minimal buy then sell all
 # ============================================================
 @router.get(
     "/dust/scan",
@@ -1051,7 +1051,7 @@ def scan_dust_positions(
     request: Request,
     threshold_usdt: float = Query(5.0, description="Dust threshold in USDT"),
 ):
-    """Bybit 계정에서 먼지 포지션(threshold_usdt 이하) 스캔."""
+    """Scan the Bybit account for dust positions (at or below threshold_usdt)."""
     system = request.app.state.system
     
     if not system.trade_client:
@@ -1066,11 +1066,11 @@ def scan_dust_positions(
     dust_list = []
     min_order_usdt = Q.min_order  # min order
     
-    # 모든 코인 가격을 한번에 조회
+    # Query all coin prices at once
     all_currencies = [str(acc.get("currency") or "").upper() for acc in accounts if acc.get("currency") != Q.symbol]
     all_markets = [Q.market(c) for c in all_currencies if c]
-    
-    # Exchange API로 현재가 일괄 조회
+
+    # Batch-query current prices via the exchange API
     price_map = {}
     if all_markets:
         try:
@@ -1109,8 +1109,8 @@ def scan_dust_positions(
                 continue
             
             market = Q.market(cur)
-            
-            # 가격 우선순위: API 조회 > price_store > avg_buy_price
+
+            # Price priority: API query > price_store > avg_buy_price
             price = price_map.get(market) or price_store.get_price(market)
             if not price:
                 avg_buy = float(acc.get("avg_buy_price") or 0)
@@ -1121,11 +1121,11 @@ def scan_dust_positions(
                 continue
             
             value_usdt = qty * price
-            
-            # 먼지 조건: 현재 가치가 threshold 미만
+
+            # Dust condition: current value below threshold
             if value_usdt < threshold_usdt:
-                # 매도 가능하려면 최소 min order 이상 가치 필요
-                need_buy_usdt = max(0, min_order_usdt - value_usdt + 100)  # 버퍼 100원
+                # To be sellable, value must be at least the min order
+                need_buy_usdt = max(0, min_order_usdt - value_usdt + 100)  # 100 buffer
                 
                 dust_list.append({
                     "market": market,
@@ -1140,7 +1140,7 @@ def scan_dust_positions(
             logger.warning("[ENGINE_API] scan_dust item processing: %s", exc)
             continue
     
-    # 가치 순 정렬
+    # Sort by value
     dust_list.sort(key=lambda x: x["value_usdt"])
     
     return {
@@ -1163,12 +1163,12 @@ def vacuum_dust(
     dry_run: bool = Query(True, description="If True, only simulate (no actual orders)"),
 ):
     """
-    진짜 먼지 청소기: 최소 금액 매수 후 전량 매도.
-    
-    1. 현재 보유량 확인
-    2. 매도 가능 금액(min order) 미만이면 최소 금액으로 추가 매수
-    3. 3초 대기 후 전량 시장가 매도
-    4. 결과: 해당 코인 잔고 0원
+    True dust vacuum: buy a minimal amount then sell everything.
+
+    1. Check the current holdings
+    2. If below the sellable amount (min order), buy a minimal amount more
+    3. Wait 3 seconds, then market-sell everything
+    4. Result: the coin's balance is zero
     """
     import time
     
@@ -1190,12 +1190,12 @@ def vacuum_dust(
     }
     
     try:
-        # Step 1: 현재 잔고 확인
+        # Step 1: Check the current balance
         balance = system.trade_client.get_balance(currency, include_locked=False)
         price = price_store.get_price(market)
-        
+
         if not price or price <= 0:
-            # 시세 조회
+            # Query the price
             try:
                 from app.core.rate_limiter import bybit_get
                 from app.core.constants import (
@@ -1233,8 +1233,8 @@ def vacuum_dust(
         if balance <= 0:
             return {"ok": True, "message": "No balance to vacuum", **result}
         
-        # Step 1.5: 수익 중인 코인은 청소 제외
-        # 평균 매입가 조회
+        # Step 1.5: Skip vacuuming coins that are currently in profit
+        # Query the average buy price
         avg_buy_price = 0.0
         try:
             accounts = system.trade_client.client.get_accounts()
@@ -1253,15 +1253,15 @@ def vacuum_dust(
             result["skip_reason"] = "profitable"
             return {"ok": True, "message": f"Skipped: coin is profitable (+{profit_pct:.2f}%)", **result}
         
-        # Step 2: 매도 가능 여부 확인 및 추가 매수
-        # [FIX] Bybit 최소 주문 고려 — 안전하게 6 USDT 고정
-        dust_buy_amount = 6.0  # 고정 6 USDT
-        
+        # Step 2: Check sellability and buy more if needed
+        # [FIX] Account for Bybit minimum order — safely fix at 6 USDT
+        dust_buy_amount = 6.0  # fixed 6 USDT
+
         need_buy = current_value < min_order_usdt
         buy_amount_usdt = 0
-        
+
         if need_buy:
-            buy_amount_usdt = dust_buy_amount  # 6 USDT 고정
+            buy_amount_usdt = dust_buy_amount  # fixed 6 USDT
             
             result["steps"].append({
                 "step": 2,
@@ -1274,11 +1274,11 @@ def vacuum_dust(
                 try:
                     buy_order = system.trade_client.market_buy(market, buy_amount_usdt)
                     result["steps"][-1]["order"] = buy_order
-                    
-                    # 체결 대기 (3초)
+
+                    # Wait for fill (3 seconds)
                     time.sleep(3)
-                    
-                    # 잔고 재확인
+
+                    # Re-check the balance
                     balance = system.trade_client.get_balance(currency, include_locked=False)
                     result["steps"][-1]["new_balance"] = round(balance, 8)
                 except Exception as e:
@@ -1292,9 +1292,9 @@ def vacuum_dust(
                 "reason": f"Current value {current_value:.0f} >= {min_order_usdt:.0f}",
             })
         
-        # Step 3: 전량 매도
+        # Step 3: Sell everything
         if balance <= 0:
-            # 매수 후에도 잔고가 없으면 (locked 상태일 수 있음)
+            # If there is still no balance after buying (may be locked)
             balance = system.trade_client.get_balance(currency, include_locked=False)
         
         result["steps"].append({
@@ -1308,16 +1308,16 @@ def vacuum_dust(
                 try:
                     sell_order = system.trade_client.market_sell(market, balance)
                     result["steps"][-1]["order"] = sell_order
-                    
-                    # 체결 대기
+
+                    # Wait for fill
                     time.sleep(2)
-                    
-                    # 최종 잔고 확인
+
+                    # Check the final balance
                     final_balance = system.trade_client.get_balance(currency, include_locked=False)
                     result["final_balance"] = round(final_balance, 8)
                     result["final_value_usdt"] = round(final_balance * price, 2)
-                    
-                    # 시스템 정리
+
+                    # System cleanup
                     try:
                         ctx = system.coordinator.contexts.get(market)
                         if ctx:
@@ -1362,18 +1362,18 @@ def vacuum_all_dust(
     dry_run: bool = Query(True, description="If True, only simulate"),
     max_coins: int = Query(5, description="Max coins to vacuum in one call"),
 ):
-    """모든 먼지 포지션을 한 번에 청소."""
-    # 먼저 스캔
+    """Vacuum all dust positions at once."""
+    # Scan first
     scan_result = scan_dust_positions(request, threshold_usdt=threshold_usdt)
-    
+
     if not scan_result.get("ok"):
         return scan_result
-    
+
     dust_list = scan_result.get("dust", [])
     if not dust_list:
         return {"ok": True, "message": "No dust found", "vacuumed": []}
-    
-    # 최대 개수 제한
+
+    # Limit the max count
     to_vacuum = dust_list[:max_coins]
     
     results = []
@@ -1385,11 +1385,11 @@ def vacuum_all_dust(
             "result": vac_result,
         })
         
-        # Rate limit 방지
+        # Avoid rate limiting
         if not dry_run:
             import time
             time.sleep(1)
-    
+
     return {
         "ok": True,
         "dry_run": dry_run,
@@ -1411,10 +1411,10 @@ def adopt_dust_as_longhold(
     buy_amount_usdt: float = Query(6.0, description="Amount to buy (default 6 USDT)"),
 ):
     """
-    먼지 코인을 LongHold로 입양: 최소 금액 매수 후 LongHold로 등록.
-    
-    급락한 코인을 저점에서 매집하여 장기 보유하는 전략.
-    매도하지 않고 LongHold에 등록하여 관리.
+    Adopt a dust coin as LongHold: buy a minimal amount then register as LongHold.
+
+    A strategy that accumulates a sharply dropped coin near the bottom and holds long-term.
+    Instead of selling, register and manage it as LongHold.
     """
     import time
     
@@ -1429,7 +1429,7 @@ def adopt_dust_as_longhold(
     min_order_usdt = Q.min_order  # min order
     currency = Q.extract_base(market)
     
-    # 매수 금액 검증
+    # Validate the buy amount
     if buy_amount_usdt < min_order_usdt:
         buy_amount_usdt = 6.0
     
@@ -1441,7 +1441,7 @@ def adopt_dust_as_longhold(
     }
     
     try:
-        # Step 1: 현재 잔고 및 시세 확인
+        # Step 1: Check the current balance and price
         balance = system.trade_client.get_balance(currency, include_locked=False)
         price = price_store.get_price(market)
         
@@ -1463,7 +1463,7 @@ def adopt_dust_as_longhold(
                                 price = float(_tc.get("trade_price") or 0)
                                 break
             except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[ENGINE_API] Step 1 잔고/시세 확인: %s", exc, exc_info=True)
+                logger.warning("[ENGINE_API] Step 1 balance/price check: %s", exc, exc_info=True)
         
         if not price or price <= 0:
             return {"ok": False, "error": "PRICE_NOT_AVAILABLE", "market": market}
@@ -1480,7 +1480,7 @@ def adopt_dust_as_longhold(
             "value_usdt": round(current_value, 2),
         })
         
-        # Step 2: 매수 (잔고가 min_order 미만이면 추가 매수)
+        # Step 2: Buy (buy more if balance is below min_order)
         need_buy = current_value < min_order_usdt
         
         if need_buy:
@@ -1495,11 +1495,11 @@ def adopt_dust_as_longhold(
                 try:
                     buy_order = system.trade_client.market_buy(market, buy_amount_usdt)
                     result["steps"][-1]["order"] = buy_order
-                    
-                    # 체결 대기 (3초)
+
+                    # Wait for fill (3 seconds)
                     time.sleep(3)
-                    
-                    # 잔고 재확인
+
+                    # Re-check the balance
                     balance = system.trade_client.get_balance(currency, include_locked=False)
                     result["steps"][-1]["new_balance"] = round(balance, 8)
                 except Exception as e:
@@ -1513,9 +1513,9 @@ def adopt_dust_as_longhold(
                 "reason": f"Current value {current_value:.0f} >= {min_order_usdt:.0f}",
             })
         
-        # Step 3: LongHold로 등록
-        # 평균 매입가 조회
-        avg_buy_price = price  # 기본값
+        # Step 3: Register as LongHold
+        # Query the average buy price
+        avg_buy_price = price  # default
         try:
             accounts = system.trade_client.client.get_accounts()
             for acc in accounts:
@@ -1524,7 +1524,7 @@ def adopt_dust_as_longhold(
                     balance = float(acc.get("balance") or balance)
                     break
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[ENGINE_API] 평균 매입가 조회: %s", exc, exc_info=True)
+            logger.warning("[ENGINE_API] average buy price query: %s", exc, exc_info=True)
         
         final_value = balance * price
         
@@ -1538,15 +1538,15 @@ def adopt_dust_as_longhold(
         
         if not dry_run and balance > 0:
             try:
-                # LongHold 설정
+                # LongHold config
                 longhold_config = {
                     "market": market,
-                    "strategy": "GAZUA",  # 급등 대기 전략
+                    "strategy": "GAZUA",  # wait-for-pump strategy
                     "budget_usdt": round(final_value, 0),
                     "entry_price": avg_buy_price,
                     "qty": balance,
-                    "target_profit_pct": 100.0,  # 100% 수익 목표 (2배)
-                    "notify_cooldown_sec": 86400,  # 1일 알림 쿨다운
+                    "target_profit_pct": 100.0,  # 100% profit target (2x)
+                    "notify_cooldown_sec": 86400,  # 1-day notify cooldown
                     "source": "dust_adopt",
                 }
                 
@@ -1560,12 +1560,12 @@ def adopt_dust_as_longhold(
                 result["steps"][-1]["registered"] = True
                 result["steps"][-1]["config"] = longhold_config
                 
-                # [FIX 2026-03-23] Dust Adopt도 슬롯을 차지하므로 LongHold 슬롯 여유 확인
-                # LongHold가 전략 쿼터를 초과하면 ACTIVE 등록 스킵 (슬롯 무한팽창 방지)
+                # [FIX 2026-03-23] Dust Adopt also occupies a slot, so check LongHold slot headroom
+                # If LongHold exceeds the strategy quota, skip ACTIVE registration (prevent unbounded slot growth)
                 try:
                     system.oma_set_market(market, MarketState.ACTIVE, reason=["dust_adopted", "longhold"])
                 except (KeyError, AttributeError, TypeError) as exc:
-                    logger.warning("[ENGINE_API] LongHold ACTIVE 등록 실패: %s", exc, exc_info=True)
+                    logger.warning("[ENGINE_API] LongHold ACTIVE registration failed: %s", exc, exc_info=True)
                 
                 system.ledger.append(
                     "DUST_ADOPTED",
@@ -1577,18 +1577,18 @@ def adopt_dust_as_longhold(
                     avg_buy_price=avg_buy_price,
                 )
                 
-                # 텔레그램 알림
+                # Telegram notification
                 try:
                     from app.notify.telegram import send_telegram
                     send_telegram(
                         f"🏠 [DUST → LONGHOLD] {market}\n"
-                        f"• 수량: {balance:.6g}\n"
-                        f"• 평단: {Q.format(avg_buy_price, with_suffix=False)}\n"
-                        f"• 가치: {Q.format(final_value)}\n"
-                        f"• 목표: +100% (2배)"
+                        f"• Qty: {balance:.6g}\n"
+                        f"• Avg: {Q.format(avg_buy_price, with_suffix=False)}\n"
+                        f"• Value: {Q.format(final_value)}\n"
+                        f"• Target: +100% (2x)"
                     )
                 except (AttributeError, TypeError, ValueError) as exc:
-                    logger.warning("[ENGINE_API] 텔레그램 알림: %s", exc)
+                    logger.warning("[ENGINE_API] telegram notification: %s", exc)
                 
             except (KeyError, IndexError, AttributeError, TypeError, ValueError) as e:
                 logger.warning("engine_router.adopt_dust_as_longhold L1479: %s", e)
@@ -1618,18 +1618,18 @@ def adopt_all_dust_as_longhold(
     max_coins: int = Query(5, description="Max coins to adopt in one call"),
     buy_amount_usdt: float = Query(6.0, description="Amount to buy per coin (USDT)"),
 ):
-    """모든 먼지 포지션을 LongHold로 입양."""
-    # 먼저 스캔
+    """Adopt all dust positions as LongHold."""
+    # Scan first
     scan_result = scan_dust_positions(request, threshold_usdt=threshold_usdt)
-    
+
     if not scan_result.get("ok"):
         return scan_result
-    
+
     dust_list = scan_result.get("dust", [])
     if not dust_list:
         return {"ok": True, "message": "No dust found", "adopted": []}
-    
-    # 최대 개수 제한
+
+    # Limit the max count
     to_adopt = dust_list[:max_coins]
     
     results = []
@@ -1646,10 +1646,10 @@ def adopt_all_dust_as_longhold(
             "result": adopt_result,
         })
         
-        # Rate limit 방지
+        # Avoid rate limiting
         if not dry_run:
             import time
-            time.sleep(2)  # 매수 + 등록이라 더 긴 대기
+            time.sleep(2)  # longer wait since it involves buy + registration
     
     return {
         "ok": True,

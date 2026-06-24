@@ -2,8 +2,8 @@
 # File: app/core/multi_timeframe_ai.py
 # Multi-Timeframe AI Selector
 # ------------------------------------------------------------
-# 여러 타임프레임(5분, 15분, 1시간)에서 AI 점수를 계산하고
-# 가장 높은 점수의 타임프레임을 자동 선택합니다.
+# Computes AI scores across multiple timeframes (5m, 15m, 1h)
+# and automatically selects the highest-scoring timeframe.
 #
 # Created: 2026-01-31
 # ============================================================
@@ -27,15 +27,15 @@ logger = logging.getLogger(__name__)
 # Constants
 # ============================================================
 
-# 지원하는 타임프레임 (분 단위)
-TIMEFRAMES = [5, 15, 60]  # 5분, 15분, 1시간
+# Supported timeframes (in minutes)
+TIMEFRAMES = [5, 15, 60]  # 5m, 15m, 1h
 TIMEFRAME_LABELS = {5: "5m", 15: "15m", 60: "1h"}
 
-# 캐시 설정
-CACHE_TTL_SEC = 60.0  # 1분 캐시
-MAX_CANDLE_COUNT = 100  # 최대 캔들 수
+# Cache settings
+CACHE_TTL_SEC = 60.0  # 1-minute cache
+MAX_CANDLE_COUNT = 100  # max candle count
 
-# RSI 임계값
+# RSI thresholds
 RSI_OVERSOLD = 30.0
 RSI_OVERBOUGHT = 70.0
 
@@ -46,7 +46,7 @@ RSI_OVERBOUGHT = 70.0
 
 @dataclass
 class TimeframeScore:
-    """단일 타임프레임의 AI 점수."""
+    """AI score for a single timeframe."""
     timeframe_min: int
     label: str
     ai_score: float
@@ -81,7 +81,7 @@ class TimeframeScore:
 
 @dataclass
 class MultiTimeframeResult:
-    """다중 타임프레임 분석 결과."""
+    """Multi-timeframe analysis result."""
     market: str
     best_timeframe: TimeframeScore
     all_timeframes: List[TimeframeScore]
@@ -340,7 +340,7 @@ def calculate_timeframe_score(
 # ============================================================
 
 class MultiTimeframeAI:
-    """다중 타임프레임 AI 점수 계산 및 최적 타임프레임 선택."""
+    """Computes multi-timeframe AI scores and selects the optimal timeframe."""
     
     def __init__(self, timeframes: Optional[List[int]] = None):
         self._timeframes = timeframes or TIMEFRAMES

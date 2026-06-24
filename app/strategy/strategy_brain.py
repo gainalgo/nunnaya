@@ -1,19 +1,19 @@
 # ============================================================
 # File: app/strategy/strategy_brain.py
-# Strategy Brain v3-H — AI Market Sensor Module (RSI + MACD HIST 포함)
+# Strategy Brain v3-H — AI Market Sensor Module (includes RSI + MACD HIST)
 # ------------------------------------------------------------
 # PATCH 2026-01-01
-# - volatility/momentum을 "가격 단위"가 아닌 "퍼센트(%)" 스케일로 정규화
+# - Normalize volatility/momentum on a "percent (%)" scale, not a "price unit" scale
 #
 # PATCH 2026-01-11 (AI Gate)
-# - app/data/ai_gate_settings.json (strictness) + ai_market_scoreboard.json 기반으로
-#   마켓별 AI 영향도를 안전하게 0으로 만들기 위해,
-#   성능 기준 미달 시 ai_prediction=0.5, ai_confidence=0.0으로 중립화한다.
-# - 대시보드 슬라이더로 strictness를 조절 가능(0~100).
+# - Based on app/data/ai_gate_settings.json (strictness) + ai_market_scoreboard.json,
+#   to safely zero out per-market AI influence, when the performance bar is not met
+#   neutralize to ai_prediction=0.5, ai_confidence=0.0.
+# - strictness is adjustable via the dashboard slider (0~100).
 #
 # PATCH 2026-01-28 (Feature Alignment)
-# - 학습/추론 feature 일치를 위해 app.ai.features 모듈 사용
-# - LightGBM 모델 지원 추가
+# - Use the app.ai.features module to keep training/inference features aligned
+# - Added LightGBM model support
 # ============================================================
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 from app.strategy import indicators
 
-# Feature extractor (학습/추론 일치용)
+# Feature extractor (for training/inference alignment)
 try:
     from app.ai.features import extract_features_from_runtime, get_feature_names
 except ImportError:
@@ -96,7 +96,7 @@ def _load_gate_settings_cached(max_age_sec: float = 5.0) -> Dict[str, Any]:
         _GATE_CACHE.update({"ts": now, "mtime": mtime, "data": data})
         return data
     except (OSError, json.JSONDecodeError, KeyError, AttributeError, TypeError, ValueError):
-        logger.warning("[AI Gate] settings 로드 실패", exc_info=True)
+        logger.warning("[AI Gate] failed to load settings", exc_info=True)
         _GATE_CACHE.update({"ts": now, "mtime": 0.0, "data": default})
         return default
 
@@ -124,7 +124,7 @@ def _load_scoreboard_cached(max_age_sec: float = 5.0) -> Dict[str, Any]:
         _SCORE_CACHE.update({"ts": now, "mtime": mtime, "data": raw})
         return raw
     except (OSError, json.JSONDecodeError, KeyError, AttributeError, TypeError, ValueError):
-        logger.warning("[AI Scoreboard] 로드 실패", exc_info=True)
+        logger.warning("[AI Scoreboard] failed to load", exc_info=True)
         _SCORE_CACHE.update({"ts": now, "mtime": 0.0, "data": {}})
         return {}
 
@@ -157,7 +157,7 @@ def _ai_gate_decide(market: str) -> Dict[str, Any]:
 
 
 class StrategyBrainOutput:
-    """Brain 분석 결과 직렬화 객체."""
+    """Serialization object for Brain analysis results."""
     def __init__(
         self,
         trend=0,
@@ -207,7 +207,7 @@ class StrategyBrainOutput:
 
 
 class StrategyAISensor:
-    """AI 모델 로드 및 추론을 전담하는 센서 클래스."""
+    """Sensor class dedicated to AI model loading and inference."""
 
     def __init__(self):
         self._model = None
@@ -222,7 +222,7 @@ class StrategyAISensor:
 
         self._model_loaded = True
 
-        # 메타데이터 로드 (feature 순서 등)
+        # Load metadata (feature order, etc.)
         meta_path = os.path.join("app", "data", "ai_model_meta.json")
         if os.path.exists(meta_path):
             try:
@@ -230,7 +230,7 @@ class StrategyAISensor:
                     self._model_meta = json.load(f)
                     self._model_type = self._model_meta.get("model_type", "unknown")
             except (OSError, json.JSONDecodeError, KeyError, AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[strategy_brain] %s: %s", '메타데이터 로드 (feature 순서 등)', exc, exc_info=True)
+                logger.warning("[strategy_brain] %s: %s", 'load metadata (feature order, etc.)', exc, exc_info=True)
 
         # 1) Pickle (sklearn/LightGBM)
         path_pkl = os.path.join("app", "data", "ai_model.pkl")
@@ -257,12 +257,12 @@ class StrategyAISensor:
 
     def predict(self, features: List[float], feature_names: List[str]) -> float:
         """
-        AI 예측 수행.
-        - LightGBM Booster: model.predict() 직접 호출
-        - sklearn: predict_proba() 사용
+        Run AI prediction.
+        - LightGBM Booster: call model.predict() directly
+        - sklearn: use predict_proba()
 
-        [PERF] 2026-03-21: pandas DataFrame → numpy array 직접 전달
-        LightGBM/sklearn 모두 numpy 네이티브 지원. pandas 생성 오버헤드 제거 (~1-3ms/call).
+        [PERF] 2026-03-21: pass numpy array directly instead of a pandas DataFrame.
+        Both LightGBM/sklearn support numpy natively. Removes pandas creation overhead (~1-3ms/call).
         """
         model = self._load_model()
         if model is None:
@@ -272,50 +272,50 @@ class StrategyAISensor:
             import numpy as np
             X = np.array([features], dtype=np.float64)
 
-            # LightGBM Booster인 경우
+            # LightGBM Booster case
             if hasattr(model, "predict") and self._model_type == "LightGBM":
-                # LightGBM Booster.predict()는 확률 반환
+                # LightGBM Booster.predict() returns a probability
                 prob = model.predict(X)[0]
                 return float(prob)
 
-            # sklearn 스타일 (predict_proba)
+            # sklearn style (predict_proba)
             if hasattr(model, "predict_proba"):
                 return float(model.predict_proba(X)[0][1])
 
-            # 일반 predict
+            # generic predict
             if hasattr(model, "predict"):
                 out = model.predict(X)
                 try:
                     return float(out[0][0])
                 except (IndexError, TypeError):
-                    logger.warning("[Brain] predict output 인덱싱 fallback: out[0]", exc_info=True)
+                    logger.warning("[Brain] predict output indexing fallback: out[0]", exc_info=True)
                     return float(out[0])
         except (KeyError, IndexError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[strategy_brain] %s: %s", '일반 predict', exc, exc_info=True)
+            logger.warning("[strategy_brain] %s: %s", 'generic predict', exc, exc_info=True)
 
         return 0.5
     
     def predict_with_features(self, feature_dict: Dict[str, float]) -> float:
         """
-        feature dict를 받아서 메타데이터의 feature 순서에 맞춰 예측.
-        학습/추론 feature 일치 보장.
+        Take a feature dict and predict using the feature order from the metadata.
+        Guarantees training/inference feature alignment.
         """
         model = self._load_model()
         if model is None:
             return 0.5
         
-        # 메타에서 feature 순서 가져오기
+        # Get the feature order from the metadata
         expected_features = self._model_meta.get("features", [])
         if not expected_features:
-            # fallback: 기존 방식
+            # fallback: legacy approach
             expected_features = list(feature_dict.keys())
-        
-        # feature 순서 맞춰서 배열 생성
+
+        # Build the array following the feature order
         features = []
         for feat in expected_features:
             val = feature_dict.get(feat)
             if val is None or (isinstance(val, float) and math.isnan(val)):
-                features.append(float("nan"))  # LightGBM은 NaN 처리 가능
+                features.append(float("nan"))  # LightGBM can handle NaN
             else:
                 features.append(float(val))
         
@@ -330,7 +330,7 @@ class StrategyAISensor:
         self._load_model()
 
     def get_model_info(self) -> Dict[str, Any]:
-        """현재 로드된 모델 정보 반환 (캐시됨, reload_model 시 무효화)"""
+        """Return info about the currently loaded model (cached; invalidated on reload_model)"""
         if self._cached_model_info is not None:
             return self._cached_model_info
         self._load_model()
@@ -345,7 +345,7 @@ class StrategyAISensor:
 
 
 class StrategyBrain:
-    """시장 분석 Brain 모듈."""
+    """Market analysis Brain module."""
 
     def __init__(self):
         self.ai_sensor = StrategyAISensor()
@@ -371,7 +371,7 @@ class StrategyBrain:
                 macd_histogram=0.0,
             )
 
-        # sanitize history — strategy_initializer.py가 이미 정화 완료
+        # sanitize history — strategy_initializer.py already sanitized it
         hist = list(price_history) if price_history else []
 
         if len(hist) < 5:
@@ -389,7 +389,7 @@ class StrategyBrain:
             try:
                 vol_hist = list(getattr(context, "volume_history"))[-20:]
             except (KeyError, AttributeError, TypeError):
-                logger.warning("[Brain] volume_history 접근 실패", exc_info=True)
+                logger.warning("[Brain] failed to access volume_history", exc_info=True)
                 vol_hist = []
 
         params = (policy or {}).get("params", {}) or {}
@@ -425,7 +425,7 @@ class StrategyBrain:
                 volume_change_pct = (recent_vol - prev_vol) / prev_vol * 100.0
 
         # AI inference
-        # 새 feature extractor 사용 (학습/추론 일치)
+        # Use the new feature extractor (training/inference alignment)
         feature_dict = extract_features_from_runtime(
             price=price,
             price_history=hist,
@@ -433,15 +433,15 @@ class StrategyBrain:
             brain_output=None,
         )
         
-        # 모델이 기대하는 feature 목록이 있으면 그것 사용, 없으면 fallback
+        # If the model has an expected feature list, use it; otherwise fall back
         model_info = self.ai_sensor.get_model_info()
         expected_features = model_info.get("features", [])
-        
+
         if expected_features:
-            # 새 방식: feature dict를 모델 기대 순서에 맞춰 예측
+            # New approach: predict using the feature dict in the model's expected order
             ai_score = self.ai_sensor.predict_with_features(feature_dict)
         else:
-            # 기존 방식 fallback (모델 메타가 없는 경우)
+            # Legacy fallback (when model metadata is missing)
             dev_pct = trend
             momentum_pct = momentum
             vol_pct = volatility

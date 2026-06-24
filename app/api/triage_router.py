@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/triage", tags=["triage"])
 
 class EnterTriageRequest(BaseModel):
     reason: str = "manual"
-    trigger_pnl_pct: Optional[float] = None       # 임시 오버라이드 (None=ENV 값 사용)
+    trigger_pnl_pct: Optional[float] = None       # temporary override (None = use ENV value)
     profit_target_pct: Optional[float] = None
     max_dca_ratio: Optional[float] = None
 
@@ -35,24 +35,24 @@ class SettingsPatchRequest(BaseModel):
     exit_pnl_pct: Optional[float] = None
     notify: Optional[bool] = None
     buy_mode: Optional[str] = None          # "block_all" | "allow_non_loss"
-    opportunistic_dca: Optional[bool] = None  # 손실 코인 조건부 즉시 DCA
-    market_recovery_exit_enabled: Optional[bool] = None   # 시장 회복 자동 해제
-    market_recovery_min_hours: Optional[float] = None     # 자동 해제 최소 경과 시간
-    loss_grace_min: Optional[float] = None                # 매수 후 N분 이내 손실 카운트 제외
-    max_concurrent_targets: Optional[int] = None          # 병렬 복구 동시 타겟 수
-    recovery_target: Optional[str] = None                 # ALL / 0.6 / 3 등
-    emergency_exit_enabled: Optional[bool] = None         # 긴급 탈출 모드
-    emergency_moderate_avg_loss_pct: Optional[float] = None  # 경고 임계값 (기본 -10%)
-    emergency_severe_avg_loss_pct: Optional[float] = None    # 긴급 임계값 (기본 -30%)
-    # [2026-06-01] GET settings 엔 있으나 PATCH 미노출이던 누락 연결 (patch_settings 가 tm.settings 키면 적용)
-    global_dca_cap_pct: Optional[float] = None               # 전체 DCA 합산 포트폴리오 % 캡
-    focus_dca_allow: Optional[bool] = None                   # 포커스 마켓 PRM 우회 허용
-    sell_timeout_sec: Optional[float] = None                 # TRIAGE_SELL 타임아웃
-    min_position_usdt: Optional[float] = None                # 먼지 제외 기준
+    opportunistic_dca: Optional[bool] = None  # conditional immediate DCA on losing coins
+    market_recovery_exit_enabled: Optional[bool] = None   # auto-release on market recovery
+    market_recovery_min_hours: Optional[float] = None     # minimum elapsed time before auto-release
+    loss_grace_min: Optional[float] = None                # exclude from loss count within N minutes after buy
+    max_concurrent_targets: Optional[int] = None          # number of concurrent recovery targets
+    recovery_target: Optional[str] = None                 # ALL / 0.6 / 3, etc.
+    emergency_exit_enabled: Optional[bool] = None         # emergency exit mode
+    emergency_moderate_avg_loss_pct: Optional[float] = None  # warning threshold (default -10%)
+    emergency_severe_avg_loss_pct: Optional[float] = None    # emergency threshold (default -30%)
+    # [2026-06-01] connect fields present in GET settings but missing from PATCH (applied if patch_settings key is in tm.settings)
+    global_dca_cap_pct: Optional[float] = None               # total DCA aggregate portfolio % cap
+    focus_dca_allow: Optional[bool] = None                   # allow focus market PRM bypass
+    sell_timeout_sec: Optional[float] = None                 # TRIAGE_SELL timeout
+    min_position_usdt: Optional[float] = None                # dust exclusion threshold
 
 class SkipRequest(BaseModel):
     reason: str = "manual skip"
-    market: Optional[str] = None   # 특정 타겟 스킵 (None이면 첫 번째)
+    market: Optional[str] = None   # skip a specific target (None = first one)
 
 # ============================================================
 # Endpoints
@@ -61,17 +61,17 @@ class SkipRequest(BaseModel):
 @router.get("/status")
 async def get_triage_status(request: Request) -> Dict[str, Any]:
     """
-    트리아지 모드 현재 상태 조회
+    Get the current triage mode status
 
     Returns:
-        - state: 현재 상태 (NORMAL / TRIAGE_INIT / TRIAGE_SCAN / TRIAGE_DCA / TRIAGE_WAIT / TRIAGE_SELL / TRIAGE_EXIT)
-        - active: 트리아지 활성 여부
-        - current_target: 현재 집중 복구 중인 마켓
-        - recovered: 복구 완료 마켓 목록
-        - skipped: 건너뛴 마켓 목록
-        - trigger_reason: 활성화 사유
-        - elapsed_sec: 활성 후 경과 시간
-        - settings: 현재 설정값
+        - state: current state (NORMAL / TRIAGE_INIT / TRIAGE_SCAN / TRIAGE_DCA / TRIAGE_WAIT / TRIAGE_SELL / TRIAGE_EXIT)
+        - active: whether triage is active
+        - current_target: market currently being recovered
+        - recovered: list of recovered markets
+        - skipped: list of skipped markets
+        - trigger_reason: reason for activation
+        - elapsed_sec: elapsed time since activation
+        - settings: current settings
     """
     try:
         system = request.app.state.system
@@ -86,10 +86,10 @@ async def get_triage_status(request: Request) -> Dict[str, Any]:
 @router.post("/enter")
 async def enter_triage(request: Request, req: EnterTriageRequest) -> Dict[str, Any]:
     """
-    트리아지 모드 수동 진입
+    Manually enter triage mode
 
-    OMA_TRIAGE_ENABLED=0 이어도 수동 진입은 허용됨.
-    enabled 설정은 '자동 트리거 비활성'이지 '수동 진입 불가'가 아님.
+    Manual entry is allowed even when OMA_TRIAGE_ENABLED=0.
+    The enabled setting means 'auto-trigger disabled', not 'manual entry forbidden'.
     """
     try:
         system = request.app.state.system
@@ -105,7 +105,7 @@ async def enter_triage(request: Request, req: EnterTriageRequest) -> Dict[str, A
                 "state": tm.state
             }
 
-        # 파라미터 임시 오버라이드 적용
+        # apply temporary parameter overrides
         overrides = {}
         if req.trigger_pnl_pct is not None:
             overrides["trigger_pnl_pct"] = req.trigger_pnl_pct
@@ -136,10 +136,10 @@ async def enter_triage(request: Request, req: EnterTriageRequest) -> Dict[str, A
 @router.post("/exit")
 async def exit_triage(request: Request) -> Dict[str, Any]:
     """
-    트리아지 모드 수동 해제
+    Manually exit triage mode
 
-    복구 목표 미달성 상태에서도 강제 종료.
-    BUY 차단 해제, 예산 복원, 상태 초기화.
+    Force termination even if the recovery target is not met.
+    Releases BUY block, restores budget, resets state.
     """
     try:
         system = request.app.state.system
@@ -170,10 +170,10 @@ async def exit_triage(request: Request) -> Dict[str, Any]:
 @router.post("/skip")
 async def skip_current_target(request: Request, req: SkipRequest) -> Dict[str, Any]:
     """
-    현재 집중 복구 중인 마켓 건너뛰기
+    Skip the market currently being recovered
 
-    현재 포커스 마켓을 skipped 목록으로 이동하고 다음 마켓으로 진행.
-    TRIAGE_SCAN 상태로 전환하여 다음 타겟 선택.
+    Move the current focus market to the skipped list and proceed to the next market.
+    Transition to TRIAGE_SCAN state to select the next target.
     """
     try:
         system = request.app.state.system
@@ -188,7 +188,7 @@ async def skip_current_target(request: Request, req: SkipRequest) -> Dict[str, A
         if not tm.active_targets:
             return {"success": False, "message": "No active target to skip"}
 
-        # 특정 마켓 지정 시 해당 타겟 스킵, 미지정 시 첫 번째
+        # skip the specified target if a market is given, otherwise the first one
         if req.market:
             target = tm._find_target(req.market)
             if not target:
@@ -217,25 +217,25 @@ async def skip_current_target(request: Request, req: SkipRequest) -> Dict[str, A
 @router.get("/portfolio-loss")
 async def get_portfolio_loss(request: Request) -> Dict[str, Any]:
     """
-    현재 포트폴리오 손실 현황
+    Current portfolio loss status
 
     Returns:
-        - total_loss_pct: 전체 미실현 손실 %
-        - markets: 마켓별 손실 상세 (loss_pct, loss_usdt, val_usdt, qty, avg_buy_price, current_price)
-        - loss_coin_count: 손실 중인 코인 수
-        - triage_trigger_threshold: 트리아지 발동 임계값
+        - total_loss_pct: total unrealized loss %
+        - markets: per-market loss detail (loss_pct, loss_usdt, val_usdt, qty, avg_buy_price, current_price)
+        - loss_coin_count: number of coins in loss
+        - triage_trigger_threshold: triage trigger threshold
     """
     try:
         system = request.app.state.system
         tm = getattr(system, "triage_manager", None)
 
-        # PRM에서 전체 손실률 가져오기
+        # get total loss rate from PRM
         prm = getattr(system, "portfolio_risk_manager", None)
         total_loss_pct = 0.0
         if prm and prm.daily_status:
             total_loss_pct = prm.daily_status.loss_pct
 
-        # 마켓별 손실 상세 계산
+        # compute per-market loss detail
         markets_detail = {}
         try:
             from app.core.hyper_price_store import price_store
@@ -262,7 +262,7 @@ async def get_portfolio_loss(request: Request) -> Dict[str, Any]:
                         "current_price": current,
                     }
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[triage_router] %s: %s", '마켓별 손실 상세 계산', exc, exc_info=True)
+            logger.warning("[triage_router] %s: %s", 'compute per-market loss detail', exc, exc_info=True)
 
         triage_trigger = tm.settings.get("trigger_pnl_pct", -5.0) if tm else -5.0
 
@@ -279,10 +279,10 @@ async def get_portfolio_loss(request: Request) -> Dict[str, Any]:
 @router.patch("/settings")
 async def patch_settings(request: Request, req: SettingsPatchRequest) -> Dict[str, Any]:
     """
-    트리아지 설정 런타임 수정
+    Modify triage settings at runtime
 
-    트리아지 활성 중에도 즉시 적용됨.
-    변경된 값만 전달 (None인 항목은 현재 값 유지).
+    Applied immediately even while triage is active.
+    Send only the changed values (None items keep their current value).
     """
     try:
         system = request.app.state.system
@@ -300,7 +300,7 @@ async def patch_settings(request: Request, req: SettingsPatchRequest) -> Dict[st
         if not changes:
             return {"success": False, "message": "No valid settings to update"}
 
-        # state 파일 갱신 (settings 스냅샷 포함, 재시작 시에는 ENV 우선)
+        # update state file (includes settings snapshot; ENV takes priority on restart)
         tm.save_state()
 
         return {

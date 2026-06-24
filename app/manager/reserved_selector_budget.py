@@ -29,23 +29,23 @@ def _suggest_budget(
     depth_factor: float,
     depth_ask_usdt: float,
     depth_bid_usdt: float,
-    # 동적 예산 배분 파라미터 (선택)
+    # Dynamic budget allocation parameters (optional)
     total_capital_usdt: float = 0.0,
     existing_markets_count: int = 0,
     spread_bps: float = 0.0,
     range_ratio_24h: float = 0.0,
-    trend_score: float = 0.0,  # [2026-02-03] 추세 점수 (-10 ~ +10)
-    ai_features: Optional[Dict[str, float]] = None,  # [2026-02-03] LIGHTNING용 volatility
+    trend_score: float = 0.0,  # [2026-02-03] trend score (-10 ~ +10)
+    ai_features: Optional[Dict[str, float]] = None,  # [2026-02-03] volatility for LIGHTNING
 ) -> Optional[float]:
     """Compute a recommended per-market budget that respects qty/depth guards.
 
-    동적 예산 계산:
-    - total_capital_usdt > 0이면 총 자본 기반 슬롯 배분 사용
-    - 유동성(vol24), 스프레드, 전략 특성 반영
-    - 기존 마켓 수 고려하여 균형 배분
-    - 변동성(range_ratio_24h) 및 단가(price) 기반 차등 배분
+    Dynamic budget calculation:
+    - if total_capital_usdt > 0, use total-capital-based slot allocation
+    - reflect liquidity (vol24), spread, and strategy characteristics
+    - balance allocation considering the number of existing markets
+    - differentiate allocation based on volatility (range_ratio_24h) and price
     """
-    # 동적 예산 배분 모드
+    # Dynamic budget allocation mode
     if total_capital_usdt > 0 and existing_markets_count >= 0:
         return _suggest_budget_dynamic(
             strategy=strategy,
@@ -63,11 +63,11 @@ def _suggest_budget(
             depth_ask_usdt=depth_ask_usdt,
             depth_bid_usdt=depth_bid_usdt,
             range_ratio_24h=range_ratio_24h,
-            trend_score=trend_score,  # [2026-02-03] 추세 전달
-            ai_features=ai_features,  # [2026-02-03] AI 피처 전달
+            trend_score=trend_score,  # [2026-02-03] pass trend
+            ai_features=ai_features,  # [2026-02-03] pass AI features
         )
 
-    # 기존 로직 (base_usdt 기반)
+    # Legacy logic (base_usdt based)
     base = float(base_usdt)
     if base <= 0:
         return None
@@ -117,243 +117,243 @@ def _suggest_budget_dynamic(
     depth_ask_usdt: float,
     depth_bid_usdt: float,
     range_ratio_24h: float = 0.0,
-    trend_score: float = 0.0,  # [2026-02-03] 추세 점수 (-10 ~ +10)
-    ai_features: Optional[Dict[str, float]] = None,  # [2026-02-03] LIGHTNING용 volatility
+    trend_score: float = 0.0,  # [2026-02-03] trend score (-10 ~ +10)
+    ai_features: Optional[Dict[str, float]] = None,  # [2026-02-03] volatility for LIGHTNING
 ) -> Optional[float]:
-    """동적 예산 계산 (총 자본 기반).
+    """Dynamic budget calculation (total-capital based).
 
-    [2026-02-03] 추세 반영 추가:
-    - 상승 추세 (트렌드 > 3): 예산 +30%
-    - 하락 추세 (트렌드 < -3): 예산 -30%
-    - 횡보 (-3 ~ +3): 변화 없음
+    [2026-02-03] Added trend reflection:
+    - uptrend (trend > 3): budget +30%
+    - downtrend (trend < -3): budget -30%
+    - sideways (-3 ~ +3): no change
 
-    계산 방식:
-    1. 슬롯 예산 = 총 자본 / (기존 마켓 + 신규 1개)
-    2. 유동성 스케일링 (sqrt 완화)
-    3. 전략별 가중치
-    4. 스프레드 페널티
-    5. 변동성(range_ratio) 페널티
-    6. 단가 기반 차등
-    7. 추세 기반 조정 (NEW!)
-    8. 대규모 자본 안전장치
+    Calculation steps:
+    1. slot budget = total capital / (existing markets + 1 new)
+    2. liquidity scaling (sqrt softened)
+    3. per-strategy weight
+    4. spread penalty
+    5. volatility (range_ratio) penalty
+    6. price-based differentiation
+    7. trend-based adjustment (NEW!)
+    8. large-capital safeguard
     """
     if total_capital_usdt <= 0:
         return None
 
-    # ai_features 기본값
+    # ai_features default
     if ai_features is None:
         ai_features = {}
 
-    # 1. 기본 슬롯 예산
+    # 1. Base slot budget
     slot_count = max(1, existing_markets_count + 1)
-    reserve_ratio = 0.05  # 5% 예비금
+    reserve_ratio = 0.05  # 5% reserve
     available = total_capital_usdt * (1.0 - reserve_ratio)
     base_budget = available / slot_count
 
-    # 2. 유동성 스케일링
+    # 2. Liquidity scaling
     liq_factor = 1.0
-    med = float(vol_median_usdt) if vol_median_usdt > 0 else 10_000_000.0  # 10M USDT 기준
+    med = float(vol_median_usdt) if vol_median_usdt > 0 else 10_000_000.0  # 10M USDT baseline
     if vol24_usdt > 0:
         liq_factor = min(1.5, max(0.6, math.sqrt(vol24_usdt / med)))
 
-    # 3. 전략별 가중치
+    # 3. Per-strategy weight
     strategy_weights = {
         "PINGPONG": 1.0,
         "AUTOLOOP": 1.1,
-        "LADDER": 1.4,    # DCA는 더 많은 자본 필요
-        "LIGHTNING": 0.7,  # 빠른 진출입 → 적은 자본
-        "GAZUA": 1.2,      # 장기 홀드
+        "LADDER": 1.4,    # DCA needs more capital
+        "LIGHTNING": 0.7,  # fast in/out → less capital
+        "GAZUA": 1.2,      # long-term hold
     }
     strat_weight = strategy_weights.get(str(strategy).upper(), 1.0)
 
-    # 4. 스프레드 페널티
+    # 4. Spread penalty
     spread_factor = 1.0
     if spread_bps > 15:
         spread_factor = max(0.7, 1.0 - (spread_bps - 15) / 80)
 
-    # 5. 변동성 페널티 (range_ratio_24h 기반)
-    #    - range_ratio 3% 이하: 1.2x (안정적 코인 보너스)
-    #    - range_ratio 3~8%: 1.0x (보통)
-    #    - range_ratio 8% 이상: 0.5~0.8x (고변동 페널티)
+    # 5. Volatility penalty (range_ratio_24h based)
+    #    - range_ratio <= 3%: 1.2x (stable-coin bonus)
+    #    - range_ratio 3~8%: 1.0x (normal)
+    #    - range_ratio >= 8%: 0.5~0.8x (high-volatility penalty)
     volatility_factor = 1.0
     if range_ratio_24h > 0:
         range_pct = range_ratio_24h * 100.0  # 0.08 → 8%
         if range_pct <= 3.0:
-            volatility_factor = 1.2  # 스테이블/저변동 보너스
+            volatility_factor = 1.2  # stable/low-volatility bonus
         elif range_pct <= 8.0:
-            volatility_factor = 1.0  # 보통
+            volatility_factor = 1.0  # normal
         else:
-            # 8% 초과: 선형 감소 (8% → 1.0, 20% → 0.5)
+            # above 8%: linear decay (8% → 1.0, 20% → 0.5)
             volatility_factor = max(0.5, 1.0 - (range_pct - 8.0) / 24.0)
 
-    # 6. 단가 기반 차등 (USDT 가격 기준)
-    #    [FIX 2026-01-23] 기존 코드는 USD 기준 주석인데 실제 입력은 USDT라서
-    #    log10(price)가 거의 항상 양수 → min(1.0, ...)에 의해 대부분 1.0으로 포화.
-    #    → USDT 기준 pivot(10,000원)을 두고 저가<1, 고가>1이 되도록 수정.
+    # 6. Price-based differentiation (USDT price based)
+    #    [FIX 2026-01-23] The old code's comments assumed USD, but the actual input is USDT,
+    #    so log10(price) is almost always positive → saturated to ~1.0 by min(1.0, ...).
+    #    → Set a USDT pivot so low prices < 1 and high prices > 1.
     #
-    #    예시 (pivot=$10=log10(1)):
-    #    - BTC $95K: log10≈4.98 → factor≈1.60 → 1.5로 클램프
+    #    Examples (pivot=$10=log10(1)):
+    #    - BTC $95K: log10≈4.98 → factor≈1.60 → clamped to 1.5
     #    - ETH $3.2K: log10≈3.51 → factor≈1.38
-    #    - 저가 $0.50: log10≈-0.30 → factor≈0.81
+    #    - low $0.50: log10≈-0.30 → factor≈0.81
     price_factor = 1.0
     if price > 0:
-        logp = math.log10(price + 0.0001)  # 0 방지
-        pivot = 1.0  # log10(10) - $10 기준점
+        logp = math.log10(price + 0.0001)  # avoid 0
+        pivot = 1.0  # log10(10) - $10 reference point
         price_factor = _clamp(1.0 + (logp - pivot) * 0.15, 0.4, 1.5)
 
-    # 7. 최종 계산 (기본) - 추세 반영 제외 (나중에 적용)
+    # 7. Final calculation (base) - trend excluded (applied later)
     budget = base_budget * liq_factor * strat_weight * spread_factor * volatility_factor * price_factor
 
     # =========================================================
-    # 9. 대규모 자본 안전장치 (슬리피지/호가 충격 방지)
+    # 9. Large-capital safeguard (prevent slippage/orderbook impact)
     # =========================================================
 
-    # 6-1. 일일 거래량 대비 상한 (vol24의 0.5% 이내)
-    #      → 저가 코인 vol24=50M USDT이면 최대 25K USDT
-    #      → 대부분 코인은 이보다 훨씬 낮음
+    # 6-1. Cap relative to daily volume (within 0.5% of vol24)
+    #      → low-price coin with vol24=50M USDT → max 25K USDT
+    #      → most coins are far below this
     vol_ratio_limit = 0.005  # 0.5%
     if vol24_usdt > 0:
         max_by_vol = vol24_usdt * vol_ratio_limit
         budget = min(budget, max_by_vol)
 
-    # 6-2. 호가 깊이 상한 (양방향 깊이의 20% 이내)
-    #      → 호가창 전체를 먹지 않도록
+    # 6-2. Orderbook-depth cap (within 20% of two-sided depth)
+    #      → avoid consuming the whole orderbook
     if depth_ask_usdt > 0 and depth_bid_usdt > 0:
-        depth_limit_ratio = 0.20  # 호가 깊이의 20%
+        depth_limit_ratio = 0.20  # 20% of orderbook depth
         min_depth = min(depth_ask_usdt, depth_bid_usdt)
         max_by_depth_safe = min_depth * depth_limit_ratio
         budget = min(budget, max_by_depth_safe)
 
-    # 6-3. 저가 코인 보호 (단가 대비 최대 수량 제한)
-    #      → 저가 코인에 대량 주문 → 슬리피지 위험
-    #      → 최대 보유 수량을 일일 거래량의 1%로 제한
+    # 6-3. Low-price coin protection (limit max qty relative to price)
+    #      → large orders on low-price coins → slippage risk
+    #      → limit max holding qty to 1% of daily volume
     if price > 0 and vol24_usdt > 0:
-        # 일일 거래 수량 추정 (거래금액 / 가격)
+        # estimate daily traded qty (notional / price)
         daily_vol_qty = vol24_usdt / price
-        # 최대 보유 수량 = 일일 거래량의 1%
+        # max holding qty = 1% of daily volume
         max_qty_safe = daily_vol_qty * 0.01
         max_by_qty_safe = price * max_qty_safe
         budget = min(budget, max_by_qty_safe)
 
-    # 6-4. 개별 코인 상한 (총 자본 비율) - price_factor 연동 동적 상한
-    #      [FIX 2026-01-23] 기존 고정 10% 상한이 모든 코인을 동일 예산으로 수렴시킴.
-    #      → 고가 코인은 상한을 조금 더 열고, 저가 코인은 더 조이도록 동적 조정.
-    #      예시 (총자본 $2,000):
-    #      - BTC (price_factor=1.5): 10%*1.5=15% → $300 상한
-    #      - ETH (price_factor=1.4): 10%*1.4=14% → $280 상한
-    #      - 저가 (price_factor=0.77): 10%*0.77=7.7% → $154 상한
-    base_max_ratio = 0.10  # 기존 분산 정책 유지
+    # 6-4. Per-coin cap (total-capital ratio) - dynamic cap linked to price_factor
+    #      [FIX 2026-01-23] The old fixed 10% cap converged every coin to the same budget.
+    #      → Open the cap a bit more for high-price coins and tighten it for low-price coins.
+    #      Examples (total capital $2,000):
+    #      - BTC (price_factor=1.5): 10%*1.5=15% → $300 cap
+    #      - ETH (price_factor=1.4): 10%*1.4=14% → $280 cap
+    #      - low (price_factor=0.77): 10%*0.77=7.7% → $154 cap
+    base_max_ratio = 0.10  # keep existing diversification policy
     max_per_coin_ratio = _clamp(base_max_ratio * price_factor, 0.06, 0.20)
     max_by_total = total_capital_usdt * max_per_coin_ratio
     budget = min(budget, max_by_total)
 
     # =========================================================
     # =========================================================
-    # 7. 기본 제약 적용
+    # 7. Apply basic constraints
     # =========================================================
     min_b = max(0.0, float(min_order_usdt))
-    max_b = max_budget_usdt if max_budget_usdt > 0 else 10000.0  # 기본 상한 ($10K)
+    max_b = max_budget_usdt if max_budget_usdt > 0 else 10000.0  # default cap ($10K)
     budget = _clamp(budget, min_b, max_b)
 
-    # qty guard (기존)
+    # qty guard (existing)
     if entry_qty_guard_on and entry_max_qty > 0 and price > 0:
         max_by_qty = float(price) * float(entry_max_qty)
         budget = min(budget, max_by_qty)
 
-    # depth guard (기존 - 더 보수적으로)
+    # depth guard (existing - more conservative)
     if depth_factor > 0 and depth_ask_usdt > 0 and depth_bid_usdt > 0:
         max_by_depth = min(depth_ask_usdt, depth_bid_usdt) / float(depth_factor)
         budget = min(budget, max_by_depth)
 
     # =========================================================
-    # [2026-02-03] 8. 추세 기반 최종 조정
+    # [2026-02-03] 8. Trend-based final adjustment
     # =========================================================
-    # 안전 장치 적용 후 추세 반영 (상한 내에서 조정)
+    # Apply trend after safeguards (adjust within the cap)
     trend_factor = 1.0
 
-    # CONTRARIAN은 역발상 전략이므로 로직 반대
+    # CONTRARIAN is a contrarian strategy, so the logic is reversed
     if strategy == "CONTRARIAN":
-        # 벤치마크(BTC) 하락 시 역행 코인 매수
-        # - 약한 하락 (-1 ~ -3): 역행 신뢰도 높음 → 정상 예산
-        # - 강한 하락 (< -3): 추가 하락 리스크 → 예산 축소
-        # - 폭락 (< -5): 극도로 위험 → 예산 최소화
-        # - 상승 추세 (> 1): 역행 아님 → 예산 축소
+        # Buy counter-trend coins when the benchmark (BTC) drops
+        # - mild drop (-1 ~ -3): high counter-trend confidence → normal budget
+        # - strong drop (< -3): further-downside risk → reduce budget
+        # - crash (< -5): extremely risky → minimize budget
+        # - uptrend (> 1): not counter-trend → reduce budget
         if abs(trend_score) > 0.1:
-            if trend_score < -5.0:  # 폭락 (-15% 이상)
-                trend_factor = 0.5  # -50% 예산
-            elif trend_score < -3.0:  # 강한 하락 (-10% 이상)
-                trend_factor = 0.7  # -30% 예산
-            elif trend_score < -1.0:  # 약한 하락 (-3% 이상)
-                trend_factor = 1.0  # 정상 (역행 최적 환경)
-            elif trend_score > 1.0:  # 상승 추세
-                trend_factor = 0.3  # -70% 예산 (역행 신호 신뢰도 낮음)
+            if trend_score < -5.0:  # crash (-15% or more)
+                trend_factor = 0.5  # -50% budget
+            elif trend_score < -3.0:  # strong drop (-10% or more)
+                trend_factor = 0.7  # -30% budget
+            elif trend_score < -1.0:  # mild drop (-3% or more)
+                trend_factor = 1.0  # normal (optimal counter-trend environment)
+            elif trend_score > 1.0:  # uptrend
+                trend_factor = 0.3  # -70% budget (low counter-trend signal confidence)
 
-    # [2026-02-03] LADDER는 DCA 전략 → 하락=기회
+    # [2026-02-03] LADDER is a DCA strategy → drop = opportunity
     elif strategy == "LADDER":
-        # 하락장에서 분할매수(DCA) 기회
-        # - 폭락 (< -5): 극한 DCA 기회 → 예산 증가
-        # - 강한 하락 (< -3): DCA 기회 → 예산 증가
-        # - 약한 하락 (< -1): 정상
-        # - 상승 추세 (> 3): DCA 부적합 → 예산 축소
+        # In a falling market, scale-in (DCA) opportunity
+        # - crash (< -5): extreme DCA opportunity → increase budget
+        # - strong drop (< -3): DCA opportunity → increase budget
+        # - mild drop (< -1): normal
+        # - uptrend (> 3): unsuitable for DCA → reduce budget
         if abs(trend_score) > 0.1:
-            if trend_score < -5.0:  # 폭락 (-15% 이상)
-                trend_factor = 1.3  # +30% 예산 (극한 DCA 기회)
-            elif trend_score < -3.0:  # 강한 하락 (-10% 이상)
-                trend_factor = 1.2  # +20% 예산
-            elif trend_score < -1.0:  # 약한 하락 (-3% 이상)
-                trend_factor = 1.1  # +10% 예산
-            elif trend_score > 3.0:  # 강한 상승 추세
-                trend_factor = 0.7  # -30% 예산 (DCA 부적합)
+            if trend_score < -5.0:  # crash (-15% or more)
+                trend_factor = 1.3  # +30% budget (extreme DCA opportunity)
+            elif trend_score < -3.0:  # strong drop (-10% or more)
+                trend_factor = 1.2  # +20% budget
+            elif trend_score < -1.0:  # mild drop (-3% or more)
+                trend_factor = 1.1  # +10% budget
+            elif trend_score > 3.0:  # strong uptrend
+                trend_factor = 0.7  # -30% budget (unsuitable for DCA)
 
-    # [2026-02-03] GAZUA는 선별적 장기 보유 → 추세 무관 균등 배분
+    # [2026-02-03] GAZUA is selective long-term holding → trend-agnostic even allocation
     elif strategy == "GAZUA":
-        # 저평가 코인 발굴 후 장기 보유
-        # - 추세에 상관없이 일정한 예산 유지
-        # - 진입 시점: AI 확신 (0.75+) + 저평가 지표
-        # - 보유 철학: 장기 묻어두기 (TP 25%, Grace 24h)
-        trend_factor = 1.0  # 추세 무관 균등 배분
+        # Discover undervalued coins then hold long term
+        # - keep a constant budget regardless of trend
+        # - entry timing: AI conviction (0.75+) + undervaluation indicators
+        # - holding philosophy: bury long term (TP 25%, Grace 24h)
+        trend_factor = 1.0  # trend-agnostic even allocation
 
-    # [2026-02-03] LIGHTNING은 변동성 기반 (추세 무관)
+    # [2026-02-03] LIGHTNING is volatility-based (trend-agnostic)
     elif strategy == "LIGHTNING":
-        # 급등 가능성 = 변동성
-        # - 극고변동 (> 5): 급등 기회 多 → 예산 증가
-        # - 고변동 (> 3): 정상
-        # - 저변동 (< 1.5): 급등 불가능 → 예산 축소
+        # Spike potential = volatility
+        # - extreme volatility (> 5): many spike opportunities → increase budget
+        # - high volatility (> 3): normal
+        # - low volatility (< 1.5): spikes impossible → reduce budget
         volatility = ai_features.get("volatility", 2.0)
-        if volatility > 5.0:  # 극고변동
-            trend_factor = 1.3  # +30% 예산
-        elif volatility > 3.0:  # 고변동
-            trend_factor = 1.2  # +20% 예산
-        elif volatility > 1.5:  # 중변동
-            trend_factor = 1.1  # +10% 예산
-        else:  # 저변동 (<1.5)
-            trend_factor = 0.7  # -30% 예산 (부적합)
+        if volatility > 5.0:  # extreme volatility
+            trend_factor = 1.3  # +30% budget
+        elif volatility > 3.0:  # high volatility
+            trend_factor = 1.2  # +20% budget
+        elif volatility > 1.5:  # medium volatility
+            trend_factor = 1.1  # +10% budget
+        else:  # low volatility (<1.5)
+            trend_factor = 0.7  # -30% budget (unsuitable)
 
-    # [FIX 2026-03-05] SNIPER 전략: 역추세(하락 반등) 전략 - 하락 = 기회, 상승 = 부적합
+    # [FIX 2026-03-05] SNIPER strategy: counter-trend (rebound-from-drop) - drop = opportunity, rise = unsuitable
     elif strategy == "SNIPER":
         if abs(trend_score) > 0.1:
-            if trend_score < -3.0:    # 강한 하락 = SNIPER 진입 기회
-                trend_factor = 1.2   # +20% 예산
-            elif trend_score < -1.0:  # 약한 하락 = 소폭 우대
-                trend_factor = 1.1   # +10% 예산
-            elif trend_score > 3.0:   # 강한 상승 = SNIPER 역추세 부적합
-                trend_factor = 0.7   # -30% 예산
-            elif trend_score > 1.0:   # 약한 상승 = 소폭 축소
-                trend_factor = 0.85  # -15% 예산
-    # 일반 전략: 상승 추세 우대
+            if trend_score < -3.0:    # strong drop = SNIPER entry opportunity
+                trend_factor = 1.2   # +20% budget
+            elif trend_score < -1.0:  # mild drop = slight preference
+                trend_factor = 1.1   # +10% budget
+            elif trend_score > 3.0:   # strong rise = unsuitable for SNIPER counter-trend
+                trend_factor = 0.7   # -30% budget
+            elif trend_score > 1.0:   # mild rise = slight reduction
+                trend_factor = 0.85  # -15% budget
+    # General strategy: favor uptrends
     elif abs(trend_score) > 0.1:
-        if trend_score > 3.0:  # 강한 상승 추세
+        if trend_score > 3.0:  # strong uptrend
             trend_factor = 1.3  # +30%
-        elif trend_score > 1.0:  # 약한 상승 추세
+        elif trend_score > 1.0:  # mild uptrend
             trend_factor = 1.15  # +15%
-        elif trend_score < -3.0:  # 강한 하락 추세
+        elif trend_score < -3.0:  # strong downtrend
             trend_factor = 0.7  # -30%
-        elif trend_score < -1.0:  # 약한 하락 추세
+        elif trend_score < -1.0:  # mild downtrend
             trend_factor = 0.85  # -15%
 
     budget = budget * trend_factor
 
-    # 추세 적용 후 다시 상한 체크
+    # Re-check cap after applying trend
     budget = min(budget, max_b)
     budget = max(budget, min_b)
 

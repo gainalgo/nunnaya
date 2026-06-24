@@ -37,7 +37,7 @@ router = APIRouter()
 # ============================================================
 # Endpoint-specific lock (was in strategy_router.py, needed locally)
 # ============================================================
-_sniper_setup_lock = threading.Lock()  # [FIX M11] setup_sniper 동시 호출 방지 (중복 포지션 위험)
+_sniper_setup_lock = threading.Lock()  # [FIX M11] prevent concurrent setup_sniper calls (duplicate position risk)
 
 # ============================================================
 # SNIPER STRATEGY ENDPOINTS
@@ -55,24 +55,24 @@ def sniper_list(request: Request):
     """
     Get list of markets with active SNIPER strategy.
 
-    [2026-01-31] 다중 SNIPER 지원: sniper_id 포함하여 반환
+    [2026-01-31] Multi-SNIPER support: return including sniper_id
     """
     from app.manager.sniper_position_store import sniper_store
 
     system = request.app.state.system
 
-    # 가격 조회 helper 함수
+    # price lookup helper function
     def get_price_safe(market: str) -> float:
-        """price_store에서 가격 조회"""
+        """Look up price from price_store"""
         return price_store.get_price(market) or 0
 
     items = []
     try:
-        # 1) sniper_store에서 저장된 포지션 조회 (다중 포지션 지원)
+        # 1) Query stored positions from sniper_store (multi-position support)
         stored_positions = sniper_store.get_all_as_list()
         stored_ids = {p.get("sniper_id") for p in stored_positions}
 
-        # [2026-03-08] 고아 포지션 GC (일반 SNIPER)
+        # [2026-03-08] Orphan position GC (regular SNIPER)
         _sniper_gc_ids: List[str] = []
 
         for stored in stored_positions:
@@ -84,7 +84,7 @@ def sniper_list(request: Request):
 
             ctx = system.coordinator.contexts.get(market)
 
-            # 전략 활성 여부
+            # whether strategy is active
             _sn_strat_enabled = False
             if ctx:
                 _sn_ctrl = getattr(ctx, "controls", {}) or {}
@@ -120,13 +120,13 @@ def sniper_list(request: Request):
                 )
                 params["tp_pct"] = _tp
                 params["sl_pct"] = _sl
-            # SNIPER 화면은 precision_scope 슬롯만 제외한다.
+            # The SNIPER screen excludes only precision_scope slots.
             profile = str(params.get("profile") or "").strip().upper()
             source = str(params.get("source") or "").strip().lower()
             if source == "precision_scope":
                 continue
 
-            # 전략 비활성 + 잔고 없음 → 고아 포지션 제거
+            # strategy disabled + no holding -> remove orphan position
             if not _sn_strat_enabled and not _has_holding:
                 _sniper_gc_ids.append(sniper_id)
                 logger.info(f"[sniper_list GC] removing orphan: {sniper_id} ({market})")
@@ -137,8 +137,8 @@ def sniper_list(request: Request):
             # SNIPER-specific meta
             sniper_meta = getattr(ctx, "sniper_meta", {}) if ctx else {}
 
-            # 예상 이윤 계산 (최저가 매수 → 최고가 매도 기준)
-            # 수수료 0.1% (매수 + 매도 = 0.2% 총 비용)
+            # Expected profit calculation (based on lowest-price buy -> highest-price sell)
+            # Fee 0.1% (buy + sell = 0.2% total cost)
             expected_profit_usdt = 0.0
             expected_profit_pct = 0.0
             entry_low = params.get("entry_low_price", 0) or sniper_meta.get("entry_low_price", 0)
@@ -147,11 +147,11 @@ def sniper_list(request: Request):
             current_px = get_price_safe(market)
 
             if budget > 0 and current_px > 0:
-                # 방법 1: TP 기준 예상 이윤
-                expected_profit_pct = tp_pct - 0.2  # TP% - 수수료 0.2%
+                # Method 1: expected profit based on TP
+                expected_profit_pct = tp_pct - 0.2  # TP% - 0.2% fee
                 expected_profit_usdt = budget * (expected_profit_pct / 100)
 
-            # 진입/청산 예정가격 계산
+            # Calculate planned entry/exit prices
             entry_thres_pct = float(params.get("entry_trigger_pct", 0) or params.get("entry_threshold_pct", 0) or 0.3)
             exit_thres_pct = float(params.get("exit_trigger_pct", 0) or params.get("exit_threshold_pct", 0) or 0.3)
             entry_target = entry_low if entry_low > 0 else (current_px * (1 - entry_thres_pct / 100) if current_px > 0 else 0)
@@ -191,14 +191,14 @@ def sniper_list(request: Request):
                 },
             })
 
-        # GC: 고아 포지션 일괄 제거
+        # GC: bulk-remove orphan positions
         for _rid in _sniper_gc_ids:
             try:
                 sniper_store.remove_position(_rid)
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-                logger.warning("[strategy_sniper_router] %s: %s", 'GC: 고아 포지션 일괄 제거', exc, exc_info=True)
+                logger.warning("[strategy_sniper_router] %s: %s", 'GC: bulk-remove orphan positions', exc, exc_info=True)
 
-        # 2) OMA registry에서 SNIPER 모드인 마켓 (store에 없는 것) 추가
+        # 2) Add markets in SNIPER mode from OMA registry (those not in store)
         oma = system.oma_registry
         for market, entry in oma._markets.items():
             ctx = system.coordinator.contexts.get(market)
@@ -211,7 +211,7 @@ def sniper_list(request: Request):
             ctrl_mode = str(strat_ctrl.get("mode", "")).upper()
 
             if strategy_mode in ("SNIPER", "SNIPER(S)") or ctrl_mode in ("SNIPER", "SNIPER(S)"):
-                # 이미 stored에 있는지 확인 (legacy: market이 sniper_id인 경우)
+                # Check if already in stored (legacy: when market is the sniper_id)
                 already_listed = any(
                     item["market"] == market for item in items
                 )
@@ -243,7 +243,7 @@ def sniper_list(request: Request):
                     )
                     params["tp_pct"] = _tp
                     params["sl_pct"] = _sl
-                # SNIPER 화면은 precision_scope 슬롯만 제외한다.
+                # The SNIPER screen excludes only precision_scope slots.
                 profile = str(params.get("profile") or "").strip().upper()
                 source = str(params.get("source") or "").strip().lower()
                 if source == "precision_scope":
@@ -252,12 +252,12 @@ def sniper_list(request: Request):
                 entry_budget = entry.get("budget_usdt") or 0
                 sniper_meta = getattr(ctx, "sniper_meta", {}) or {}
 
-                # 예상 이윤 계산 (Legacy)
+                # Expected profit calculation (Legacy)
                 legacy_tp_pct = float(params.get("tp_pct", 2.0))
                 legacy_expected_pct = legacy_tp_pct - 0.2
                 legacy_expected_usdt = entry_budget * (legacy_expected_pct / 100) if entry_budget > 0 else 0
 
-                # 진입/청산 예정가격 계산 (Legacy)
+                # Calculate planned entry/exit prices (Legacy)
                 current_px = get_price_safe(market)
                 entry_thres = float(params.get("entry_trigger_pct", 0) or params.get("threshold_pct", 0) or 0.3)
                 exit_thres = float(params.get("exit_trigger_pct", 0) or params.get("threshold_pct", 0) or 0.3)
@@ -265,7 +265,7 @@ def sniper_list(request: Request):
                 exit_target = current_px * (1 + exit_thres / 100) if current_px > 0 else 0
 
                 items.append({
-                    "sniper_id": market,  # Legacy: market을 sniper_id로 사용
+                    "sniper_id": market,  # Legacy: use market as sniper_id
                     "market": market,
                     "state": str(entry_state.value) if entry_state else "UNKNOWN",
                     "strategy": "SNIPER",
@@ -311,22 +311,22 @@ def sniper_list(request: Request):
 class SniperSetupRequest(BaseModel):
     market: str
     profile: str = "SNIPER"  # SNIPER | SNIPERS
-    side: str = "LONG"       # LONG | SHORT (Spot은 LONG만 실행, SHORT는 DOWN 프로필로 대응)
+    side: str = "LONG"       # LONG | SHORT (Spot runs LONG only; SHORT is handled via the DOWN profile)
     source: str = ""         # optional tag (e.g., precision_scope)
     budget_usdt: float = 50
-    auto_budget: bool = False  # True면 자동편성 예산으로 간주(캡 적용), 수동 입력은 False
+    auto_budget: bool = False  # True = treat as auto-allocated budget (cap applied); manual input is False
     expiry_min: int = 30
     tp_pct: float = SNIPER_MIN_TP_PCT
     sl_pct: float = SNIPER_MIN_SL_PCT
-    # Entry (저격 매수)
+    # Entry (sniper buy)
     entry_enabled: bool = True
     entry_lookback_min: int = 15
     entry_threshold_pct: float = 0.3
-    # Exit (저격 매도)
+    # Exit (sniper sell)
     exit_enabled: bool = True
     exit_lookback_min: int = 15
     exit_threshold_pct: float = 0.3
-    # 필터
+    # Filters
     ai_gate_enabled: bool = True
     ai_min_score: float = 0.55
     rsi_entry_enabled: bool = True
@@ -345,8 +345,8 @@ class SniperSetupRequest(BaseModel):
     fallback_to_market: bool = True
     buy_now: bool = False
     hold_sell: bool = False
-    cycle_mode: str = "AUTO"  # AUTO | UP | DOWN (SNIPER(s) 국면 모드)
-    no_demote: bool = False   # True면 Autopilot demote/idle-longhold 대상에서 제외
+    cycle_mode: str = "AUTO"  # AUTO | UP | DOWN (SNIPER(s) regime mode)
+    no_demote: bool = False   # True = exclude from Autopilot demote/idle-longhold targeting
 
     # Legacy compatibility
     budget: Optional[float] = None
@@ -379,11 +379,11 @@ def setup_sniper(
     - near_low mode: Buy when price is within threshold_pct of lookback_min low
     - near_high mode: Sell when price is within threshold_pct of lookback_min high
 
-    [2026-01-31] 다중 SNIPER 지원: 고유 sniper_id 생성하여 반환
+    [2026-01-31] Multi-SNIPER support: generate and return a unique sniper_id
     """
     from app.manager.sniper_position_store import sniper_store, generate_sniper_id
 
-    # [FIX M11] 동시 호출 시 중복 포지션 생성 방지
+    # [FIX M11] prevent duplicate position creation on concurrent calls
     if not _sniper_setup_lock.acquire(blocking=False):
         return {"ok": False, "error": "setup_in_progress"}
 
@@ -403,8 +403,8 @@ def setup_sniper(
         if not Q.config.market_prefix and market.startswith(Q.config.market_prefix):
             return {"ok": False, "error": "Invalid market format"}
 
-        # [2026-03-07] 수동 주문 슬롯 초과 체크 (+2 한도)
-        # SNIPER(S) scope는 별도 경로(longshort_scope_deploy)에서 처리
+        # [2026-03-07] Manual order slot overflow check (+2 limit)
+        # SNIPER(S) scope is handled via a separate path (longshort_scope_deploy)
         if not (profile == "SNIPERS" and source == "precision_scope"):
             overflow_check = _check_manual_overflow(system, "SNIPER", market)
             coin_warnings = _generate_coin_warnings(system, market, "SNIPER")
@@ -416,7 +416,7 @@ def setup_sniper(
                               "overflow": 0, "is_overflow": False, "message": "scope_path"}
             coin_warnings = _generate_coin_warnings(system, market, "SNIPER")
 
-        # [중첩 금지] 다른 전략에서 이미 ACTIVE로 운용 중인 코인은 SNIPER 등록 거부
+        # [No overlap] Reject SNIPER registration for coins already ACTIVE under another strategy
         try:
             oma_state = system.oma_registry.get_state(market)
             if oma_state in (MarketState.ACTIVE, MarketState.RECOVERY):
@@ -431,17 +431,17 @@ def setup_sniper(
                         _src = str(_params.get("source") or "").strip().lower()
                         _is_scope = _mode in ("SNIPER", "SNIPER(S)") and _prof == "SNIPERS" and _src == "precision_scope"
                         _is_sniper = _mode in ("SNIPER", "SNIPER(S)") and not _is_scope
-                        # 다른 전략(PINGPONG, GAZUA 등)이면 중첩 거부
+                        # Reject overlap if it's another strategy (PINGPONG, GAZUA, etc.)
                         if not _is_sniper and not _is_scope:
                             return {"ok": False, "error": f"cross_strategy_conflict:{_mode}", "market": market}
-                        # 이미 SNIPER(s) scope에 있는 코인을 일반 SNIPER로 등록하려는 경우
+                        # Trying to register a coin already in SNIPER(s) scope as a regular SNIPER
                         if _is_scope and profile != "SNIPERS":
                             return {"ok": False, "error": "already_in_snipers_scope", "market": market}
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[strategy_sniper_router] %s: %s", '이미 SNIPER(s) scope에 있는 코인을 일반 SNIPER로 등록하려는 경우', exc, exc_info=True)
+            logger.warning("[strategy_sniper_router] %s: %s", 'Trying to register a coin already in SNIPER(s) scope as a regular SNIPER', exc, exc_info=True)
 
-        # SNIPER(s)/precision_scope의 자동편성 예산만 저가 코인 캡을 적용한다.
-        # 수동 입력(req.auto_budget=False)은 캡을 넘어도 허용.
+        # Apply the low-price coin cap only to auto-allocated budgets for SNIPER(s)/precision_scope.
+        # Manual input (req.auto_budget=False) is allowed even if it exceeds the cap.
         if (profile == "SNIPERS" or source == "precision_scope") and bool(req.auto_budget):
             current_price = _to_float(price_store.get_price(market) or 0.0, 0.0)
             budget = _cap_snipers_budget(budget, current_price)
@@ -478,7 +478,7 @@ def setup_sniper(
         if cycle_mode not in ("AUTO", "UP", "DOWN"):
             cycle_mode = "AUTO"
         if profile == "SNIPERS" and cycle_mode == "AUTO":
-            # SNIPER(s): 사이드 기준으로 사이클 모드 기본값 고정
+            # SNIPER(s): fix the default cycle mode based on side
             cycle_mode = "DOWN" if side == "SHORT" else "UP"
         tp_pct, sl_pct = _clamp_sniper_tp_sl(req.tp_pct, req.sl_pct)
 
@@ -518,7 +518,7 @@ def setup_sniper(
         }
 
         if profile == "SNIPERS":
-            # 분리형 SNIPER(s) 기본 운영값: 반복 진입 + 보유 유지
+            # Standalone SNIPER(s) default operation: repeated entry + hold position
             params["hold_sell"] = False
 
         # Configure strategy controls
@@ -578,10 +578,10 @@ def setup_sniper(
             "params": params,
         })
 
-        # Buy now if requested (이미 포지션 보유 시 중복 매수 차단)
+        # Buy now if requested (block duplicate buy when a position already exists)
         buy_result = None
         if req.buy_now:
-            # 중복 매수 방지: 이미 포지션 보유 중이면 skip
+            # Prevent duplicate buy: skip if a position is already held
             pos = getattr(ctx, "position", None) or {}
             has_pos = float(pos.get("qty", 0) or 0) > 0
             if has_pos:
@@ -596,8 +596,8 @@ def setup_sniper(
                     reason="sniper:buy_now_ui"
                 )
                 buy_result = {"ok": ok, "msg": str(msg)}
-                # [FIX M12] LIVE 체결: position은 FSM apply_fill_buy()에서 실제 체결가 기준으로 기록됨
-                # 여기서 open_position()을 호출하면 예상가로 중복 기록되어 entry price가 틀어짐
+                # [FIX M12] LIVE fill: position is recorded by FSM apply_fill_buy() based on the actual fill price
+                # Calling open_position() here would double-record at the expected price and distort the entry price
             elif not has_pos and system.trading_mode == "PAPER":
                 current_price = price_store.get_price(market) or 0
                 if current_price > 0:
@@ -626,7 +626,7 @@ def setup_sniper(
         tb = traceback.format_exc()
         return {"ok": False, "error": str(exc), "traceback": tb}
     finally:
-        _sniper_setup_lock.release()  # [FIX M11] 라기 수정 lock 해제
+        _sniper_setup_lock.release()  # [FIX M11] release lock
 
 @router.post(
     "/sniper/stop",
@@ -637,15 +637,15 @@ def setup_sniper(
 )
 def stop_sniper(
     request: Request,
-    market: Optional[str] = Query(None, description="Market to stop (모든 SNIPER 중지)"),
-    sniper_id: Optional[str] = Query(None, description="Specific sniper_id to stop (개별 SNIPER 중지)"),
+    market: Optional[str] = Query(None, description="Market to stop (stop all SNIPERs)"),
+    sniper_id: Optional[str] = Query(None, description="Specific sniper_id to stop (stop individual SNIPER)"),
     delete: bool = Query(False, description="If true, set DISABLED and stop OMA watch"),
 ):
     """Stop SNIPER strategy.
 
-    [2026-01-31] 다중 SNIPER 지원:
-    - sniper_id 지정: 해당 SNIPER 인스턴스만 중지
-    - market만 지정: 해당 마켓의 모든 SNIPER 중지
+    [2026-01-31] Multi-SNIPER support:
+    - sniper_id specified: stop only that SNIPER instance
+    - market only: stop all SNIPERs for that market
     """
     from app.manager.sniper_position_store import sniper_store, extract_market_from_id
 
@@ -653,21 +653,21 @@ def stop_sniper(
         system = request.app.state.system
 
         if not market and not sniper_id:
-            return {"ok": False, "error": "market 또는 sniper_id 중 하나는 필수입니다"}
+            return {"ok": False, "error": "either market or sniper_id is required"}
 
-        # sniper_id가 지정된 경우: 개별 중지
+        # If sniper_id is specified: stop individually
         if sniper_id:
             sniper_id = sniper_id.strip()
             market = extract_market_from_id(sniper_id)
 
-            # 해당 포지션만 제거
+            # Remove only that position
             removed = sniper_store.remove_position(sniper_id)
 
-            # 해당 마켓에 다른 SNIPER가 남아있는지 확인
+            # Check whether other SNIPERs remain for that market
             remaining = sniper_store.get_positions_by_market(market)
 
             if not remaining:
-                # 마지막 SNIPER였으면 마켓 상태도 변경
+                # If it was the last SNIPER, change the market state too
                 target_state = MarketState.DISABLED if delete else MarketState.WATCH
                 reason = ["sniper_delete_btn", "user_disabled"] if delete else ["sniper_stop_ui"]
                 system.oma_set_market(
@@ -675,13 +675,13 @@ def stop_sniper(
                     state=target_state,
                     reason=reason,
                 )
-                # [FIX H4] 남은 포지션이 없을 때만 전략 비활성화 (이전엔 항상 비활성화)
+                # [FIX H4] Disable strategy only when no positions remain (previously always disabled)
                 ctx = system.coordinator.get_context(market)
                 if ctx:
                     ctx.update_controls({"strategy": {"enabled": False, "mode": ""}})
                     if hasattr(ctx, "strategy_mode"):
                         ctx.strategy_mode = ""
-                    # [FIX N9] 재배포 시 stale state 방지: SNIPER 상태 변수 초기화
+                    # [FIX N9] Prevent stale state on redeploy: reset SNIPER state variables
                     for _k, _v in {
                         "sniper_state": "IDLE", "sniper_watch_ts": 0.0, "sniper_probe_ts": 0.0,
                         "sniper_probe_price": 0.0, "sniper_probe_ratio": 0.0,
@@ -696,7 +696,7 @@ def stop_sniper(
 
             return {"ok": True, "sniper_id": sniper_id, "market": market, "remaining_count": len(remaining), "state": target_state.value if not remaining else None}
 
-        # market만 지정된 경우: 해당 마켓의 모든 SNIPER 중지
+        # If only market is specified: stop all SNIPERs for that market
         market = market.strip().upper()
 
         target_state = MarketState.DISABLED if delete else MarketState.WATCH
@@ -713,7 +713,7 @@ def stop_sniper(
             ctx.update_controls({"strategy": {"enabled": False, "mode": ""}})
             if hasattr(ctx, "strategy_mode"):
                 ctx.strategy_mode = ""
-            # [FIX N9] 재배포 시 stale state 방지: SNIPER 상태 변수 초기화
+            # [FIX N9] Prevent stale state on redeploy: reset SNIPER state variables
             for _k, _v in {
                 "sniper_state": "IDLE", "sniper_watch_ts": 0.0, "sniper_probe_ts": 0.0,
                 "sniper_probe_price": 0.0, "sniper_probe_ratio": 0.0,
@@ -854,7 +854,7 @@ def sniper_backtest(
     candle_count: int = Query(200),
     candle_unit: int = Query(1),
 ):
-    """SNIPER 전략 백테스트 실행."""
+    """Run a backtest of the SNIPER strategy."""
     from app.manager.sniper_backtest import run_sniper_backtest
     tp_pct, sl_pct = _clamp_sniper_tp_sl(tp_pct, sl_pct)
 
@@ -941,7 +941,7 @@ def get_sniper_highlow(
     range_pct = data.get("range_pct", 0.0)
     distance_from_low = data.get("distance_from_low_pct", 0.0)
 
-    # TP/SL 자동 계산 (실제 변동폭 기반)
+    # Auto-calculate TP/SL (based on actual price range)
     if range_pct > 0:
         range_based_tp = range_pct * 0.40
         if distance_from_low < 15:

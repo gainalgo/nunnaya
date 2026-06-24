@@ -1,6 +1,6 @@
 """Quick Trade API Router
 
-수동 즉시/조건부 거래 API
+Manual immediate/conditional trade API
 """
 
 from fastapi import APIRouter, Request
@@ -13,7 +13,7 @@ from collections import defaultdict as _defaultdict
 
 logger = logging.getLogger(__name__)
 
-# ── [2026-04-09 보안] Rate Limiting ──────────────────────────
+# ── [2026-04-09 security] Rate Limiting ──────────────────────────
 _RATE_LIMIT: Dict[str, list] = _defaultdict(list)
 _RATE_LIMIT_MAX = 20
 _RATE_LIMIT_WINDOW = 60
@@ -33,9 +33,9 @@ def _check_rate_limit(request: Request) -> bool:
 router = APIRouter(prefix="/api/trade", tags=["quick_trade"])
 
 class QuickTradeRequest(BaseModel):
-    """Quick Trade 요청 스키마"""
+    """Quick Trade request schema"""
     exchange: str = "bybit"  # bybit
-    market_input: str        # BTC, BTCUSDT 등
+    market_input: str        # BTC, BTCUSDT, etc.
     side: str                # buy | sell
     
     amount_mode: str = "quote"   # quote | percent
@@ -48,16 +48,16 @@ class QuickTradeRequest(BaseModel):
     execution: Optional[Dict[str, Any]] = None
 
 class CancelRequest(BaseModel):
-    """취소 요청"""
+    """Cancel request"""
     quick_id: str
 
 # =============================================
-# 정적 경로 (동적 경로보다 먼저 정의해야 함)
+# Static routes (must be defined before dynamic routes)
 # =============================================
 
 @router.post("/quick")
 def quick_trade_submit(request: Request, body: QuickTradeRequest) -> Dict[str, Any]:
-    """Quick Trade 주문 제출"""
+    """Submit a Quick Trade order"""
     if not _check_rate_limit(request):
         return {"ok": False, "error": "rate_limited", "message": "Too many requests. Max 20/min."}
     system = request.app.state.system
@@ -70,7 +70,7 @@ def quick_trade_submit(request: Request, body: QuickTradeRequest) -> Dict[str, A
 
 @router.get("/quick/pending/list")
 def quick_trade_pending_list(request: Request) -> Dict[str, Any]:
-    """펜딩 주문 목록"""
+    """List of pending orders"""
     system = request.app.state.system
     manager = getattr(system, "quick_trade_manager", None)
     
@@ -81,12 +81,12 @@ def quick_trade_pending_list(request: Request) -> Dict[str, Any]:
 
 @router.post("/quick/conditional")
 def quick_trade_conditional(request: Request, body: Dict[str, Any]) -> Dict[str, Any]:
-    """조건부 주문 등록 (V2 대시보드용 래퍼)
+    """Register a conditional order (wrapper for the V2 dashboard)
 
-    지원 조건:
-    - above/below: 지정가 도달 시 체결
-    - near_low: N분 내 최저가 근처 도달 시 매수
-    - near_high: N분 내 최고가 근처 도달 시 매도
+    Supported conditions:
+    - above/below: fill when the limit price is reached
+    - near_low: buy when price approaches the N-minute low
+    - near_high: sell when price approaches the N-minute high
     """
     if not _check_rate_limit(request):
         return {"ok": False, "error": "rate_limited", "message": "Too many requests. Max 20/min."}
@@ -103,13 +103,13 @@ def quick_trade_conditional(request: Request, body: Dict[str, Any]) -> Dict[str,
 
     if not market:
         return {"ok": False, "error": "market required"}
-    # [2026-04-09 보안] 입력값 범위 검증
+    # [2026-04-09 security] Validate input value ranges
     if amount_usdt < 0 or amount_usdt > 100000:
         return {"ok": False, "error": "amount_usdt must be 0~100000"}
     if side not in ("buy", "sell"):
         return {"ok": False, "error": "side must be 'buy' or 'sell'"}
     
-    # 지정가 조건 (above/below)
+    # Limit-price conditions (above/below)
     if condition in ("above", "below"):
         target_price = float(body.get("target_price", 0))
         if not target_price:
@@ -128,7 +128,7 @@ def quick_trade_conditional(request: Request, body: Dict[str, Any]) -> Dict[str,
                 "target_price": target_price,
             },
         }
-    # 최저가/최고가 조건 (near_low/near_high)
+    # Low/high price conditions (near_low/near_high)
     elif condition in ("near_low", "near_high"):
         lookback = int(body.get("lookback_minutes", 15))
         threshold = float(body.get("threshold_pct", 0.3))
@@ -163,7 +163,7 @@ def quick_trade_estimate(
     threshold_value: float = 0.2,
     trigger: str = "near_low"
 ) -> Dict[str, Any]:
-    """조건부 주문 예상 진입가 계산 (Bybit V5 kline API)"""
+    """Estimate the entry price for a conditional order (Bybit V5 kline API)"""
     from app.core.rate_limiter import bybit_get
     from app.core.constants import (
         BYBIT_MARKET_KLINE,
@@ -177,11 +177,11 @@ def quick_trade_estimate(
     if not market:
         return {"ok": False, "error": "market required"}
 
-    # 마켓 정규화
+    # Normalize the market
     market = Q.normalize(market)
 
     try:
-        # 1분 캔들로 N분 데이터 조회
+        # Fetch N minutes of data using 1-minute candles
         candle_count = min(lookback_min, 200)
         resp = bybit_get(BYBIT_MARKET_KLINE, params={"category": bybit_v5_rest_category(), "symbol": market, "interval": "1", "limit": candle_count}, timeout=5)
         resp.raise_for_status()
@@ -200,7 +200,7 @@ def quick_trade_estimate(
         low = min(lows)
         high = max(highs)
 
-        # 현재가 조회
+        # Fetch the current price
         ticker_resp = bybit_get(BYBIT_MARKET_TICKERS, params={"category": bybit_v5_rest_category()}, timeout=5)
         ticker_resp.raise_for_status()
         current_price = 0.0
@@ -214,7 +214,7 @@ def quick_trade_estimate(
         if current_price <= 0:
             return {"ok": False, "error": "Current price not available"}
         
-        # 예상 진입가 계산
+        # Compute the estimated entry price
         if trigger == "near_low":
             if threshold_mode == "pct":
                 entry_price = low * (1 + threshold_value / 100.0)
@@ -228,7 +228,7 @@ def quick_trade_estimate(
                 entry_price = high - threshold_value
             reference = high
         
-        # 현재가 대비 차이
+        # Difference relative to the current price
         diff_from_current = entry_price - current_price
         diff_pct = (diff_from_current / current_price) * 100 if current_price else 0
         
@@ -253,17 +253,17 @@ def quick_trade_estimate(
 
 @router.get("/markets/suggest")
 def markets_suggest(request: Request, query: str = "", limit: int = 20) -> Dict[str, Any]:
-    """마켓 자동완성 제안"""
+    """Market autocomplete suggestions"""
     system = request.app.state.system
-    
-    # 현재 등록된 마켓 + 거래소 전체 마켓에서 검색
+
+    # Search currently registered markets + all exchange markets
     results = []
     query_upper = query.strip().upper()
-    
+
     if not query_upper:
         return {"ok": True, "markets": []}
-    
-    # 1. 활성 마켓에서 검색
+
+    # 1. Search active markets
     try:
         price_store = getattr(system, "price_store", None)
         if price_store:
@@ -280,11 +280,11 @@ def markets_suggest(request: Request, query: str = "", limit: int = 20) -> Dict[
                         "active": True,
                     })
     except (KeyError, IndexError, AttributeError, TypeError) as exc:
-        logger.warning("[quick_trade_router] %s: %s", '1. 활성 마켓에서 검색', exc, exc_info=True)
-    
-    # 2. 거래소 전체 마켓에서 검색 (캐시된 데이터 사용)
+        logger.warning("[quick_trade_router] %s: %s", '1. Search active markets', exc, exc_info=True)
+
+    # 2. Search all exchange markets (using cached data)
     try:
-        # bybit 마켓 검색
+        # Search bybit markets
         from app.integrations.bybit_markets import fetch_bybit_markets, filter_quote_markets as filter_quote_markets
         all_markets = filter_quote_markets(fetch_bybit_markets())
         for m in all_markets:
@@ -301,13 +301,13 @@ def markets_suggest(request: Request, query: str = "", limit: int = 20) -> Dict[
                 if len(results) >= limit:
                     break
     except (KeyError, IndexError, AttributeError, TypeError, ValueError) as exc:
-        logger.warning("[quick_trade_router] %s: %s", 'bybit 마켓 검색', exc, exc_info=True)
+        logger.warning("[quick_trade_router] %s: %s", 'Search bybit markets', exc, exc_info=True)
     
     return {"ok": True, "markets": results[:limit]}
 
 @router.post("/markets/resolve")
 def markets_resolve(request: Request, body: Dict[str, Any]) -> Dict[str, Any]:
-    """마켓 입력값 정규화"""
+    """Normalize a market input value"""
     system = request.app.state.system
     manager = getattr(system, "quick_trade_manager", None)
     
@@ -332,12 +332,12 @@ def markets_resolve(request: Request, body: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": False, "error": "Cannot resolve market"}
 
 # =============================================
-# 동적 경로 (정적 경로보다 뒤에 정의)
+# Dynamic routes (defined after static routes)
 # =============================================
 
 @router.get("/quick/{quick_id}")
 def quick_trade_get(request: Request, quick_id: str) -> Dict[str, Any]:
-    """Quick Trade 주문 조회"""
+    """Get a Quick Trade order"""
     system = request.app.state.system
     manager = getattr(system, "quick_trade_manager", None)
     
@@ -351,7 +351,7 @@ def quick_trade_get(request: Request, quick_id: str) -> Dict[str, Any]:
 
 @router.post("/quick/{quick_id}/cancel")
 def quick_trade_cancel(request: Request, quick_id: str) -> Dict[str, Any]:
-    """Quick Trade 주문 취소"""
+    """Cancel a Quick Trade order"""
     system = request.app.state.system
     manager = getattr(system, "quick_trade_manager", None)
     

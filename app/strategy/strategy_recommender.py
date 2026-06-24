@@ -53,7 +53,7 @@ class StrategyRecommender:
         elif strat in ("SNIPER", "SNIPERS"):
             params = self._recommend_sniper(analysis)
             if strat == "SNIPERS":
-                # SNIPER(s): 고정 순환 프로필 기본값
+                # SNIPER(s): fixed cycle profile defaults
                 params["profile"] = "SNIPERS"
                 params["side"] = "LONG"
                 params["cycle_mode"] = "UP"
@@ -190,7 +190,7 @@ class StrategyRecommender:
         try:
             base = float(base_budget)
         except (TypeError, ValueError):
-            logger.warning("[Recommender] base_budget 파싱 실패", exc_info=True)
+            logger.warning("[Recommender] base_budget parse failed", exc_info=True)
             return None
         if base <= 0:
             return None

@@ -2,9 +2,9 @@
 # File: app/manager/ledger_recovery_reactor.py
 # Autocoin OS v3-H — Ledger Recovery Reactor
 # ------------------------------------------------------------
-# - OMA_LEDGER_PATH(JSONL)을 tail 하며 이벤트를 읽고
-#   RecoveryPolicyEngine에 전달한다.
-# - 원장 이벤트 기반으로만 동작하므로 기존 엔진/전략 로직을 크게 건드리지 않는다.
+# - Tails OMA_LEDGER_PATH(JSONL), reads events, and
+#   forwards them to the RecoveryPolicyEngine.
+# - Operates purely on ledger events, so it does not significantly touch the existing engine/strategy logic.
 # ============================================================
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from app.manager.recovery_policy import RecoveryPolicyEngine
 
 
 class LedgerRecoveryReactor:
-    """JSONL ledger를 tail 하여 RECOVERY 정책을 실행한다."""
+    """Tails the JSONL ledger and runs the RECOVERY policy."""
 
     def __init__(self, system: Any):
         self.system = system
@@ -88,11 +88,11 @@ class LedgerRecoveryReactor:
             logger.warning("[LEDGER_REACTOR] _process_line fallback: %s", exc, exc_info=True)
 
     def _process_rotated_tail(self, offset: int) -> None:
-        """파일 회전 감지 시, 직전 백업 파일의 나머지 부분을 처리한다."""
+        """On file rotation, process the remaining portion of the most recent backup file."""
         d = os.path.dirname(self.ledger_path) or "."
         base = os.path.basename(self.ledger_path)
         try:
-            # 가장 최근 백업 파일 찾기
+            # Find the most recent backup file
             baks = [os.path.join(d, fn) for fn in os.listdir(d) if fn.startswith(base + ".") and fn.endswith(".bak")]
             if not baks:
                 return
@@ -106,7 +106,7 @@ class LedgerRecoveryReactor:
             logger.warning("[LEDGER_REACTOR] rotated tail backup scan: %s", exc, exc_info=True)
 
     async def _run(self) -> None:
-        # 기본 동작: 오프셋 파일이 없으면 "현재 파일 끝"에서 시작(과거 이벤트 재처리 방지)
+        # Default behavior: if no offset file exists, start at the "end of the current file" (avoids reprocessing past events)
         offset = self._load_offset()
         if offset == 0:
             try:
@@ -119,7 +119,7 @@ class LedgerRecoveryReactor:
         while not self._stop.is_set():
             now = time.time()
 
-            # 정책의 시간 기반 조건(conditional max_hold/stoploss 등) 정기 평가
+            # Periodically evaluate the policy's time-based conditions (conditional max_hold/stoploss, etc.)
             if now - self._last_policy_tick >= self.tick_sec:
                 try:
                     self.policy.periodic(self.system)
@@ -132,7 +132,7 @@ class LedgerRecoveryReactor:
                     await asyncio.sleep(self.poll_sec)
                     continue
 
-                # rotation / truncate 대비
+                # Handle rotation / truncate
                 try:
                     size = os.path.getsize(self.ledger_path)
                     if size < offset:

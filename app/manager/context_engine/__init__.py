@@ -1,16 +1,16 @@
-"""Context Engine — FOCUS 진입 판단 보조 레이어 (2026-04-19)
+"""Context Engine — auxiliary layer for FOCUS entry decisions (2026-04-19)
 
-기존 `_compute_conviction_score()` 는 단일 코인의 H4 지표만 본다.
-이 엔진은 "시장 맥락" 을 추가로 본다:
+The existing `_compute_conviction_score()` only looks at a single coin's H4
+indicators. This engine additionally looks at the "market context":
 
-    1. BTC Regime        — BTC 4H 추세 → 역방향 진입 페널티
-    2. Direction Memory  — 최근 같은 코인+방향 N회 결과 → 연패 시 차단/페널티
-    3. Market Bias       — 다중 코인 최근 방향 집계 → 쏠림 시 거스름 페널티
-    4. Session Profile   — KST 시간대 (새벽/아침) → conviction 가산
+    1. BTC Regime        — BTC 4H trend → penalty for counter-trend entry
+    2. Direction Memory  — recent results for same coin+direction over N tries → block/penalty on losing streak
+    3. Market Bias       — aggregated recent direction across multiple coins → penalty for fighting the crowd
+    4. Session Profile   — KST time-of-day (dawn/morning) → conviction bonus
 
-전부 default OFF. FocusConfig 토글로 개별 ON/OFF.
+All default OFF. Toggled individually via FocusConfig.
 
-# 사용
+# Usage
     engine = ContextEngine(config=focus_mgr.config)
     verdict = engine.evaluate(
         market="ETHUSDT",
@@ -20,11 +20,11 @@
     )
     # verdict.delta, verdict.block, verdict.reason, verdict.details
 
-철학:
-- 절대 하드차단은 최소화 (direction_memory 연패만)
-- 대부분은 conviction 가감 (-2 ~ +2)
-- 모듈별 독립 — 하나 OFF 해도 나머지 동작
-- side-effect 없음 (기록·학습은 FocusManager 가 담당)
+Philosophy:
+- Minimize absolute hard blocks (only direction_memory losing streak)
+- Most effects are conviction adjustments (-2 ~ +2)
+- Modules are independent — turning one OFF leaves the rest working
+- No side effects (recording/learning is handled by FocusManager)
 """
 from __future__ import annotations
 
@@ -42,24 +42,24 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Verdict:
-    """Context evaluation 결과."""
-    delta: int = 0                     # conviction 가감 (음수=페널티)
-    block: bool = False                # True 면 진입 완전 차단
-    reason: str = ""                   # block=True 일 때 차단 사유
-    details: Dict[str, Any] = field(default_factory=dict)  # 모듈별 기여
+    """Context evaluation result."""
+    delta: int = 0                     # conviction adjustment (negative=penalty)
+    block: bool = False                # True = entry fully blocked
+    reason: str = ""                   # block reason when block=True
+    details: Dict[str, Any] = field(default_factory=dict)  # per-module contribution
 
     def summary(self) -> str:
         parts = []
         for mod, info in self.details.items():
             d = info.get("delta", 0)
             if d != 0 or info.get("block"):
-                # ★ [2026-05-17] Phase 5 산식 float 변환 부작용 — int() 강제
+                # ★ [2026-05-17] Phase 5 formula float-conversion side effect — force int()
                 parts.append(f"{mod}{int(d):+d}" + ("*" if info.get("block") else ""))
         return "/".join(parts) if parts else "neutral"
 
 
 class ContextEngine:
-    """4개 컨텍스트 모듈을 통합 평가."""
+    """Integrated evaluation of the 4 context modules."""
 
     def __init__(self, config: Any):
         self.config = config
@@ -75,38 +75,38 @@ class ContextEngine:
         now_ts: float,
         btc_candles: Optional[List[Any]] = None,
     ) -> Verdict:
-        """통합 평가. 순서: 차단 우선 → 페널티/가점 합산.
+        """Integrated evaluation. Order: blocks first → sum penalties/bonuses.
 
         Args:
-            market: "ETHUSDT" 형식
+            market: "ETHUSDT" format
             direction: "LONG" / "SHORT"
-            now_ts: 현재 유닉스 타임스탬프 (테스트 주입 가능)
-            btc_candles: BTC H4 캔들 리스트 (없으면 BTC 모듈 스킵)
+            now_ts: current unix timestamp (injectable for tests)
+            btc_candles: BTC H4 candle list (skip BTC module if absent)
 
         Returns:
             Verdict (delta, block, reason, details)
         """
         v = Verdict()
         if not direction:
-            return v  # 방향 미정 시 스킵 (스캐너 사전 단계)
+            return v  # skip when direction undecided (scanner pre-stage)
 
         mkt = market.upper()
         dir_u = direction.upper()
 
-        # 1) Direction Memory — 연패 차단이 최우선
+        # 1) Direction Memory — losing-streak block takes top priority
         try:
             dm = self.direction.evaluate(mkt, dir_u, now_ts)
             v.details["direction_memory"] = dm
             if dm.get("block"):
                 v.block = True
                 v.reason = dm.get("reason", "direction_memory_block")
-                return v  # hard block — 뒤 모듈 평가 불필요
+                return v  # hard block — no need to evaluate later modules
             v.delta += int(dm.get("delta", 0))
         except Exception as exc:
             logger.warning("[ctx] direction_memory error: %s", exc)
             v.details["direction_memory"] = {"error": str(exc)}
 
-        # 2) BTC Regime — 방향 역정렬 페널티
+        # 2) BTC Regime — penalty for direction misalignment
         try:
             bt = self.btc.evaluate(dir_u, btc_candles, now_ts)
             v.details["btc_regime"] = bt
@@ -115,7 +115,7 @@ class ContextEngine:
             logger.warning("[ctx] btc_regime error: %s", exc)
             v.details["btc_regime"] = {"error": str(exc)}
 
-        # 3) Market Bias — 쏠림 거스름 페널티
+        # 3) Market Bias — penalty for fighting the crowd
         try:
             mb = self.bias.evaluate(mkt, dir_u, now_ts)
             v.details["market_bias"] = mb
@@ -124,7 +124,7 @@ class ContextEngine:
             logger.warning("[ctx] market_bias error: %s", exc)
             v.details["market_bias"] = {"error": str(exc)}
 
-        # 4) Session Profile — 시간대 가감
+        # 4) Session Profile — time-of-day adjustment
         try:
             sp = self.session.evaluate(dir_u, now_ts)
             v.details["session_profile"] = sp

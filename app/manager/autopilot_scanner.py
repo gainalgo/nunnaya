@@ -20,16 +20,16 @@ from app.manager.pp_al_rank_scorer import enrich_pp_al_rank_scores
 
 logger = logging.getLogger(__name__)
 
-# [2026-02-01] 전략별 추천 - 직접 함수 호출 (HTTP 제거)
-# HTTP 호출은 서버 시작 시 타이밍 문제로 실패할 수 있음
-_cached_system = None  # AutopilotManager.system 참조용
+# [2026-02-01] Per-strategy recommendations - direct function call (HTTP removed)
+# HTTP calls can fail due to timing issues at server startup
+_cached_system = None  # reference to AutopilotManager.system
 
 
 def _fetch_strategy_recommendations(strategy: str, n: int = 5) -> List[Dict[str, Any]]:
-    """전략별 추천 후보 가져오기 (직접 함수 호출).
+    """Fetch per-strategy recommendation candidates (direct function call).
 
-    [2026-02-01] HTTP 호출 대신 reserved_selector.build_reserved_candidates 직접 호출.
-    서버 시작 시 타이밍 문제 해결.
+    [2026-02-01] Call reserved_selector.build_reserved_candidates directly
+    instead of HTTP. Resolves timing issues at server startup.
     """
     try:
         from app.manager.reserved_selector import build_reserved_candidates
@@ -38,7 +38,7 @@ def _fetch_strategy_recommendations(strategy: str, n: int = 5) -> List[Dict[str,
             logger.warning("[Autopilot] _cached_system is None, cannot fetch %s", strategy)
             return []
 
-        # 전략별로 해당 슬롯만 요청
+        # Request only the relevant slot for each strategy
         kwargs = {
             "pingpong_n": n if strategy.upper() == "PINGPONG" else 0,
             "autoloop_n": n if strategy.upper() == "AUTOLOOP" else 0,
@@ -51,7 +51,7 @@ def _fetch_strategy_recommendations(strategy: str, n: int = 5) -> List[Dict[str,
 
         items, summary = build_reserved_candidates(_cached_system, **kwargs)
 
-        # 해당 전략 후보만 필터링 (필드명 호환: recommended_strategy 또는 strategy)
+        # Filter to candidates for this strategy only (field-name compatible: recommended_strategy or strategy)
         def _get_item_strategy(it: Dict[str, Any]) -> str:
             return str(it.get("recommended_strategy") or it.get("strategy") or "").strip().upper()
 
@@ -60,7 +60,7 @@ def _fetch_strategy_recommendations(strategy: str, n: int = 5) -> List[Dict[str,
         if result:
             logger.info(f"[Autopilot] Fetched {len(result)} {strategy} candidates (direct call)")
         else:
-            # 디버그용: 후보가 0인 경우 로그
+            # Debug: log when there are 0 candidates
             logger.debug(f"[Autopilot] No {strategy} candidates found (items={len(items)}, kwargs={kwargs})")
 
         return result
@@ -70,7 +70,7 @@ def _fetch_strategy_recommendations(strategy: str, n: int = 5) -> List[Dict[str,
     return []
 
 
-# [2026-02-01] 급등/역행 스캐너 - 직접 함수 호출 (HTTP 제거)
+# [2026-02-01] Surge/contrarian scanner - direct function call (HTTP removed)
 def _fetch_surge_coins(
     min_surge_pct: float = 5.0,
     top_n: int = 5,
@@ -78,9 +78,9 @@ def _fetch_surge_coins(
     exclude_active: bool = True,
     mode: str = "both",  # absolute, relative, both
 ) -> List[Dict[str, Any]]:
-    """실시간 급등/역행 코인 스캔 (SNIPER용) - reserved_selector 사용.
+    """Real-time surge/contrarian coin scan (for SNIPER) - uses reserved_selector.
 
-    [2026-02-01] HTTP 호출 대신 reserved_selector의 SNIPER 후보 사용.
+    [2026-02-01] Use reserved_selector's SNIPER candidates instead of HTTP.
     """
     try:
         from app.manager.reserved_selector import build_reserved_candidates
@@ -89,10 +89,10 @@ def _fetch_surge_coins(
             logger.warning("[Autopilot] _cached_system is None, cannot fetch surge coins")
             return []
 
-        # SNIPER 후보 가져오기
+        # Fetch SNIPER candidates
         items, summary = build_reserved_candidates(_cached_system, sniper_n=top_n)
 
-        # SNIPER 후보만 필터링하고 surge 형식으로 변환
+        # Filter to SNIPER candidates only and convert to surge format
         result = []
         for it in items:
             if it.get("recommended_strategy", "").upper() == "SNIPER":
@@ -101,7 +101,7 @@ def _fetch_surge_coins(
                     "market": it.get("market"),
                     "surge_pct": it.get("change_24h", 0),
                     "relative_strength": it.get("relative_strength", 0),
-                    "is_contrarian": it.get("rsi", 50) < 40,  # RSI 40 이하면 역행
+                    "is_contrarian": it.get("rsi", 50) < 40,  # contrarian if RSI <= 40
                     "sniper_score": it.get("score", 0),
                     "ai_score": it.get("ai_score", 0.5),
                     "rsi": it.get("rsi", 50),
@@ -121,13 +121,13 @@ def _fetch_surge_coins(
 
 
 class ScannerMixin:
-    """Step 1: 시장 스캐닝 + 예비 큐 관리 Mixin.
+    """Step 1: Market scanning + reserved queue management Mixin.
 
     Expects: self.system, self._last_refresh_scan_ts
     """
 
     def _infer_strategy_from_market(self, market: str) -> str:
-        """컨텍스트에서 마켓의 전략 추론."""
+        """Infer a market's strategy from its context."""
         mkt = str(market or "").strip().upper()
         if not mkt:
             return ""
@@ -158,7 +158,7 @@ class ScannerMixin:
         reason: str,
         round_strategies: Optional[List[str]],
     ) -> Tuple[Dict[str, Any], Dict[str, int], Set[str]]:
-        """Step 1: 스캔 실행.
+        """Step 1: Run the scan.
 
         Returns:
             (scan_summary, desired_by_strategy, longhold_markets)
@@ -167,7 +167,7 @@ class ScannerMixin:
         should_scan = manual_scan
         shortage_probe: Dict[str, Any] = {}
 
-        # [2026-03-14] LongHold 전환된 마켓은 슬롯 카운트에서 제외
+        # [2026-03-14] Exclude markets converted to LongHold from the slot count
         from app.strategy.strategy_plugins import _longhold_write_lock
         _longhold_markets: Set[str] = set()
         try:
@@ -189,7 +189,7 @@ class ScannerMixin:
             try:
                 pre_snap = self.system.oma_registry.snapshot()
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError):
-                logger.warning("[Autopilot] OMA 스냅샷 조회 실패 → active_counts 전체 0으로 초기화 위험", exc_info=True)
+                logger.warning("[Autopilot] OMA snapshot fetch failed -> risk of resetting all active_counts to 0", exc_info=True)
                 pre_snap = {}
 
             longhold_counts_by_strategy: Dict[str, int] = {}
@@ -210,7 +210,7 @@ class ScannerMixin:
                     market = str(row).strip().upper()
                 if not strategy:
                     strategy = self._infer_strategy_from_market(market)
-                # [2026-03-23] LongHold 코인은 ACTIVE 슬롯에서 빼되 전략별 LH 쿼터로 집계
+                # [2026-03-23] Exclude LongHold coins from ACTIVE slots but tally them into a per-strategy LH quota
                 if market in _longhold_markets:
                     if strategy:
                         longhold_counts_by_strategy[strategy] = longhold_counts_by_strategy.get(strategy, 0) + 1
@@ -226,7 +226,7 @@ class ScannerMixin:
                     if st in queue_counts:
                         queue_counts[st] = int(queue_counts.get(st, 0) + 1)
             except (KeyError, AttributeError, TypeError, ValueError):
-                logger.warning("[Autopilot] 예비 큐 집계 실패 → queue_shortage 미감지 가능", exc_info=True)
+                logger.warning("[Autopilot] reserved queue tally failed -> queue_shortage may go undetected", exc_info=True)
 
             _bench_n = max(0, int(os.getenv("OMA_AUTOPILOT_BENCH_N", "2")))
 
@@ -307,7 +307,7 @@ class ScannerMixin:
                 summary["elapsed_sec"] = round(time.time() - scan_t0, 3)
                 summary["trigger"] = "manual" if manual_scan else "slot_shortage"
 
-                # [2026-03-30] to_thread + timeout 30초 — 이벤트 루프 블로킹 + 스레드 고갈 방지
+                # [2026-03-30] to_thread + 30s timeout - prevents event-loop blocking and thread exhaustion
                 try:
                     items = await asyncio.wait_for(
                         asyncio.to_thread(enrich_pp_al_rank_scores, items),
@@ -321,7 +321,7 @@ class ScannerMixin:
                 scan_summary = summary
                 self._last_refresh_scan_ts = time.time()
 
-                # ── WHALE 예비후보 스캔 (Step 1) ──────────────────────────────
+                # ── WHALE reserved-candidate scan (Step 1) ────────────────────
                 _wh_desired_n = int(_desired.get("WHALE", 0) or 0)
                 if _wh_desired_n > 0:
                     try:
@@ -361,15 +361,15 @@ class ScannerMixin:
                         if _wh_items:
                             reserved_queue.merge_round(_wh_items, None)
                             logger.info(
-                                f"[WHALE/Step1] 🐋 예비후보 {len(_wh_items)}개 "
+                                f"[WHALE/Step1] 🐋 {len(_wh_items)} reserved candidate(s) "
                                 f"(elapsed={round(time.time()-_wt0,1)}s): "
                                 f"{[x['market'] for x in _wh_items]}"
                             )
                         else:
-                            logger.debug(f"[WHALE/Step1] 예비후보 없음 (elapsed={round(time.time()-_wt0,1)}s)")
+                            logger.debug(f"[WHALE/Step1] no reserved candidates (elapsed={round(time.time()-_wt0,1)}s)")
                         summary["picked_whale"] = len(_wh_items)
                     except (OSError, KeyError, AttributeError, TypeError, ValueError, OverflowError) as _wh_exc:
-                        logger.warning("[WHALE/Step1] 스캔 오류: %s", _wh_exc, exc_info=True)
+                        logger.warning("[WHALE/Step1] scan error: %s", _wh_exc, exc_info=True)
                 # ─────────────────────────────────────────────────────────────
 
                 try:

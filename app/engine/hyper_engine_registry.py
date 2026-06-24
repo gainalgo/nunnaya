@@ -11,8 +11,8 @@ from app.engine.hyper_engine_base import HyperEngineBase
 
 class HyperEngineRegistry:
     """
-    엔진을 이름으로 등록하고 조회하는 단일 레지스트리.
-    v3-H에서는 엔진이 하나이므로 중복 등록을 허용한다.
+    A single registry that registers and looks up engines by name.
+    In v3-H there is only one engine, so duplicate registration is allowed.
     """
 
     def __init__(self):
@@ -21,10 +21,10 @@ class HyperEngineRegistry:
     # --------------------------------------------------------
     def register(self, name: str, engine: HyperEngineBase):
         """
-        엔진 중복 등록을 허용한다.
-        HyperSystem()을 여러 번 생성해도 에러가 나지 않아야 한다.
+        Allow duplicate engine registration.
+        Creating HyperSystem() multiple times must not raise an error.
         """
-        # 이미 등록된 엔진이면 무시
+        # Ignore if the engine is already registered
         if name in self._engines:
             return
         self._engines[name] = engine
@@ -42,5 +42,5 @@ class HyperEngineRegistry:
         return list(self._engines.keys())
 
 
-# 글로벌 싱글턴 인스턴스
+# Global singleton instance
 engine_registry = HyperEngineRegistry()

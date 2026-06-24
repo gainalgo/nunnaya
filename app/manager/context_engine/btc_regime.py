@@ -1,26 +1,26 @@
-"""BTC Regime — BTC 4H 추세 판정 + 역방향 진입 페널티.
+"""BTC Regime — BTC 4H trend detection + counter-trend entry penalty.
 
-관찰 (2026-04-18):
-- 개별 코인 H4 만 보면 전환점을 못 읽음 → BTC 전체 레짐이 근본적 분기
-- ETH SHORT 계속 털리는 동안 BTC 는 이미 반등 전환 (역방향 단타)
-- 레짐은 4단계:
-    BULL    — EMA20 상승 + 가격 > EMA50 + swing high 상승
-    BEAR    — EMA20 하락 + 가격 < EMA50 + swing low 하락
-    TRANS   — EMA 기울기 반전 or 가격 ±1% 내에서 EMA50 를 왕복 (= 가장 비싼 장)
-    NEUTRAL — 위 조건 미해당 (횡보)
+Observation (2026-04-18):
+- Looking only at an individual coin's H4 misses turning points → the overall BTC regime is the fundamental divergence
+- While ETH SHORT keeps getting stopped out, BTC has already reversed into a bounce (counter-trend scalp)
+- Four regime stages:
+    BULL    — EMA20 rising + price > EMA50 + rising swing high
+    BEAR    — EMA20 falling + price < EMA50 + falling swing low
+    TRANS   — EMA slope flip or price oscillating around EMA50 within ±1% (= the most expensive market)
+    NEUTRAL — none of the above (ranging)
 
-효과 (delta):
+Effect (delta):
     BULL  × LONG  = +1    BEAR × LONG  = -2
     BULL  × SHORT = -2    BEAR × SHORT = +1
-    TRANS × any   = -1   (전환점 = 학비 비싸니까 보수적)
+    TRANS × any   = -1   (turning point = tuition is expensive, so be conservative)
     NEUT  × any   =  0
 
-입력: BTC H4 캔들 리스트 — 두 형식 지원
+Input: BTC H4 candle list — two formats supported
     (a) Bybit raw: [[start_ts, o, h, l, c, v, ...], ...]
     (b) OHLCV objects: list of obj with .high/.low/.close
-    (c) 단순 closes: list of float (EMA 만 계산, swing 분석 스킵 → 약한 판정)
+    (c) plain closes: list of float (EMA only, swing analysis skipped → weak detection)
 
-캐시: regime 판정은 매 tick 할 필요 없음 → 10분 TTL.
+Cache: regime detection doesn't need to run every tick → 10min TTL.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 def _extract_ohlc(candles: List[Any]) -> Tuple[List[float], List[float], List[float]]:
-    """다양한 포맷에서 (highs, lows, closes) 추출. 실패 시 빈 리스트."""
+    """Extract (highs, lows, closes) from various formats. Empty lists on failure."""
     highs: List[float] = []
     lows: List[float] = []
     closes: List[float] = []
@@ -93,7 +93,7 @@ class BtcRegimeModule:
     def _detect_regime(
         self, highs: List[float], lows: List[float], closes: List[float]
     ) -> str:
-        """핵심 레짐 판정. 반환: "BULL"|"BEAR"|"TRANS"|"NEUTRAL" """
+        """Core regime detection. Returns: "BULL"|"BEAR"|"TRANS"|"NEUTRAL" """
         if len(closes) < 50:
             return "NEUTRAL"
 
@@ -111,21 +111,21 @@ class BtcRegimeModule:
         ema50_now = ema50_s[-1]
         price = closes[-1]
 
-        # EMA20 slope (최근 5봉 기울기)
+        # EMA20 slope (slope over the last 5 bars)
         slope_len = min(5, len(ema20_s) - 1)
         if slope_len <= 0:
             return "NEUTRAL"
         ema20_past = ema20_s[-1 - slope_len]
         slope_pct = (ema20_now - ema20_past) / ema20_past if ema20_past else 0.0
-        # slope_pct 기준: ±flat_thr_pct 이내 = flat (config A/B 테스트 가능)
+        # slope_pct rule: within ±flat_thr_pct = flat (config A/B testable)
         flat_thr = float(getattr(cfg, "btc_regime_slope_flat_thr_pct", 0.3)) / 100.0
 
-        # TRANS 판정: 가격이 EMA50 근처 (±trans_band_pct) + slope flat
+        # TRANS detection: price near EMA50 (±trans_band_pct) + slope flat
         near_ema50 = abs(price - ema50_now) / ema50_now < trans_band_pct
         if near_ema50 and abs(slope_pct) < flat_thr:
             return "TRANS"
 
-        # 최근 slope 반전 감지 (5봉 전 slope vs 현재 slope 부호 반전)
+        # Detect recent slope flip (slope 5 bars ago vs current slope sign reversal)
         if slope_len >= 3 and len(ema20_s) > 2 * slope_len:
             past_slope = (ema20_s[-1 - slope_len] - ema20_s[-1 - 2 * slope_len]) / max(
                 ema20_s[-1 - 2 * slope_len], 1e-9
@@ -144,14 +144,14 @@ class BtcRegimeModule:
     def _cached_regime(
         self, btc_candles: Optional[List[Any]], now_ts: float
     ) -> Tuple[str, float]:
-        """캐시 고려 레짐. 반환: (regime, price)"""
+        """Cache-aware regime. Returns: (regime, price)"""
         cfg = self.config
         ttl = float(getattr(cfg, "btc_regime_cache_ttl_sec", 600.0))
         if self._cache and (now_ts - self._cache[0]) < ttl:
             return self._cache[1], self._cache[2]
 
-        # [2026-04-19 형 검수 CE#5] fetch 실패(빈 candles) 시
-        # 이전 캐시가 있으면 stale 그대로 사용, 없으면 NEUTRAL 임시 캐시 (10분간 재시도 방지)
+        # [2026-04-19 this agent review CE#5] on fetch failure (empty candles):
+        # if a previous cache exists, reuse it stale; otherwise cache NEUTRAL as a placeholder (avoid retries for 10min)
         if not btc_candles:
             if self._cache:
                 logger.debug("[btc_regime] fetch empty → reuse stale cache (%s)", self._cache[1])
@@ -171,7 +171,7 @@ class BtcRegimeModule:
     def evaluate(
         self, direction: str, btc_candles: Optional[List[Any]], now_ts: float
     ) -> Dict[str, Any]:
-        """direction 에 대한 conviction delta.
+        """Conviction delta for the given direction.
 
         Returns:
             {"delta": int, "regime": str, "price": float}
@@ -186,7 +186,7 @@ class BtcRegimeModule:
         out["price"] = price
         dir_u = direction.upper()
 
-        # [2026-05-17 100점 ×10] delta table (config-overridable). 옛 ±1/±2 → ±10/±20
+        # [2026-05-17 100-scale ×10] delta table (config-overridable). old ±1/±2 → ±10/±20
         bull_long = float(getattr(cfg, "btc_regime_bull_long_delta", 10.0))
         bull_short = float(getattr(cfg, "btc_regime_bull_short_delta", -20.0))
         bear_long = float(getattr(cfg, "btc_regime_bear_long_delta", -20.0))

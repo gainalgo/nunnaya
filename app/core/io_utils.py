@@ -1,10 +1,10 @@
-"""Atomic JSON file I/O with fsync — 정전 시 데이터 유실 방지.
+"""Atomic JSON file I/O with fsync — prevents data loss on power failure.
 
-사용법:
+Usage:
     from app.core.io_utils import safe_write_json, safe_load_json
 
-    safe_write_json(path, data)           # 저장
-    data = safe_load_json(path, default={})  # 로드
+    safe_write_json(path, data)           # save
+    data = safe_load_json(path, default={})  # load
 """
 from __future__ import annotations
 import json
@@ -19,9 +19,9 @@ logger = logging.getLogger(__name__)
 def safe_write_json(path: str, data: Any, *, indent: int = 2, ensure_ascii: bool = False) -> None:
     """Atomic JSON write: tmp → flush → fsync → replace.
 
-    - tmp 파일명: {path}.tmp.{pid}.{timestamp_ms}
-    - mkdir -p 자동 생성
-    - 실패 시 tmp 자동 정리
+    - tmp filename: {path}.tmp.{pid}.{timestamp_ms}
+    - mkdir -p created automatically
+    - tmp auto-cleaned on failure
     """
     dir_name = os.path.dirname(path)
     if dir_name:
@@ -45,7 +45,7 @@ def safe_write_json(path: str, data: Any, *, indent: int = 2, ensure_ascii: bool
                 else:
                     raise
     except Exception:
-        # tmp 정리
+        # clean up tmp
         try:
             if os.path.exists(tmp):
                 os.unlink(tmp)

@@ -2,7 +2,7 @@
 # File: app/api/strategy_utils.py
 # Extracted from strategy_router.py — Phase 1-A (file diet)
 #
-# 공통 유틸리티: 캐시, 슬롯 관리, 파라미터 정규화, 경고 생성
+# Shared utilities: cache, slot management, parameter normalization, warning generation
 # ============================================================
 
 import threading
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 CACHE_TTL = 60  # seconds (increased for heavy market scan APIs)
 SNIPER_MIN_TP_PCT = 1.2
 SNIPER_MIN_SL_PCT = 2.5
-MANUAL_OVERFLOW_MAX = 2  # 수동 주문 시 슬롯 초과 허용 한도
+MANUAL_OVERFLOW_MAX = 2  # max slot overflow allowed for manual orders
 
 # ============================================================
 # API Response Cache (Thread-safe, TTL-based)
@@ -115,10 +115,10 @@ def _cap_snipers_budget(requested_budget: float, price_usdt: float) -> float:
 
 
 # ============================================================
-# Slot management (수동 주문 공통)
+# Slot management (shared by manual orders)
 # ============================================================
 def _count_strategy_active_slots(system: Any, strategy: str) -> int:
-    """특정 전략의 현재 ACTIVE 슬롯 수를 카운트."""
+    """Count the current ACTIVE slots for a given strategy."""
     strategy_upper = str(strategy or "").strip().upper()
     count = 0
     try:
@@ -132,21 +132,21 @@ def _count_strategy_active_slots(system: Any, strategy: str) -> int:
             if mode in ("SNIPER(S)", "SNIPERS"):
                 mode = "SNIPER"
             if mode == strategy_upper:
-                # SNIPER(S) scope는 별도 카운트 — 일반 SNIPER만 셈
+                # SNIPER(S) scope is counted separately — count only plain SNIPER
                 if strategy_upper == "SNIPER":
                     params = strat.get("params", {}) or {}
                     prof = str(params.get("profile") or "").strip().upper()
                     src = str(params.get("source") or "").strip().lower()
                     if prof == "SNIPERS" and src == "precision_scope":
-                        continue  # scope 슬롯은 _current_scope_slot_count()에서 별도 관리
+                        continue  # scope slots are managed separately in _current_scope_slot_count()
                 count += 1
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
-        logger.warning("[STRAT_UTIL] SNIPER(S) scope는 별도 카운트 — 일반 SNIPER만 셈: %s", exc, exc_info=True)
+        logger.warning("[STRAT_UTIL] count active slots failed: %s", exc, exc_info=True)
     return count
 
 
 def _get_strategy_slot_target(system: Any, strategy: str) -> int:
-    """전략별 슬롯 타겟 수 조회."""
+    """Look up the slot target count for a strategy."""
     strategy_upper = str(strategy or "").strip().upper()
     attr_map = {
         "PINGPONG": "reserved_pingpong_n",
@@ -164,7 +164,7 @@ def _get_strategy_slot_target(system: Any, strategy: str) -> int:
 
 
 def _check_manual_overflow(system: Any, strategy: str, market: str) -> Dict[str, Any]:
-    """수동 주문 시 슬롯 초과 여부 확인.
+    """Check whether a manual order would overflow the slot limit.
 
     Returns:
         {"allowed": bool, "current": int, "target": int, "overflow": int,
@@ -174,7 +174,7 @@ def _check_manual_overflow(system: Any, strategy: str, market: str) -> Dict[str,
     target = _get_strategy_slot_target(system, strategy_upper)
     current = _count_strategy_active_slots(system, strategy_upper)
 
-    # 이미 해당 마켓이 같은 전략에 있으면 re-setup(갱신) → 항상 허용
+    # If this market already runs the same strategy, it's a re-setup (update) -> always allow
     market_upper = str(market or "").strip().upper()
     try:
         ctx = getattr(system.coordinator, "contexts", {}).get(market_upper)
@@ -190,10 +190,10 @@ def _check_manual_overflow(system: Any, strategy: str, market: str) -> Dict[str,
                             "overflow": 0, "is_overflow": False,
                             "message": f"Re-setup existing {strategy_upper} slot"}
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
-        logger.warning("[STRAT_UTIL] 이미 해당 마켓이 같은 전략에 있으면 re-setup(갱신) → 항상 허용: %s", exc, exc_info=True)
+        logger.warning("[STRAT_UTIL] re-setup check failed: %s", exc, exc_info=True)
 
     if target <= 0:
-        # 타겟 미설정 → 제한 없음
+        # target not set -> no limit
         return {"allowed": True, "current": current, "target": target,
                 "overflow": 0, "is_overflow": False, "message": ""}
 
@@ -216,9 +216,9 @@ def _check_manual_overflow(system: Any, strategy: str, market: str) -> Dict[str,
 
 
 def _generate_coin_warnings(system: Any, market: str, strategy: str = "") -> List[Dict[str, Any]]:
-    """수동 주문 시 해당 코인의 현재 상태에 대한 경고/주의 사항 생성.
+    """Generate warnings/cautions about a coin's current state for manual orders.
 
-    각 경고: {"level": "warn"|"info"|"caution", "code": str, "message": str}
+    Each warning: {"level": "warn"|"info"|"caution", "code": str, "message": str}
     """
     warnings: List[Dict[str, Any]] = []
     market_upper = str(market or "").strip().upper()
@@ -251,7 +251,7 @@ def _generate_coin_warnings(system: Any, market: str, strategy: str = "") -> Lis
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
             logger.warning("[STRAT_UTIL] RSI: %s", exc, exc_info=True)
 
-        # AI score — context brain에서 가져오기
+        # AI score — fetch from context brain
         try:
             ctx = getattr(system.coordinator, "contexts", {}).get(market_upper)
             if ctx:
@@ -266,7 +266,7 @@ def _generate_coin_warnings(system: Any, market: str, strategy: str = "") -> Lis
                     warnings.append({"level": "caution", "code": "ai_low",
                                      "message": f"AI confidence {ai_score:.0%} — below average"})
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[STRAT_UTIL] AI score — context brain에서 가져오기: %s", exc, exc_info=True)
+            logger.warning("[STRAT_UTIL] AI score — fetch from context brain: %s", exc, exc_info=True)
 
         # Near 24h high
         try:
@@ -309,7 +309,7 @@ def _generate_coin_warnings(system: Any, market: str, strategy: str = "") -> Lis
             ctx = getattr(system.coordinator, "contexts", {}).get(market_upper)
             if ctx:
                 vol = float(getattr(ctx, "acc_trade_price_24h", 0) or 0)
-                if vol > 0 and vol < 1_000_000:  # 1M USDT 미만
+                if vol > 0 and vol < 1_000_000:  # below 1M USDT
                     warnings.append({"level": "caution", "code": "low_volume",
                                      "message": f"24h volume {vol/1e6:.1f}M USDT — low liquidity"})
         except (KeyError, AttributeError, TypeError, ValueError) as exc:

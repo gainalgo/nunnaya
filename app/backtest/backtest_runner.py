@@ -2,7 +2,7 @@
 # File: app/backtest/backtest_runner.py
 # Autocoin OS v3-H — Backtest Runner
 # ------------------------------------------------------------
-# 전략별 백테스팅 실행 및 결과 관리
+# Per-strategy backtest execution and result management
 # ============================================================
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class BacktestRunner:
-    """백테스팅 실행 관리자"""
+    """Backtest execution manager"""
     
     def __init__(self):
         self.candle_loader = CandleLoader()
@@ -34,34 +34,34 @@ class BacktestRunner:
         initial_capital: float = 1000.0,
         budget_per_trade: float = 200.0
     ) -> BacktestResult:
-        """단일 전략-마켓 백테스팅 실행
-        
+        """Run a backtest for a single strategy-market pair
+
         Args:
-            strategy: 전략 이름
-            market: 마켓 코드
-            days: 백테스팅 기간 (일)
-            initial_capital: 초기 자본
-            budget_per_trade: 거래당 예산
-        
+            strategy: strategy name
+            market: market code
+            days: backtest period (days)
+            initial_capital: initial capital
+            budget_per_trade: budget per trade
+
         Returns:
-            백테스팅 결과
+            backtest result
         """
         logger.info(f"Starting backtest: {strategy} on {market} ({days} days)")
         
-        # 캔들 데이터 로드
+        # Load candle data
         candles = self.candle_loader.load_candles(market, days=days, interval_minutes=60)
-        
+
         if not candles:
             logger.warning(f"No candle data for {market}")
             return self._create_empty_result(strategy, market)
-        
-        # 백테스팅 엔진 초기화
+
+        # Initialize backtest engine
         engine = BacktestEngine(initial_capital=initial_capital)
-        
-        # 전략 시뮬레이터
+
+        # Strategy simulator
         simulator = StrategySimulator(strategy)
-        
-        # 시뮬레이션 실행
+
+        # Run simulation
         start_time = self._parse_candle_time(candles[0])
         end_time = self._parse_candle_time(candles[-1])
         
@@ -69,11 +69,11 @@ class BacktestRunner:
             current_time = self._parse_candle_time(candle)
             current_price = candle["trade_price"]
             
-            # 기존 포지션 TP/SL 체크
+            # Check TP/SL on existing position
             if market in engine.positions:
                 engine.check_tp_sl(current_time, current_price, market)
-            
-            # 새 진입 시그널 체크 (포지션 없을 때만)
+
+            # Check for new entry signal (only when no position is open)
             if market not in engine.positions:
                 signal = simulator.generate_entry_signal(candles, idx)
                 
@@ -88,11 +88,11 @@ class BacktestRunner:
                         sl_pct=signal["sl_pct"]
                     )
             
-            # 자산 곡선 업데이트
-            if idx % 24 == 0:  # 하루마다
+            # Update equity curve
+            if idx % 24 == 0:  # once per day
                 engine.update_equity_curve(current_time, {market: current_price})
-        
-        # 남은 포지션 청산
+
+        # Close remaining positions
         for market_key in list(engine.positions.keys()):
             last_candle = candles[-1]
             engine.close_position(
@@ -102,10 +102,10 @@ class BacktestRunner:
                 "end_of_backtest"
             )
         
-        # 결과 생성
+        # Build result
         result = engine.get_result(strategy, market, start_time, end_time)
-        
-        # 캐시 저장
+
+        # Save to cache
         cache_key = f"{strategy}_{market}_{days}"
         self.results_cache[cache_key] = result
         
@@ -124,14 +124,14 @@ class BacktestRunner:
         days: int = 30,
         parallel: bool = True
     ) -> Dict[str, Dict[str, BacktestResult]]:
-        """여러 전략-마켓 백테스팅 실행
-        
+        """Run backtests for multiple strategy-market pairs
+
         Args:
-            strategies: 전략 리스트
-            markets: 마켓 리스트
-            days: 백테스팅 기간
-            parallel: 병렬 실행 여부
-        
+            strategies: list of strategies
+            markets: list of markets
+            days: backtest period
+            parallel: whether to run in parallel
+
         Returns:
             {strategy: {market: BacktestResult}}
         """
@@ -175,8 +175,8 @@ class BacktestRunner:
         self,
         results: Dict[str, Dict[str, BacktestResult]]
     ) -> Dict[str, Dict[str, Any]]:
-        """전략별 종합 성과
-        
+        """Aggregate performance per strategy
+
         Returns:
             {strategy: {total_trades, avg_win_rate, avg_roi, ...}}
         """
@@ -213,7 +213,7 @@ class BacktestRunner:
         return summary
     
     def _parse_candle_time(self, candle: Dict) -> float:
-        """캔들 시간을 Unix timestamp로 변환"""
+        """Convert candle time to a Unix timestamp"""
         from datetime import datetime
         time_str = candle.get("candle_date_time_kst", "")
         try:
@@ -224,7 +224,7 @@ class BacktestRunner:
             return time.time()
     
     def _create_empty_result(self, strategy: str, market: str) -> BacktestResult:
-        """빈 결과 생성"""
+        """Create an empty result"""
         return BacktestResult(
             strategy=strategy,
             market=market,

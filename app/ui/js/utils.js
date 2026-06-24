@@ -171,10 +171,10 @@ class SimpleCache {
 }
 
 /* =========================
- * Authenticated Fetch (Basic Auth 지원)
+ * Authenticated Fetch (Basic Auth supported)
  * ========================= */
 async function authFetch(url, options = {}) {
-  // credentials: 'include'로 브라우저가 저장한 Basic Auth 자동 포함 (cross-origin 포함)
+  // credentials: 'include' makes the browser auto-attach saved Basic Auth (cross-origin included)
   const mergedOptions = {
     credentials: 'include',
     ...options,

@@ -55,10 +55,10 @@ def adjust_qty_precision(qty: float, symbol: str = "") -> float:
     return float(Decimal(str(qty)).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN))
 
 
-# [2026-06-12] kline TTL 캐시 — dual(양방향) ON + threshold 완화로 raw get_kline
-# 호출이 폭증해 공유 rate limiter 가 포화되고 GreenPen 스캔이 굶주림(524).
-# 같은 (symbol,interval,limit) 봉을 짧은 TTL 내 공유해 API 호출을 줄인다.
-# 30초 = 기존 _get_mtf_kline 기본 ttl 60초보다 더 신선 → 비-퇴행.
+# [2026-06-12] kline TTL cache — with dual ON + relaxed threshold, raw get_kline
+# calls exploded, saturating the shared rate limiter and starving the GreenPen scan (524).
+# Share the same (symbol,interval,limit) candle within a short TTL to cut API calls.
+# 30s = fresher than the existing _get_mtf_kline default ttl of 60s → non-regression.
 _KLINE_CACHE_TTL = 30.0
 
 
@@ -77,7 +77,7 @@ class BybitTradeClient:
         self._session = requests.Session()
         _adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=0)
         self._session.mount("https://", _adapter)
-        # (symbol, interval, limit) -> (fetched_ts, data)  kline TTL 캐시
+        # (symbol, interval, limit) -> (fetched_ts, data)  kline TTL cache
         self._kline_cache: dict = {}
 
     def _sign(self, timestamp, params_str):
@@ -298,9 +298,9 @@ class BybitTradeClient:
         min_q = BybitInstrumentCache.get_min_qty(symbol)
         if qty < min_q:
             raise BybitAPIError(f"Qty {qty} < min {min_q} for {symbol}")
-        # [2026-05-30] Linear safety: spot 가정 plugin(LADDER 등) 의 market_sell = LONG 청산 의도.
-        # reduce_only 미적용 시 SHORT 신규 진입 사고. 명시적 SHORT 신규 진입은
-        # place_order(side="Sell", reduce_only=False) 직접 호출 사용.
+        # [2026-05-30] Linear safety: market_sell from spot-assuming plugins (LADDER etc.) means LONG close intent.
+        # Without reduce_only this would accidentally open a new SHORT. For an explicit new SHORT entry,
+        # call place_order(side="Sell", reduce_only=False) directly.
         if self._category == "linear":
             return self.place_order(market=market, side="Sell", ord_type="Market", volume=qty, reduce_only=True)
         return self.place_order(market=market, side="Sell", ord_type="Market", volume=qty)
@@ -322,7 +322,7 @@ class BybitTradeClient:
         if qty < min_q:
             raise BybitAPIError(f"Linear qty {qty} < min {min_q} for {symbol}")
         logger.info("[MARKET_SELL_USDT] %s quote=%.2f category=%s", symbol, quote_amount, self._category)
-        # [2026-05-30] Linear safety: market_sell_usdt = 청산 의도 (linear only). reduce_only 강제.
+        # [2026-05-30] Linear safety: market_sell_usdt means close intent (linear only). Force reduce_only.
         return self.place_order(market=market, side="Sell", ord_type="Market", volume=qty, reduce_only=True)
 
     def market_buy_usdt(self, market, amount, **kw):
@@ -340,16 +340,16 @@ class BybitTradeClient:
     def quick_sell(self, market, qty, price):
         result = {"success": False, "action": "error", "filled_qty": 0.0, "remaining_qty": qty,
                   "avg_price": 0.0, "order": None, "message": ""}
-        # 1단계: 주문 전송 (실패 시 예외 전파 — 주문이 안 나갔으므로 안전)
+        # Step 1: send order (propagate exception on failure — safe since the order did not go out)
         order = self.place_order(market=market, side="Sell", ord_type="Limit",
                                 price=price, volume=qty, time_in_force="IOC")
         result["order"] = order
-        # 2단계: 체결 확인 (주문은 이미 나갔으므로 에러 시에도 주문 UUID 보존)
+        # Step 2: confirm fill (order already sent, so preserve order UUID even on error)
         try:
             time.sleep(0.3)
             order_uuid = order.get("uuid", "")
             status_ok = False
-            # 최대 2회 재시도로 stale 데이터 방지
+            # Up to 2 retries to avoid stale data
             for _attempt in range(2):
                 try:
                     order = self.get_order(uuid=order_uuid)
@@ -362,7 +362,7 @@ class BybitTradeClient:
                     if _attempt == 0:
                         time.sleep(0.5)
             if not status_ok:
-                # get_order 완전 실패 — stale 데이터 사용 대신 unknown 반환
+                # get_order completely failed — return unknown instead of using stale data
                 logger.error("[QUICK_SELL] get_order FAILED for %s uuid=%s — returning unknown status",
                              market, order_uuid)
                 result.update(success=True, action="unknown",
@@ -533,9 +533,9 @@ class BybitTradeClient:
         sym = symbol.upper()
         iv = str(interval)
         lim = min(int(limit), 1000)
-        # ── TTL 캐시 ──────────────────────────────────────────────
-        # ★ 1분봉(micro 점화 타이밍) + limit<=2(라이브 가격/형성중 봉 스냅샷)은
-        #   캐시 제외 → 항상 신선. 그 외는 _KLINE_CACHE_TTL 동안 봉 공유.
+        # ── TTL cache ──────────────────────────────────────────────
+        # ★ 1m candles (micro ignition timing) + limit<=2 (live price / forming-candle snapshot) are
+        #   excluded from the cache → always fresh. Others share the candle for _KLINE_CACHE_TTL.
         ttl = 0.0 if (iv == "1" or lim <= 2) else _KLINE_CACHE_TTL
         ck = (sym, iv, lim)
         if ttl > 0.0:
@@ -556,11 +556,11 @@ class BybitTradeClient:
             self._kline_cache[ck] = (time.time(), data)
         return data
 
-    # ── 거래소 추상화 시드 (FocusManager 가 직접 bybit_get 하던 것을 client 경유로) ──
-    #   반환 키 = Bybit 네이티브(symbol/lastPrice/turnover24h/price24hPcnt/highPrice/lowPrice).
-    #   Binance 클라이언트가 같은 키로 매핑해 FocusManager 소비코드 0변화.
+    # ── Exchange abstraction seed (route what FocusManager used to bybit_get directly through the client) ──
+    #   Return keys = Bybit native (symbol/lastPrice/turnover24h/price24hPcnt/highPrice/lowPrice).
+    #   The Binance client maps to the same keys so FocusManager consumer code stays unchanged.
     def get_market_tickers(self, *, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
-        """linear/spot 24h 티커 목록 (거래대금 스캔용). symbol 지정 시 1종목만."""
+        """linear/spot 24h ticker list (for turnover scanning). If symbol is given, only one."""
         from app.core.constants import BYBIT_MARKET_TICKERS, parse_bybit_list
         params: Dict[str, Any] = {"category": self._category}
         if symbol:
@@ -570,7 +570,7 @@ class BybitTradeClient:
         return parse_bybit_list(resp.json())
 
     def get_instrument_info(self, symbol: str) -> Dict[str, float]:
-        """심볼 거래규칙 (qty_step/min_qty/max_qty) — 주문 qty 정밀도·폭발가드용."""
+        """Symbol trading rules (qty_step/min_qty/max_qty) — for order qty precision and blowup guard."""
         from app.core.constants import BYBIT_MARKET_INSTRUMENTS
         resp = self._request("GET", BYBIT_MARKET_INSTRUMENTS,
                              params={"category": self._category, "symbol": self._normalize_symbol(symbol)})
@@ -583,7 +583,7 @@ class BybitTradeClient:
                 "max_qty": float(lot.get("maxOrderQty", 0) or 0)}
 
     def get_available_margin(self) -> float:
-        """UNIFIED 계좌 가용 마진(USDT). 실패 시 0.0."""
+        """Available margin (USDT) on the UNIFIED account. 0.0 on failure."""
         try:
             from app.core.constants import BYBIT_ACCOUNT_WALLET
             resp = self._request("GET", BYBIT_ACCOUNT_WALLET, params={"accountType": "UNIFIED"})
@@ -596,6 +596,6 @@ class BybitTradeClient:
             return 0.0
 
     def list_open_positions(self, *, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
-        """보유 포지션 목록 — 키 symbol/size/side(Buy|Sell)/avgPrice (FocusManager sync 소비).
-        Bybit get_positions() 가 이미 네이티브 키로 반환 → 그대로. (_linear_last_price 는 위에 정의됨.)"""
+        """Open positions list — keys symbol/size/side(Buy|Sell)/avgPrice (consumed by FocusManager sync).
+        Bybit get_positions() already returns native keys → pass through. (_linear_last_price is defined above.)"""
         return self.get_positions(symbol=symbol)

@@ -22,14 +22,14 @@ class ScopeRotationMixin:
     """Methods for Scope Slot Rotation (Step 6.5 + Step 7)."""
 
     # --------------------------------------------------------
-    # Step 6.5: 승률 연동 Assist Fire
-    # 수익 슬롯 비율 ≥ 50% → assist_fire ON (공격)
-    # 수익 슬롯 비율 < 50% → assist_fire OFF (신중)
+    # Step 6.5: win-rate-linked Assist Fire
+    # profitable slot ratio >= 50% -> assist_fire ON (aggressive)
+    # profitable slot ratio < 50% -> assist_fire OFF (cautious)
     # --------------------------------------------------------
     def _adapt_assist_fire_by_winrate(self) -> None:
-        """Scope 슬롯의 수익/손실 비율에 따라 assist_fire 자동 전환.
+        """Auto-toggle assist_fire based on the profit/loss ratio of scope slots.
 
-        longshort_scope_assist_fire_auto=True일 때만 동작.
+        Only runs when longshort_scope_assist_fire_auto=True.
         """
         if not bool(getattr(self.system, "longshort_scope_assist_fire_auto", False)):
             return
@@ -83,10 +83,10 @@ class ScopeRotationMixin:
 
     # --------------------------------------------------------
     # Step 7: Scope Slot Rotation
-    # SNIPERS(precision_scope) 슬롯 중 idle 상태인 것을 교체
+    # Rotate out idle SNIPERS(precision_scope) slots
     # --------------------------------------------------------
     def _process_scope_trap_fills(self, sniper_store: Any) -> None:
-        """Trap 매수 체결 감지 → TP 지정가 매도 자동 제출."""
+        """Detect a trap buy fill -> auto-submit a TP limit sell."""
         fsm = getattr(self.system, "order_fsm", None)
         if not fsm:
             return
@@ -106,18 +106,18 @@ class ScopeRotationMixin:
             if not ctx:
                 continue
 
-            # 아직 pending buy 주문이 있으면 체결 대기 중 → skip
+            # Still has a pending buy order -> awaiting fill -> skip
             order_state = getattr(ctx, "order_state", None) or {}
             if order_state.get("uuid") and order_state.get("side") == "bid":
                 continue
 
-            # 포지션 확인 — qty > 0 이면 매수 체결됨
+            # Position check -- qty > 0 means the buy filled
             pos = getattr(ctx, "position", None) or {}
             qty = float(pos.get("qty", 0) or 0)
             if qty <= 0:
                 continue
 
-            # 이미 매도 주문 진행 중이면 skip
+            # A sell order is already in progress -> skip
             if order_state.get("uuid") and order_state.get("side") == "ask":
                 continue
 
@@ -145,18 +145,18 @@ class ScopeRotationMixin:
                 logger.warning("[ScopeRotation/Trap] TP sell error %s: %s", market, exc)
 
     def _calc_adaptive_cooldown(self, market: str, base_cd_min: int) -> int:
-        """점수 기반 유동 쿨다운 계산.
+        """Compute a score-based dynamic cooldown.
 
-        multi-scan 결과에서 해당 마켓의 점수를 조회하여:
-        - 상위 20% (score >= 0.8 상대) → base × 0.25 (매우 빠른 재등장)
-        - 상위 40% (score >= 0.6 상대) → base × 0.50
-        - 평균 (score >= 0.4 상대)     → base × 1.00 (기본값)
-        - 하위 (score < 0.4 상대)      → base × 1.50 (새 코인에 기회)
+        Looks up the market's score from the multi-scan result:
+        - top 20% (relative score >= 0.8) -> base x 0.25 (very fast re-appearance)
+        - top 40% (relative score >= 0.6) -> base x 0.50
+        - average (relative score >= 0.4) -> base x 1.00 (default)
+        - bottom (relative score < 0.4)   -> base x 1.50 (give new coins a chance)
         """
         try:
             from app.core.hyper_price_store import price_store
 
-            # 최근 scan 캐시에서 점수 조회
+            # Look up the score from the recent scan cache
             scan_cache = getattr(self.system, "_scope_scan_cache", None)
             if not scan_cache:
                 return base_cd_min
@@ -177,7 +177,7 @@ class ScopeRotationMixin:
             if max_score <= 0:
                 return base_cd_min
 
-            relative = target_score / max_score  # 0.0 ~ 1.0
+            relative = target_score / max_score  # 0.0 to 1.0
 
             if relative >= 0.8:
                 mult = 0.25
@@ -200,10 +200,10 @@ class ScopeRotationMixin:
             return base_cd_min
 
     def _release_scope_sold_slots(self, sniper_store: Any) -> List[str]:
-        """매도 체결된 Scope 슬롯 즉시 해제 + 쿨다운.
+        """Immediately release sold scope slots + apply cooldown.
 
-        이윤을 남기고 매도된 코인이 같은 슬롯에서 재매수되는 것을 방지.
-        슬롯을 비워 자동충원(autofill)으로 새 후보가 들어오도록 한다.
+        Prevents a coin sold for profit from being re-bought in the same slot.
+        Frees the slot so autofill can bring in a new candidate.
         """
         released: List[str] = []
         all_positions = sniper_store.get_all_as_list()
@@ -219,14 +219,14 @@ class ScopeRotationMixin:
             if not market:
                 continue
 
-            # 아직 매도 주문이 pending이면 skip (체결 대기 중)
+            # A sell order is still pending -> skip (awaiting fill)
             ctx = self.system.coordinator.get_context(market)
             if ctx:
                 order_state = getattr(ctx, "order_state", None) or {}
                 if order_state.get("uuid") and order_state.get("side") == "ask":
                     continue
 
-            # 포지션 보유 여부 확인
+            # Check whether a position is held
             has_pos = False
             if ctx:
                 pos = getattr(ctx, "position", None) or {}
@@ -235,7 +235,7 @@ class ScopeRotationMixin:
             if has_pos:
                 continue
 
-            # sniper_last_exit_ts가 최근에 기록됐는지 확인 (매도 직후)
+            # Check whether sniper_last_exit_ts was recorded recently (just after a sell)
             last_exit_ts = 0.0
             if ctx:
                 try:
@@ -245,11 +245,11 @@ class ScopeRotationMixin:
             if last_exit_ts <= 0:
                 continue
 
-            # [FIX M2] 30분 이상 된 종료 슬롯도 정리 (좌비 누적 방지)
-            # 스코프 루프가 30분 이상 다운된 코인도 정리되어야 함 (쿠다운 없이)
+            # [FIX M2] Also clean up exited slots older than 30 min (prevent buildup of stragglers)
+            # Coins whose scope loop has been down for 30+ min should be cleaned up too (no cooldown)
             is_stale_exit = (time.time() - last_exit_ts) > 1800
 
-            # 슬롯 해제
+            # Release the slot
             try:
                 sniper_store.remove_position(sniper_id)
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
@@ -275,7 +275,7 @@ class ScopeRotationMixin:
             adaptive = bool(
                 getattr(self.system, "autopilot_scope_adaptive_cd", True)
             )
-            # [FIX M2] 올드 종료 (좌비) 슬롯은 쿠다운 없이 정리만
+            # [FIX M2] Old exited (straggler) slots: just clean up, no cooldown
             if is_stale_exit:
                 released.append(market)
                 continue
@@ -311,7 +311,7 @@ class ScopeRotationMixin:
         return released
 
     def _process_scope_tp_timeouts(self, sniper_store: Any) -> None:
-        """Trap TP 매도 미체결 타임아웃 → 시장가 청산."""
+        """Trap TP sell unfilled timeout -> market-price liquidation."""
         timeout_hours = float(
             getattr(self.system, "autopilot_scope_trap_tp_timeout_hours", 4.0) or 0
         )
@@ -342,10 +342,10 @@ class ScopeRotationMixin:
             if not ctx:
                 continue
 
-            # 매도 주문이 아직 pending인 경우만 처리
+            # Only handle the case where the sell order is still pending
             order_state = getattr(ctx, "order_state", None) or {}
             if not (order_state.get("uuid") and order_state.get("side") == "ask"):
-                # 이미 체결 완료됨 — 타임스탬프 정리
+                # Already filled -- clear the timestamp
                 existing = sniper_store.get_position(sniper_id) or {}
                 existing.pop("trap_tp_sell_ts", None)
                 sniper_store.save_position(sniper_id, existing)
@@ -359,7 +359,7 @@ class ScopeRotationMixin:
                 sniper_store.save_position(sniper_id, existing)
                 continue
 
-            # 1) 지정가 취소
+            # 1) Cancel the limit order
             try:
                 fsm.force_cancel_pending(
                     ctx=ctx, market=market, reason="scope_trap_tp_timeout",
@@ -368,7 +368,7 @@ class ScopeRotationMixin:
                 logger.error("[ScopeRotation/TrapTimeout] cancel FAILED %s, proceeding to market sell: %s",
                             market, exc, exc_info=True)
 
-            # 2) 시장가 매도
+            # 2) Market sell
             try:
                 from app.core.hyper_price_store import price_store
                 cur_price = float(price_store.get_price(market) or 0)
@@ -392,7 +392,7 @@ class ScopeRotationMixin:
             except (AttributeError, TypeError, ValueError) as exc:
                 logger.warning("[ScopeRotation/TrapTimeout] market_sell error %s: %s", market, exc)
 
-            # 타임스탬프 정리
+            # Clear the timestamp
             existing = sniper_store.get_position(sniper_id) or {}
             existing.pop("trap_tp_sell_ts", None)
             sniper_store.save_position(sniper_id, existing)
@@ -403,16 +403,16 @@ class ScopeRotationMixin:
         idle_min: int = 30,
     ) -> List[Dict[str, Any]]:
         """
-        Precision Scope 슬롯 자동 순환.
-        - SNIPERS profile + 미보유(SCANNING) 상태로 idle_min분 이상 경과한 슬롯 감지
-        - multi-scan으로 더 유망한 후보 탐색
-        - 기존 슬롯 중지 → 새 후보 배치
+        Auto-rotation of Precision Scope slots.
+        - Detect slots with SNIPERS profile + no position (SCANNING) idle for >= idle_min minutes
+        - Search for more promising candidates via multi-scan
+        - Stop the existing slot -> deploy the new candidate
         """
         from app.manager.sniper_position_store import sniper_store, generate_sniper_id
 
         rotated: List[Dict[str, Any]] = []
 
-        # 0a) 매도 체결된 슬롯 즉시 해제 (재매수 방지 + 쿨다운)
+        # 0a) Immediately release sold slots (prevent re-buy + cooldown)
         sold_released = self._release_scope_sold_slots(sniper_store)
         if sold_released:
             for mk in sold_released:
@@ -424,7 +424,7 @@ class ScopeRotationMixin:
                     "new_daily_est": 0,
                 })
 
-        # 0b) Trap 모드: 매수 체결된 슬롯에 자동 TP 매도 주문 + 타임아웃 체크
+        # 0b) Trap mode: auto TP sell order on filled-buy slots + timeout check
         self._process_scope_trap_fills(sniper_store)
         self._process_scope_tp_timeouts(sniper_store)
 
@@ -440,8 +440,8 @@ class ScopeRotationMixin:
                 or 0
             ),
         )
-        # 관리자 확장 슬롯(+alpha): 기본은 0, 필요 시 환경변수/런타임 속성으로 확장.
-        # 예) OMA_AUTOPILOT_SCOPE_TARGET_ALPHA=2 -> target_n + 2 까지 자동충원 허용
+        # Admin extension slots (+alpha): default 0, expandable via env var / runtime attribute when needed.
+        # e.g. OMA_AUTOPILOT_SCOPE_TARGET_ALPHA=2 -> allow autofill up to target_n + 2
         scope_target_alpha_raw = getattr(
             self.system,
             "autopilot_scope_target_alpha",
@@ -452,7 +452,7 @@ class ScopeRotationMixin:
         except (TypeError, ValueError):
             logger.warning("ScopeRotationMixin._step_scope_slot_rotation suppressed exception", exc_info=True)
             scope_target_alpha = 0
-        # alpha 슬롯 최소 신뢰도 기준 (기본 60)
+        # Minimum confidence for alpha slots (default 60)
         scope_alpha_min_conf_raw = getattr(
             self.system,
             "autopilot_scope_alpha_min_conf",
@@ -463,8 +463,8 @@ class ScopeRotationMixin:
         except (TypeError, ValueError):
             logger.warning("ScopeRotationMixin._step_scope_slot_rotation suppressed exception", exc_info=True)
             scope_alpha_min_conf = 60.0
-        # 슬롯 autofill 최소 신뢰도 — UI 스캔 표시(longshort_scope_min_conf)와 분리
-        # UI의 "10"은 스캔 목록 표시용, autofill은 별도 설정 또는 하드 하한 적용
+        # Minimum confidence for slot autofill -- separate from the UI scan display (longshort_scope_min_conf)
+        # The UI's "10" is for the scan list display; autofill uses a separate setting or a hard floor
         autofill_min_conf_raw = getattr(
             self.system,
             "autopilot_scope_autofill_min_conf",
@@ -475,7 +475,7 @@ class ScopeRotationMixin:
         except (TypeError, ValueError):
             logger.warning("ScopeRotationMixin._step_scope_slot_rotation suppressed exception", exc_info=True)
             autofill_min_conf = 40.0
-        # alpha 추가권 만료 시간(분) = 재등장/재진입 쿨다운(N분)과 동일
+        # alpha grant TTL (minutes) = same as the re-appearance/re-entry cooldown (N minutes)
         scope_alpha_ttl_min_raw = getattr(
             self.system,
             "autopilot_scope_cooldown_min",
@@ -488,7 +488,7 @@ class ScopeRotationMixin:
             scope_alpha_ttl_min = 60
         scope_alpha_ttl_sec = float(scope_alpha_ttl_min * 60)
         scope_target_cap = min(100, scope_target_base + scope_target_alpha)
-        # alpha 윈도우 시작 시각(초). 0이면 미시작.
+        # alpha window start time (seconds). 0 means not started.
         scope_alpha_started_ts_raw = getattr(self.system, "autopilot_scope_alpha_started_ts", 0.0)
         try:
             scope_alpha_started_ts = float(scope_alpha_started_ts_raw or 0.0)
@@ -496,9 +496,9 @@ class ScopeRotationMixin:
             logger.warning("ScopeRotationMixin._step_scope_slot_rotation suppressed exception", exc_info=True)
             scope_alpha_started_ts = 0.0
 
-        # 운영자 수동 투입을 위한 예비 슬롯(자동충원 holdback).
-        # - 기본 1칸(환경변수/런타임으로 조정 가능)
-        # - target이 작은 경우(<=2)는 holdback 미적용
+        # Reserve slots for operator manual deployment (autofill holdback).
+        # - default 1 slot (adjustable via env var / runtime)
+        # - no holdback when target is small (<=2)
         scope_operator_reserve_raw = getattr(
             self.system,
             "autopilot_scope_operator_reserve_slots",
@@ -510,10 +510,10 @@ class ScopeRotationMixin:
             logger.warning("ScopeRotationMixin._step_scope_slot_rotation suppressed exception", exc_info=True)
             scope_operator_reserve = 1
 
-        # fill 목표:
-        # - alpha 윈도우 활성 중: base + alpha
-        # - alpha 윈도우 만료 후: base
-        # - 단, has_pos=False 슬롯은 목표 초과 시 trim 가능(강제 퇴출 아님: 보유 슬롯은 유지)
+        # fill target:
+        # - while alpha window active: base + alpha
+        # - after alpha window expires: base
+        # - but has_pos=False slots can be trimmed when over target (not a forced exit: held slots are kept)
         if scope_target_alpha <= 0:
             scope_target_fill = scope_target_base
         elif scope_alpha_started_ts <= 0:
@@ -523,16 +523,16 @@ class ScopeRotationMixin:
         else:
             scope_target_fill = scope_target_base
 
-        # 자동충원은 설정된 목표까지 전부 채운다.
-        # (운영자 수동 배치는 +2 overflow로 별도 처리되므로 예비 슬롯 홀드백 불필요)
+        # Autofill fills all the way up to the configured target.
+        # (Operator manual placement is handled separately as +2 overflow, so no reserve holdback needed)
         effective_operator_reserve = 0
         scope_target_autofill = max(0, int(scope_target_fill))
 
-        # 실제 trim/fill 하드 타깃은 "현재 fill 목표"를 따른다.
+        # The actual trim/fill hard target follows the "current fill target".
         scope_target_hard = max(0, int(scope_target_fill))
 
         def _scope_overflow_hold_until(params_obj: Dict[str, Any]) -> float:
-            """수동 overflow 슬롯 유지 만료시각 계산 (없으면 0)."""
+            """Compute the hold-expiry time for a manual overflow slot (0 if none)."""
             params_local = params_obj or {}
             try:
                 is_overflow = bool(params_local.get("scope_overflow_manual", False))
@@ -558,7 +558,7 @@ class ScopeRotationMixin:
             return float(started_ts + (ttl_min * 60.0))
 
         def _prune_waiting_scope_slot(*, market: str, sniper_id: str) -> None:
-            """WAITING(비보유+비활성) scope 슬롯을 정리해 서버 자동충원이 즉시 재사용 가능하게 한다."""
+            """Clean up a WAITING (no-position + inactive) scope slot so server autofill can reuse it immediately."""
             removed = False
             try:
                 if sniper_id:
@@ -612,7 +612,7 @@ class ScopeRotationMixin:
                 except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
                     logger.warning("Failed to save context state during waiting slot GC", exc_info=True)
 
-        # 1) 현재 SNIPERS 슬롯 분류 (전체/idle)
+        # 1) Classify current SNIPERS slots (all / idle)
         all_positions = sniper_store.get_all_as_list()
         scope_slots: List[Dict[str, Any]] = []
         idle_slots: List[Dict[str, Any]] = []
@@ -659,14 +659,14 @@ class ScopeRotationMixin:
                 logger.warning("ScopeRotationMixin._prune_waiting_scope_slot suppressed exception", exc_info=True)
                 is_open_state = False
 
-            # API 조회 시 정리되던 WAITING 슬롯을 서버 루프에서도 동일하게 정리한다.
-            # (브라우저 진입 여부와 무관하게 빈 슬롯 자동충원이 동작해야 함)
-            # [FIX M1] 배포 직후 5분은 grace period - 신규 슬롯 조기 제거 방지
+            # Clean up WAITING slots in the server loop just like the API lookup did.
+            # (Empty-slot autofill must work regardless of whether a browser is connected)
+            # [FIX M1] First 5 min after deploy is a grace period - prevents early removal of new slots
             scope_deploy_ts = float(params.get("scope_deploy_ts") or 0.0)
-            deploy_grace_sec = 300.0  # 5분 grace period
+            deploy_grace_sec = 300.0  # 5 min grace period
             just_deployed = (time.time() - scope_deploy_ts) < deploy_grace_sec if scope_deploy_ts > 0 else False
             if just_deployed:
-                # 현재 배포 중인 슬롯은 건드리지 않음
+                # Do not touch a slot currently being deployed
                 scope_slots.append({"market": market, "sniper_id": sniper_id, "age_min": 0.0,
                                      "budget_usdt": float(stored.get("budget_usdt") or 0.0),
                                      "has_pos": False, "idle_left_sec": float(idle_sec),
@@ -707,24 +707,24 @@ class ScopeRotationMixin:
             slot["active_age_sec"] = round(max(0.0, age), 1)
             slot["has_pos"] = has_pos
             if has_pos:
-                continue  # 보유 중이면 교체 안 함
+                continue  # Don't rotate while holding a position
 
-            # [FIX 2026-03-10] 포지션 없는 슬롯 = 매도 완료 or 매수 실패
-            # 즉시 release하면 autofill→release 무한 반복 발생.
-            # → 쿨다운(autopilot_scope_cooldown_min, 기본 60분) 이후에만 release.
-            # 매수 후 매도 완료 시: sold_release에서 처리. 여기서는 매수 실패 방어.
+            # [FIX 2026-03-10] A slot with no position = sell completed or buy failed
+            # Releasing immediately causes an infinite autofill->release loop.
+            # -> Only release after the cooldown (autopilot_scope_cooldown_min, default 60 min).
+            # When a buy then sell completes: handled in sold_release. Here we guard against buy failure.
             scope_deploy_ts_slot = float(params.get("scope_deploy_ts") or 0.0)
             slot_age_since_deploy = (now - scope_deploy_ts_slot) if scope_deploy_ts_slot > 0 else age
-            # idle_sec = idle_min * 60 (기본 5분*60=300초)
-            # 슬롯 배치 후 idle_sec 이상 경과해야 release 대상으로 분류
+            # idle_sec = idle_min * 60 (default 5 min * 60 = 300 sec)
+            # Must be idle_sec past slot placement to be classified as a release target
             if slot_age_since_deploy < float(idle_sec):
-                # 아직 idle_min 안 지남 → 유지 (충분한 시간을 줘야 매수 시도 가능)
+                # Not yet past idle_min -> keep (need enough time to allow a buy attempt)
                 continue
             slot["idle_left_sec"] = 0.0
             slot["age_min"] = round(max(0.0, age) / 60, 1)
             idle_slots.append(slot)
 
-        # sniper_store 누락 시 context 기반 SNIPERS 슬롯 보강
+        # Supplement SNIPERS slots from context when missing in sniper_store
         for market, ctx in list(self.system.coordinator.contexts.items()):
             mk = str(market or "").strip().upper()
             if not mk or mk in scope_seen_markets:
@@ -750,7 +750,7 @@ class ScopeRotationMixin:
             try:
                 budget_usdt = float(self.system.oma_registry.get_budget_usdt(mk) or 0.0)
             except (TypeError, ValueError):
-                logger.warning("[Autopilot] Scope 슬롯 예산 조회 실패: %s → 0 USDT", mk)
+                logger.warning("[Autopilot] Scope slot budget lookup failed: %s -> 0 USDT", mk)
                 budget_usdt = 0.0
             overflow_hold_until_ts = _scope_overflow_hold_until(params)
 
@@ -784,7 +784,7 @@ class ScopeRotationMixin:
             slot["has_pos"] = has_pos
             if has_pos:
                 continue
-            # [FIX 2026-03-10] context 기반 슬롯도 동일하게 idle_sec 대기
+            # [FIX 2026-03-10] Context-based slots also wait idle_sec the same way
             scope_deploy_ts_ctx = float(params.get("scope_deploy_ts") or 0.0)
             ctx_slot_age = (now - scope_deploy_ts_ctx) if scope_deploy_ts_ctx > 0 else age
             if ctx_slot_age < float(idle_sec):
@@ -793,8 +793,8 @@ class ScopeRotationMixin:
             slot["age_min"] = round(max(0.0, age) / 60, 1)
             idle_slots.append(slot)
 
-        # alpha 슬롯이 실제로 생성된 순간부터 TTL 카운트 시작.
-        # 이미 base를 초과한 상태라면 지금을 시작시점으로 잡아 만료 후 base 목표로 복귀시킨다.
+        # Start the TTL countdown from the moment alpha slots are actually created.
+        # If already over base, treat now as the start so it reverts to the base target after expiry.
         if scope_target_alpha > 0 and scope_alpha_started_ts <= 0 and len(scope_slots) > scope_target_base:
             scope_alpha_started_ts = now
             try:
@@ -841,9 +841,9 @@ class ScopeRotationMixin:
                 logger.warning("[SCOPE] fallback: %s", exc, exc_info=True)
             return True
 
-        # 목표 슬롯 수 초과분 반납 (보유 슬롯은 제외)
-        # [2026-03-07] 수동 overflow(scope_overflow_manual=True) 슬롯은 trim 대상에서 제외
-        # 수동 추가한 슬롯은 매도 완료 시 _release_scope_sold_slots()에서 자연 감소
+        # Return slots exceeding the target count (held slots excluded)
+        # [2026-03-07] Manual overflow (scope_overflow_manual=True) slots are excluded from trimming
+        # Manually added slots naturally decrease via _release_scope_sold_slots() when a sell completes
         if len(scope_slots) > scope_target_hard:
             over = len(scope_slots) - scope_target_hard
             trimmed_markets: Set[str] = set()
@@ -851,7 +851,7 @@ class ScopeRotationMixin:
                 s
                 for s in scope_slots
                 if (not bool(s.get("has_pos")))
-                and not bool(s.get("is_manual_overflow"))  # 수동 overflow 보호
+                and not bool(s.get("is_manual_overflow"))  # protect manual overflow
                 and float(s.get("overflow_hold_until_ts") or 0.0) <= now
             ]
             removable.sort(key=lambda s: float(s.get("age_min") or 0.0), reverse=True)
@@ -938,9 +938,9 @@ class ScopeRotationMixin:
             logger.warning("ScopeRotationMixin._release_scope_slot suppressed exception", exc_info=True)
             quick_rotate_max = 2
 
-        # [2026-03-07] Boot warm-up: 서버 부팅 후 3분간은 가격 데이터 불안정
-        # → autofill/rotation 차단 (복원된 기존 슬롯 관리는 유지)
-        _BOOT_WARMUP_SEC = 60.0  # 1분
+        # [2026-03-07] Boot warm-up: price data is unstable for a few minutes after server boot
+        # -> block autofill/rotation (management of restored existing slots continues)
+        _BOOT_WARMUP_SEC = 60.0  # 1 min
         boot_ts = getattr(self, "_boot_ts", 0.0) or 0.0
         is_warming_up = boot_ts > 0 and (now - boot_ts) < _BOOT_WARMUP_SEC
         if is_warming_up:
@@ -956,9 +956,10 @@ class ScopeRotationMixin:
             and float(s.get("active_age_sec") or 0.0) >= float(quick_rotate_min_sec)
             and float(s.get("active_age_sec") or 0.0) < float(idle_sec)
         ]
-        # 과도한 Tick 방지를 위해 자동 스캔은 "실제 부족 슬롯(fill_needed>0)" 또는
-        # "교체 가능한 idle 슬롯(idle_slots>0)" 또는
-        # "pre-idle quick rotate 대상 슬롯"이 있을 때만 수행
+        # To avoid excessive ticks, run the auto-scan only when there are
+        # "actually missing slots (fill_needed>0)" or
+        # "replaceable idle slots (idle_slots>0)" or
+        # "pre-idle quick-rotate target slots"
         scan_needed = (
             fill_needed > 0
             or len(idle_slots) > 0
@@ -968,9 +969,9 @@ class ScopeRotationMixin:
         if not scan_needed:
             return rotated
 
-        # 2) multi-scan으로 유망 후보 탐색
-        # 부족 슬롯(fill)이 있을 때는 상위 소수 후보(top5~10)만 보면
-        # 이미 점유된 마켓에 막혀 자동충원이 멈출 수 있어 조회 폭을 넓힌다.
+        # 2) Search for promising candidates via multi-scan
+        # When there are missing slots (fill), looking at only the top few candidates (top 5-10)
+        # risks autofill stalling because those markets are already occupied, so widen the lookup.
         scan_count = 100
         scan_top_n = min(scan_count, max(30, len(idle_slots) + fill_needed + 10))
         try:
@@ -1004,7 +1005,7 @@ class ScopeRotationMixin:
                     top_n=scan_top_n,
                     scan_count=scan_count,
                     force_refresh=True,
-                    min_confidence=10.0,  # 스캔은 넓게, autofill 필터에서 min_conf 적용
+                    min_confidence=10.0,  # scan wide; apply min_conf in the autofill filter
                     focus_market="",
                     min_price=min_price,
                     max_price=max_price,
@@ -1020,22 +1021,22 @@ class ScopeRotationMixin:
         if not candidates:
             return rotated
 
-        # adaptive cooldown용 캐시 갱신
+        # Update the cache used for adaptive cooldown
         self.system._scope_scan_cache = candidates
 
-        # 사용 중/쿨다운/기존 scope 마켓 제외
+        # Exclude in-use / cooldown / existing scope markets
         occupied_set: Set[str] = set()
         try:
             snap = self.system.oma_registry.snapshot()
-            # WATCH 전부를 점유로 보면 Scope 자동충원이 과도하게 막히므로
-            # 실제 운용 충돌이 나는 ACTIVE/RECOVERY만 제외한다.
+            # Treating all WATCH as occupied would over-block scope autofill,
+            # so exclude only ACTIVE/RECOVERY where real operating conflicts arise.
             for bucket in ("active", "recovery"):
                 for row in (snap.get(bucket) or []):
                     mk = (row.get("market") if isinstance(row, dict) else row) or ""
                     if mk:
                         occupied_set.add(str(mk).strip().upper())
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[SCOPE] 실제 운용 충돌이 나는 ACTIVE/RECOVERY만 제외한다.: %s", exc, exc_info=True)
+            logger.warning("[SCOPE] exclude only ACTIVE/RECOVERY with real operating conflicts: %s", exc, exc_info=True)
         strategy_occupied_set: Set[str] = set()
         try:
             for mk, ctx in list(self.system.coordinator.contexts.items()):
@@ -1053,11 +1054,11 @@ class ScopeRotationMixin:
                     continue
                 strategy_occupied_set.add(market)
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[SCOPE] 실제 운용 충돌이 나는 ACTIVE/RECOVERY만 제외한다.: %s", exc, exc_info=True)
+            logger.warning("[SCOPE] exclude only ACTIVE/RECOVERY with real operating conflicts: %s", exc, exc_info=True)
         cooldown_set = self.get_cooldown_markets(now_ts=now)
         existing_scope_set: Set[str] = {str(s.get("market") or "").strip().upper() for s in scope_slots}
 
-        # [중첩 금지] sniper_store의 regular SNIPER(profile≠SNIPERS) 코인도 scope 후보 제외
+        # [no overlap] Also exclude regular SNIPER (profile != SNIPERS) coins in sniper_store from scope candidates
         regular_sniper_set: Set[str] = set()
         try:
             from app.manager.sniper_position_store import sniper_store as _sniper_store
@@ -1071,9 +1072,9 @@ class ScopeRotationMixin:
                 if not (_prof == "SNIPERS" and _src == "precision_scope"):
                     regular_sniper_set.add(_mk)
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[SCOPE] [중첩 금지] sniper_store의 regular SNIPER(profile SNIPE: %s", exc, exc_info=True)
+            logger.warning("[SCOPE] [no overlap] regular SNIPER exclusion in sniper_store: %s", exc, exc_info=True)
 
-        # 슬롯 교체/충원 공통 점수 계산 헬퍼
+        # Shared score-calculation helper for slot rotation/fill
         def _score(v: Any) -> float:
             try:
                 return float(v or 0.0)
@@ -1091,7 +1092,7 @@ class ScopeRotationMixin:
                 _score(wave.get("net_profit_per_cycle_pct")),
             )
 
-        # 스캔 결과에서 마켓별 최고 스냅샷을 보관(기존 슬롯의 현재 점수 참조용)
+        # Keep the best snapshot per market from scan results (for referencing existing slots' current scores)
         candidate_by_market: Dict[str, Dict[str, Any]] = {}
         for c in candidates:
             market = str(c.get("market") or "").strip().upper()
@@ -1101,10 +1102,10 @@ class ScopeRotationMixin:
             if prev is None or _candidate_score_tuple(c) > _candidate_score_tuple(prev):
                 candidate_by_market[market] = c
 
-        # [FIX] 기존 슬롯 live 점수 동기화 + 스캔 누락 슬롯 fallback 보완
-        # - 스캔에 포함된 슬롯: params에 live 점수 갱신 (다음 스캔 누락 시 fallback용)
-        # - 스캔에 없는 슬롯: 저장된 live/deploy 점수로 candidate_by_market 보완
-        #   → 스캔 top-N 밖으로 밀린 슬롯을 confidence=0으로 오판해 즉시 교체하는 버그 방지
+        # [FIX] Sync existing slots' live scores + supplement fallback for slots missing from the scan
+        # - Slots present in the scan: update live score into params (fallback for the next scan miss)
+        # - Slots not in the scan: supplement candidate_by_market with stored live/deploy scores
+        #   -> prevents the bug where a slot pushed outside scan top-N is misjudged as confidence=0 and rotated out immediately
         for _slot in scope_slots:
             _mk = str(_slot.get("market") or "").strip().upper()
             if not _mk:
@@ -1120,7 +1121,7 @@ class ScopeRotationMixin:
                     continue
                 _item = candidate_by_market.get(_mk)
                 if _item:
-                    # 스캔 결과에 있음 → live 점수를 params에 갱신
+                    # Present in scan results -> update live score into params
                     _params["live_confidence"] = round(float(_item.get("confidence") or 0.0), 2)
                     _params["live_rank_score"] = round(float(_item.get("rank_score") or 0.0), 6)
                 else:
@@ -1148,7 +1149,7 @@ class ScopeRotationMixin:
                             "entry_gate": dict(_eval_result.get("entry_gate") or {}),
                         }
                         continue
-                    # 스캔 결과에 없음 → 저장된 점수로 candidate_by_market 보완
+                    # Not in scan results -> supplement candidate_by_market with stored scores
                     _conf = float(_params.get("live_confidence") or _params.get("deploy_confidence") or 0.0)
                     _rank = float(_params.get("live_rank_score") or _params.get("deploy_rank_score") or 0.0)
                     if _conf > 0 or _rank > 0:
@@ -1158,15 +1159,15 @@ class ScopeRotationMixin:
                             "rank_score": _rank,
                         }
             except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[SCOPE] 스캔 결과에 없음   저장된 점수로 candidate_by_market 보완: %s", exc, exc_info=True)
+                logger.warning("[SCOPE] not in scan results; supplement candidate_by_market with stored scores: %s", exc, exc_info=True)
 
         available: List[Dict[str, Any]] = []
         for c in candidates:
             market = str(c.get("market") or "").strip().upper()
             if not market:
                 continue
-            # entry_gate는 deep analysis에서만 생성됨.
-            # multi_scan(경량)에는 entry_gate가 없으므로 있을 때만 체크.
+            # entry_gate is only produced by deep analysis.
+            # multi_scan (lightweight) has no entry_gate, so check it only when present.
             _eg = c.get("entry_gate")
             if _eg is not None and not bool(_eg.get("ok", False)):
                 continue
@@ -1178,12 +1179,12 @@ class ScopeRotationMixin:
                 continue
             if market in existing_scope_set:
                 continue
-            if market in regular_sniper_set:  # [중첩 금지] regular SNIPER 등록된 코인 제외
+            if market in regular_sniper_set:  # [no overlap] exclude coins registered as regular SNIPER
                 continue
             available.append(c)
 
         if available:
-            # 자동충원/교체는 점수 높은 코인부터 우선 배치한다.
+            # Autofill/rotation deploys highest-scoring coins first.
             available.sort(
                 key=lambda c: _candidate_score_tuple(c),
                 reverse=True,
@@ -1207,15 +1208,15 @@ class ScopeRotationMixin:
             price: float,
             acc_vol_24h: float,
         ) -> float:
-            """[근본4] 투자금 동적 배분: 신뢰도/가격대/유동성 기반.
+            """[root4] Dynamic budget allocation: based on confidence / price tier / liquidity.
 
-            - 신뢰도 높을수록 더 많이 투자 (최대 1.5배)
-            - 저가/저유동성 코인은 슬리피지 방지를 위해 축소 (과도한 감점 방지)
-            - 최소 default_budget * 0.3, 최대 default_budget * 2.0
+            - Higher confidence -> invest more (up to 1.5x)
+            - Low-price/low-liquidity coins are scaled down to avoid slippage (avoid over-penalizing)
+            - min default_budget * 0.3, max default_budget * 2.0
             """
             base = float(default_budget)
 
-            # (a) 신뢰도 배수: 55% → 0.85x, 70% → 1.0x, 85%+ → 1.5x
+            # (a) Confidence multiplier: 55% -> 0.85x, 70% -> 1.0x, 85%+ -> 1.5x
             if confidence >= 85:
                 conf_mul = 1.5
             elif confidence >= 75:
@@ -1227,8 +1228,8 @@ class ScopeRotationMixin:
             else:
                 conf_mul = 0.7
 
-            # (b) 저가 코인 축소: 틱/스프레드 비율이 높아 슬리피지 위험
-            #     완화: 최소 0.7 (이전 0.5 → 3중 곱셈 시 과도한 감점 방지)
+            # (b) Scale down low-price coins: high tick/spread ratio means slippage risk
+            #     Relaxed: floor 0.7 (was 0.5 -> avoid over-penalizing under triple multiplication)
             price_mul = 1.0
             if price < 100:
                 price_mul = 0.7
@@ -1237,18 +1238,18 @@ class ScopeRotationMixin:
             elif price < 1000:
                 price_mul = 0.9
 
-            # (c) 유동성 기반: 24h 거래대금이 작으면 축소
-            #     완화: 최소 0.6 (이전 0.5)
+            # (c) Liquidity-based: scale down when 24h turnover is small
+            #     Relaxed: floor 0.6 (was 0.5)
             liq_mul = 1.0
-            if acc_vol_24h < 500_000:  # 50만 USDT 미만
+            if acc_vol_24h < 500_000:  # under 500K USDT
                 liq_mul = 0.6
-            elif acc_vol_24h < 1_000_000:  # 100만 USDT 미만
+            elif acc_vol_24h < 1_000_000:  # under 1M USDT
                 liq_mul = 0.75
-            elif acc_vol_24h < 3_000_000:  # 300만 USDT 미만
+            elif acc_vol_24h < 3_000_000:  # under 3M USDT
                 liq_mul = 0.85
 
             result = base * conf_mul * price_mul * liq_mul
-            # 최소 투자금: default_budget의 30%
+            # Minimum budget: 30% of default_budget
             floor = max(5.0, base * 0.3)
             return max(floor, min(base * 2.0, round(result, 0)))
 
@@ -1282,11 +1283,11 @@ class ScopeRotationMixin:
                 "source": "precision_scope",
                 "deploy_confidence": float(deploy_confidence or 0.0),
                 "deploy_rank_score": float(deploy_rank_score or 0.0),
-                "scope_deploy_ts": time.time(),  # [FIX M1] 배포 시간 기록 (조기 정리 방지)
+                "scope_deploy_ts": time.time(),  # [FIX M1] record deploy time (prevent early cleanup)
             }
 
         def _cancel_scope_pending(market: str) -> None:
-            """슬롯 교체 시 미체결 주문 취소."""
+            """Cancel any unfilled order during slot rotation."""
             if not hasattr(self.system, "order_fsm") or not self.system.order_fsm:
                 return
             ctx = self.system.coordinator.get_context(market)
@@ -1346,8 +1347,8 @@ class ScopeRotationMixin:
             })
             ctx.strategy_mode = "SNIPER(s)"
 
-            # [2026-03-07] 로테이션 교체 시 이전 슬롯의 경과시간 이월
-            # → 20분 완화 타이머 & BPS decay가 0부터 재시작되지 않음
+            # [2026-03-07] Carry over the previous slot's elapsed time on rotation
+            # -> the 20-min relaxation timer & BPS decay don't restart from 0
             if elapsed_carry_sec > 0:
                 ctx.set_var("snipers_scope_elapsed_carry", elapsed_carry_sec)
 
@@ -1356,9 +1357,9 @@ class ScopeRotationMixin:
                 "params": deploy_params,
             }
 
-            # [2026-03-08] 즉시매수 구조:
-            # instant_buy=True → 스캔에서 신뢰도+Fire 조건 동시 충족 확인 후 배치와 동시에 매수
-            # instant_buy=False → 수동 배치 또는 fallback (SniperPlugin.decide()가 Fire 판단)
+            # [2026-03-08] Instant-buy structure:
+            # instant_buy=True -> after confirming confidence+Fire conditions in the scan, buy at deploy time
+            # instant_buy=False -> manual placement or fallback (SniperPlugin.decide() judges Fire)
             force_buy_now = instant_buy
             fsm = getattr(self.system, "order_fsm", None)
 
@@ -1370,10 +1371,10 @@ class ScopeRotationMixin:
                     pos = getattr(ctx, "position", None) or {}
                     has_pos = float(pos.get("qty", 0) or 0) > 0
                 except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                    logger.warning("[SCOPE] instant_buy=False   수동 배치 또는 fallback (SniperPlugi: %s", exc, exc_info=True)
+                    logger.warning("[SCOPE] instant_buy=False; manual placement or fallback (SniperPlugin): %s", exc, exc_info=True)
 
                 if not has_pos and current_price > 0:
-                    if force_buy_now:  # 자동 경로: 항상 False → SniperPlugin이 Fire 판단
+                    if force_buy_now:  # Auto path: always False -> SniperPlugin judges Fire
                         try:
                             ok, msg = fsm.submit_market_buy(
                                 ctx=ctx,
@@ -1389,8 +1390,8 @@ class ScopeRotationMixin:
                         except (AttributeError, TypeError, ValueError) as exc:
                             logger.warning("[ScopeRotation] market_buy error %s: %s", market, exc)
 
-                    # [2026-03-07] trap 모드도 자동 경로에서는 비활성화
-                    # SniperPlugin.decide()가 BPS Fire 점수 기반으로 매수 타이밍 결정
+                    # [2026-03-07] trap mode is also disabled on the auto path
+                    # SniperPlugin.decide() determines buy timing based on the BPS Fire score
                     # elif deploy_mode == "trap": ...  (disabled)
 
             sniper_store.save_position(new_sniper_id, store_data)
@@ -1398,10 +1399,10 @@ class ScopeRotationMixin:
 
             return new_sniper_id
 
-        # 3) [2026-03-08] 즉시매수 구조: idle 슬롯(WAITING, 포지션 없음)은 정리(release)만 한다.
-        # 기존: idle 슬롯 → 다른 코인으로 교체(rotation)
-        # 변경: idle 슬롯 → 비움(release) → autofill에서 즉시매수 조건 충족 코인만 배치
-        # HOLDING 슬롯은 L3146에서 이미 skip되므로 idle_slots에는 WAITING만 포함.
+        # 3) [2026-03-08] Instant-buy structure: idle slots (WAITING, no position) are only released.
+        # Before: idle slot -> rotate to another coin
+        # Changed: idle slot -> release -> autofill deploys only coins meeting instant-buy conditions
+        # HOLDING slots are already skipped earlier, so idle_slots contains only WAITING.
         used_markets: Set[str] = set()
         rotated_old_markets: Set[str] = set()
         for slot in idle_slots:
@@ -1437,13 +1438,13 @@ class ScopeRotationMixin:
             except (KeyError, AttributeError, TypeError, ValueError) as exc:
                 logger.warning("[Autopilot/ScopeInstant] release %s failed: %s", old_market, exc)
 
-        # 3b) [2026-03-08] 즉시매수 구조에서는 quick rotation 불필요
-        # WAITING 슬롯은 이미 idle release에서 정리됨.
-        # HOLDING 슬롯은 교체 불가. 따라서 이 블록은 skip.
-        # 기존 로직은 유지하되, quick_rotate_max=0으로 실질 비활성화.
+        # 3b) [2026-03-08] Quick rotation is unnecessary in the instant-buy structure
+        # WAITING slots are already cleaned up in idle release.
+        # HOLDING slots cannot be rotated. So this block is skipped.
+        # The existing logic is kept but effectively disabled with quick_rotate_max=0.
         quick_rotate_max = 0
-        # - 목적: (비활성화됨) 낮아진 슬롯이 시간을 점유하는 동안 더 강한 후보가 대기하는 문제를 완화
-        # - 보호: has_pos=True 슬롯은 절대 교체하지 않음
+        # - Purpose: (disabled) mitigate the problem of a weakened slot holding time while a stronger candidate waits
+        # - Protection: never rotate has_pos=True slots
         def _is_better_for_quick_rotate(
             *,
             old_item: Optional[Dict[str, Any]],
@@ -1457,7 +1458,7 @@ class ScopeRotationMixin:
             if new_t <= old_t:
                 return False, old_rank, new_rank, old_conf, new_conf
 
-            # rank_score 10% 이상 + confidence 5%p 이상 동시 만족해야 교체
+            # Rotate only if both rank_score >= +10% and confidence >= +5%p are satisfied
             conf_gap_required = 5.0
             if old_rank > 0:
                 rank_ok = new_rank >= old_rank * (1.0 + quick_rotate_min_rank_ratio)
@@ -1465,13 +1466,13 @@ class ScopeRotationMixin:
                 if rank_ok and conf_ok:
                     return True, old_rank, new_rank, old_conf, new_conf
             else:
-                # 현재 슬롯 점수 없음 → 유의미한 신규 후보면 교체 허용
+                # No current slot score -> allow rotation if the new candidate is meaningful
                 if new_rank > 0.0 and new_conf >= autofill_min_conf:
                     return True, old_rank, new_rank, old_conf, new_conf
 
             return False, old_rank, new_rank, old_conf, new_conf
 
-        candidate_idx = 0  # [FIX 2026-03-15] 미정의 변수 → 초기화 (quick_rotate 활성화 시 NameError 방지)
+        candidate_idx = 0  # [FIX 2026-03-15] undefined variable -> initialize (prevents NameError when quick_rotate is active)
         if quick_rotate_max > 0 and candidate_idx < len(available):
             pre_idle_slots: List[Dict[str, Any]] = []
             for slot in scope_slots:
@@ -1493,7 +1494,7 @@ class ScopeRotationMixin:
                 slot["live_confidence"] = round(cur_t[2], 2)
                 pre_idle_slots.append(slot)
 
-            # 약한 슬롯부터 교체: strongest candidate를 weakest slot에 우선 매칭
+            # Rotate weakest slots first: match the strongest candidate to the weakest slot
             pre_idle_slots.sort(
                 key=lambda s: (
                     float(s.get("live_rank_score") or 0.0),
@@ -1527,7 +1528,7 @@ class ScopeRotationMixin:
                     new_item=candidate,
                 )
                 if not better:
-                    # 후보는 점수 내림차순이고 슬롯은 약한 순 정렬이므로, 여기서 중단해도 안전
+                    # Candidates are sorted descending by score and slots ascending by weakness, so stopping here is safe
                     break
 
                 new_market = str(candidate.get("market") or "").strip().upper()
@@ -1540,7 +1541,7 @@ class ScopeRotationMixin:
                     try:
                         sniper_store.remove_position(old_sniper_id or old_market)
                     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-                        logger.warning("[SCOPE] 후보는 점수 내림차순이고 슬롯은 약한 순 정렬이므로, 여기서 중단해도 안전: %s", exc, exc_info=True)
+                        logger.warning("[SCOPE] candidates sorted desc by score, slots asc by weakness, stopping here is safe: %s", exc, exc_info=True)
                     self.system.oma_set_market(
                         market=old_market,
                         state=MarketState.WATCH,
@@ -1557,7 +1558,7 @@ class ScopeRotationMixin:
                     new_support = float(new_sr.get("support", 0) or 0)
                     new_tp = float(new_params.get("tp_pct", 0) or 0)
 
-                    # 이전 슬롯 경과시간 이월
+                    # Carry over the previous slot's elapsed time
                     _old_deploy_ts2 = float(slot.get("params", {}).get("scope_deploy_ts", 0) or 0)
                     _carry_sec2 = max(0.0, time.time() - _old_deploy_ts2) if _old_deploy_ts2 > 0 else 0.0
 
@@ -1616,11 +1617,11 @@ class ScopeRotationMixin:
                 except (OSError, KeyError, AttributeError, TypeError, ValueError, OverflowError) as exc:
                     logger.warning("[Autopilot/ScopeRotation] pre-idle %s->%s failed: %s", old_market, new_market, exc)
 
-        # 4) 즉시매수 구조: 빈 슬롯이 있을 때, 신뢰도 높은 코인 발견 → 배치+즉시매수
-        # [2026-03-08] 대기→즉시 전환: 슬롯을 미리 채워놓고 Fire를 기다리지 않음.
-        # 스캔 시점에 신뢰도가 즉시매수 기준(instant_buy_min_conf)을 넘으면 바로 매수.
-        # 기준 미달이면 슬롯을 비워둠 — 좋은 기회가 올 때까지 기다림.
-        # 운영자가 설정한 즉시매수 기준 (UI에서 조절 가능)
+        # 4) Instant-buy structure: when there's an empty slot, find a high-confidence coin -> deploy + instant buy
+        # [2026-03-08] Wait->instant shift: don't pre-fill a slot and wait for Fire.
+        # If confidence at scan time exceeds the instant-buy threshold (instant_buy_min_conf), buy right away.
+        # If below threshold, leave the slot empty -- wait until a good opportunity comes.
+        # Operator-configured instant-buy threshold (adjustable in the UI)
         instant_buy_base_raw = getattr(
             self.system,
             "autopilot_scope_instant_buy_min_conf",
@@ -1632,10 +1633,10 @@ class ScopeRotationMixin:
             logger.warning("state._is_better_for_quick_rotate suppressed exception", exc_info=True)
             instant_buy_base = 55.0
 
-        # BTC 레짐 기반 자동 조절:
-        # TREND/RECOVERY: 기준 그대로 ~ 약간 느슨
-        # DRIFT: -5%p (소강 → 기회 적으므로 느슨하게)
-        # SHOCK: +10%p (급변 → 엄격하게, 함부로 진입 방지)
+        # BTC regime-based auto-adjustment:
+        # TREND/RECOVERY: threshold as-is ~ slightly loose
+        # DRIFT: -5%p (lull -> fewer opportunities, so loosen)
+        # SHOCK: +10%p (sharp moves -> tighten, prevent reckless entry)
         _btc_regime = "TREND"
         try:
             from app.monitor.btc_leading_signal import get_btc_leading_detector
@@ -1643,36 +1644,36 @@ class ScopeRotationMixin:
             if _det:
                 _btc_regime = str(_det.get_regime_for_lightning() or "TREND").upper()
         except (AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[SCOPE] SHOCK: +10%%p (급변   엄격하게, 함부로 진입 방지): %s", exc, exc_info=True)
+            logger.warning("[SCOPE] SHOCK: +10%%p (sharp moves -> tighten, prevent reckless entry): %s", exc, exc_info=True)
 
         _regime_adj = {"TREND": 0.0, "RECOVERY": -3.0, "DRIFT": -5.0, "SHOCK": 10.0}.get(_btc_regime, 0.0)
         instant_buy_after_regime = max(30.0, min(95.0, instant_buy_base + _regime_adj))
 
-        # [2026-03-08] 시간 감쇠: 빈 슬롯 대기 시간이 길수록 기준 완화
-        # 10분마다 -2%p, 최저 = 설정값 * 0.7
+        # [2026-03-08] Time decay: the longer an empty slot waits, the more the threshold relaxes
+        # -2%p every 10 min, floor = configured value * 0.7
         _empty_since = float(getattr(self.system, "_scope_empty_since_ts", 0.0) or 0.0)
         remaining_fill = max(0, scope_target_autofill - len(existing_scope_set))
         if remaining_fill > 0:
             if _empty_since <= 0:
-                # 빈 슬롯이 처음 발생한 시점 기록
+                # Record when the empty slot first appeared
                 _empty_since = now
                 try:
                     setattr(self.system, "_scope_empty_since_ts", now)
                 except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-                    logger.warning("[SCOPE] 빈 슬롯이 처음 발생한 시점 기록: %s", exc, exc_info=True)
+                    logger.warning("[SCOPE] record when the empty slot first appeared: %s", exc, exc_info=True)
             _wait_min = (now - _empty_since) / 60.0
-            _decay_pct = (_wait_min / 10.0) * 2.0  # 10분마다 -2%p
-            _floor = instant_buy_base * 0.7  # 최저 = 설정값의 70%
+            _decay_pct = (_wait_min / 10.0) * 2.0  # -2%p every 10 min
+            _floor = instant_buy_base * 0.7  # floor = 70% of the configured value
             instant_buy_min_conf = max(_floor, instant_buy_after_regime - _decay_pct)
             instant_buy_min_conf = max(30.0, min(95.0, instant_buy_min_conf))
         else:
             instant_buy_min_conf = instant_buy_after_regime
-            # 빈 슬롯 없으면 타이머 리셋
+            # No empty slots -> reset the timer
             if _empty_since > 0:
                 try:
                     setattr(self.system, "_scope_empty_since_ts", 0.0)
                 except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-                    logger.warning("[SCOPE] 빈 슬롯 없으면 타이머 리셋: %s", exc, exc_info=True)
+                    logger.warning("[SCOPE] no empty slots -> reset the timer: %s", exc, exc_info=True)
 
         if remaining_fill > 0:
             scope_budgets = [float(s.get("budget_usdt") or 0.0) for s in scope_slots if float(s.get("budget_usdt") or 0.0) > 0]
@@ -1707,7 +1708,7 @@ class ScopeRotationMixin:
                         continue
                     if new_market in existing_scope_set:
                         continue
-                    # 즉시매수 최소 신뢰도: 이 기준 미달이면 슬롯을 비워둠
+                    # Instant-buy minimum confidence: leave the slot empty if below this threshold
                     if new_conf < instant_buy_min_conf:
                         continue
                     if is_alpha_slot and new_conf < scope_alpha_min_conf:
@@ -1724,7 +1725,7 @@ class ScopeRotationMixin:
                     _cand_conf = float(_cand.get("confidence") or 0.0)
                     _cand_rank = float(_cand.get("rank_score") or 0.0)
 
-                    # [근본4] 투자금 동적 배분
+                    # [root4] Dynamic budget allocation
                     _inst_budget = _calc_dynamic_budget(
                         default_budget=default_budget,
                         confidence=_cand_conf,
@@ -1750,7 +1751,7 @@ class ScopeRotationMixin:
                         try:
                             setattr(self.system, "autopilot_scope_alpha_started_ts", float(scope_alpha_started_ts))
                         except (TypeError, ValueError) as exc:
-                            logger.warning("[SCOPE] [근본4] 투자금 동적 배분: %s", exc, exc_info=True)
+                            logger.warning("[SCOPE] [root4] dynamic budget allocation: %s", exc, exc_info=True)
 
                     rotated.append({
                         "action": "fill",

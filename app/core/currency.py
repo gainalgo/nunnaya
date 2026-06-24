@@ -3,10 +3,10 @@
 # Autocoin OS v3-H — Quote Currency Abstraction Layer
 # ============================================================
 # 
-# 이 모듈은 시스템 전체에서 사용하는 기축통화(Quote Currency)를
-# 추상화합니다. Bybit USDT 전용.
+# This module abstracts the quote currency used across the entire
+# system. Bybit USDT only.
 #
-# 사용법:
+# Usage:
 #   from app.core.currency import Q
 #
 #   Q.symbol          # "USDT"
@@ -31,26 +31,26 @@ def _env_str(key: str, default: str = "") -> str:
 
 @dataclass(frozen=True)
 class CurrencyConfig:
-    """기축통화별 설정."""
+    """Per-quote-currency settings."""
     symbol: str                    # "USDT"
     name: str                      # "Korean Won" or "Tether"
-    min_order: float               # 최소 주문금액
-    order_unit: float              # 주문 단위
-    decimals: int                  # 소수점 자릿수 (금액 표시용)
-    market_prefix: str             # 마켓 접두사 (Bybit: "")
-    market_suffix: str             # 마켓 접미사 ("" or "USDT")
-    market_separator: str          # 마켓 구분자 ("-" or "/")
-    display_suffix: str            # 표시 접미사 (" USDT")
-    exchange: str                  # 거래소 이름 ("bybit")
-    api_base: str                  # API 기본 URL
-    order_side_buy: str            # 매수 표현 ("bid" or "buy")
-    order_side_sell: str           # 매도 표현 ("ask" or "sell")
-    # API 키 환경변수명
-    env_access_key: str            # 액세스 키 환경변수명
-    env_secret_key: str            # 시크릿 키 환경변수명
+    min_order: float               # minimum order amount
+    order_unit: float              # order unit
+    decimals: int                  # decimal places (for amount display)
+    market_prefix: str             # market prefix (Bybit: "")
+    market_suffix: str             # market suffix ("" or "USDT")
+    market_separator: str          # market separator ("-" or "/")
+    display_suffix: str            # display suffix (" USDT")
+    exchange: str                  # exchange name ("bybit")
+    api_base: str                  # API base URL
+    order_side_buy: str            # buy-side label ("bid" or "buy")
+    order_side_sell: str           # sell-side label ("ask" or "sell")
+    # API key env var names
+    env_access_key: str            # access key env var name
+    env_secret_key: str            # secret key env var name
 
 
-# Bybit USDT 통화 설정
+# Bybit USDT currency settings
 _CURRENCY_CONFIGS = {
     "USDT": CurrencyConfig(
         symbol="USDT",
@@ -73,9 +73,9 @@ _CURRENCY_CONFIGS = {
 
 
 class QuoteCurrency:
-    """기축통화 추상화 클래스.
-    
-    시스템 전체에서 일관된 통화 처리를 위한 싱글톤 인터페이스.
+    """Quote currency abstraction class.
+
+    Singleton interface for consistent currency handling across the system.
     """
     
     def __init__(self, symbol: str = "USDT"):
@@ -86,82 +86,82 @@ class QuoteCurrency:
     
     @property
     def config(self) -> CurrencyConfig:
-        """현재 통화 설정 반환."""
+        """Return the current currency settings."""
         return self._config
-    
+
     @property
     def symbol(self) -> str:
-        """통화 심볼 (예: "USDT")."""
+        """Currency symbol (e.g. "USDT")."""
         return self._config.symbol
-    
+
     @property
     def name(self) -> str:
-        """통화 이름."""
+        """Currency name."""
         return self._config.name
-    
+
     @property
     def min_order(self) -> float:
-        """최소 주문금액."""
+        """Minimum order amount."""
         return self._config.min_order
-    
+
     @property
     def order_unit(self) -> float:
-        """주문 단위."""
+        """Order unit."""
         return self._config.order_unit
-    
+
     @property
     def decimals(self) -> int:
-        """소수점 자릿수."""
+        """Decimal places."""
         return self._config.decimals
-    
+
     @property
     def exchange(self) -> str:
-        """거래소 이름."""
+        """Exchange name."""
         return self._config.exchange
-    
+
     @property
     def api_base(self) -> str:
-        """API 기본 URL."""
+        """API base URL."""
         return self._config.api_base
-    
+
     @property
     def is_usdt(self) -> bool:
-        """USDT 모드인지 확인."""
+        """Check whether running in USDT mode."""
         return self._symbol == "USDT"
-    
+
     # =========================================================================
-    # API 키 관련
+    # API keys
     # =========================================================================
-    
+
     @property
     def env_access_key(self) -> str:
-        """액세스 키 환경변수명."""
+        """Access key env var name."""
         return self._config.env_access_key
-    
+
     @property
     def env_secret_key(self) -> str:
-        """시크릿 키 환경변수명."""
+        """Secret key env var name."""
         return self._config.env_secret_key
-    
+
     def get_access_key(self) -> str:
-        """환경변수에서 액세스 키 조회."""
+        """Look up the access key from environment variables."""
         return os.getenv(self._config.env_access_key, "").strip()
-    
+
     def get_secret_key(self) -> str:
-        """환경변수에서 시크릿 키 조회."""
+        """Look up the secret key from environment variables."""
         return os.getenv(self._config.env_secret_key, "").strip()
-    
+
     def has_api_keys(self) -> bool:
-        """API 키가 설정되어 있는지 확인."""
+        """Check whether API keys are configured."""
         return bool(self.get_access_key() and self.get_secret_key())
-    
+
     # =========================================================================
-    # 금액 포맷팅
+    # Amount formatting
     # =========================================================================
-    
+
     def format(self, amount: float, *, with_suffix: bool = True) -> str:
-        """금액을 통화에 맞게 포맷팅.
-        
+        """Format an amount for the currency.
+
         Examples:
             50.00 → "50.00 USDT"
             1234.56 → "1,234.56 USDT"
@@ -181,7 +181,7 @@ class QuoteCurrency:
             return str(amount)
     
     def format_compact(self, amount: float) -> str:
-        """금액을 압축 형식으로 포맷팅 (K, M, B 접미사).
+        """Format an amount in compact form (K, M, B suffixes).
         
         Examples:
             1500000 → "1.5M"
@@ -204,24 +204,24 @@ class QuoteCurrency:
             return str(amount)
     
     # =========================================================================
-    # 마켓 심볼 변환
+    # Market symbol conversion
     # =========================================================================
-    
+
     def market(self, base: str) -> str:
-        """기본 통화로 마켓 심볼 생성.
-        
+        """Build a market symbol from the base currency.
+
         Args:
-            base: 기본 통화 (예: "BTC", "ETH")
-        
+            base: base currency (e.g. "BTC", "ETH")
+
         Returns:
             Example: "BTCUSDT"
             USDT: "BTCUSDT"
         """
         b = str(base).upper().strip()
-        # 이미 완전한 형식이면 그대로 반환
+        # Already a complete symbol — return as-is
         if self._is_complete_market(b):
             return b
-        # 접두사/접미사가 있으면 제거
+        # Strip any prefix/suffix
         b = self._extract_base(b)
         
         if self._config.market_prefix:
@@ -232,10 +232,10 @@ class QuoteCurrency:
             return f"{b}{self._config.market_separator}{self._config.symbol}"
     
     def market_ccxt(self, base: str) -> str:
-        """CCXT 형식의 마켓 심볼 생성 (예: "BTC/USDT").
-        
+        """Build a CCXT-style market symbol (e.g. "BTC/USDT").
+
         Args:
-            base: 기본 통화 (예: "BTC")
+            base: base currency (e.g. "BTC")
         
         Returns:
             "BTC/USDT"
@@ -244,10 +244,10 @@ class QuoteCurrency:
         return f"{b}/{self._config.symbol}"
     
     def market_ws(self, base: str) -> str:
-        """WebSocket 형식의 마켓 심볼 생성 (소문자).
-        
+        """Build a WebSocket-style market symbol (lowercase).
+
         Args:
-            base: 기본 통화 (예: "BTC")
+            base: base currency (e.g. "BTC")
         
         Returns:
             Example: "btcusdt"
@@ -256,13 +256,13 @@ class QuoteCurrency:
         return self.market(base).lower()
     
     def parse_market(self, market: str) -> Tuple[str, str]:
-        """마켓 심볼에서 base와 quote 추출.
-        
+        """Extract base and quote from a market symbol.
+
         Args:
-            market: 마켓 심볼 (예: "BTCUSDT", "BTC/USDT")
-        
+            market: market symbol (e.g. "BTCUSDT", "BTC/USDT")
+
         Returns:
-            (base, quote) 튜플 (예: ("BTC", "USDT"))
+            (base, quote) tuple (e.g. ("BTC", "USDT"))
         """
         m = str(market).upper().strip()
         
@@ -270,38 +270,38 @@ class QuoteCurrency:
         if m.startswith("BTC-"):
             return (m[4:], "BTC")
         
-        # BTC/USDT 형식
+        # BTC/USDT format
         if "/" in m:
             parts = m.split("/", 1)
             return (parts[0], parts[1])
-        
-        # BTCUSDT 형식
+
+        # BTCUSDT format
         for quote in ("USDT", "BUSD", "USDC"):
             # Bare quote symbols ("USDT") are not complete markets.
             # Require at least 1-char base to avoid parsing base="".
             if len(m) > len(quote) and m.endswith(quote):
                 return (m[:-len(quote)], quote)
         
-        # 알 수 없는 형식 - base만 반환
+        # Unknown format — return base only
         return (m, self._config.symbol)
-    
+
     def extract_base(self, market: str) -> str:
-        """마켓 심볼에서 기본 통화(base) 추출.
-        
+        """Extract the base currency from a market symbol.
+
         Args:
-            market: 마켓 심볼 (예: "BTCUSDT")
-        
+            market: market symbol (e.g. "BTCUSDT")
+
         Returns:
-            기본 통화 (예: "BTC")
+            base currency (e.g. "BTC")
         """
         base, _ = self.parse_market(market)
         return base
     
     def normalize(self, market: str) -> str:
-        """마켓 심볼을 현재 통화 형식으로 정규화.
-        
-        다양한 입력 형식을 현재 설정된 통화 형식으로 변환.
-        
+        """Normalize a market symbol to the current currency format.
+
+        Converts various input formats to the currently configured currency format.
+
         Examples:
             Bybit: "BTC" → "BTCUSDT"
             
@@ -310,36 +310,36 @@ class QuoteCurrency:
         return self.market(base)
     
     def _is_complete_market(self, s: str) -> bool:
-        """완전한 마켓 심볼인지 확인."""
+        """Check whether this is a complete market symbol."""
         return s.endswith("USDT") or s.endswith("BUSD") or "/" in s
-    
+
     def _extract_base(self, s: str) -> str:
-        """문자열에서 base 통화만 추출."""
+        """Extract just the base currency from a string."""
         base, _ = self.parse_market(s)
         return base
     
     # =========================================================================
-    # 주문 방향 변환
+    # Order side conversion
     # =========================================================================
-    
+
     @property
     def side_buy(self) -> str:
-        """매수 방향 문자열."""
+        """Buy-side string."""
         return self._config.order_side_buy
-    
+
     @property
     def side_sell(self) -> str:
-        """매도 방향 문자열."""
+        """Sell-side string."""
         return self._config.order_side_sell
-    
+
     def normalize_side(self, side: str) -> str:
-        """주문 방향을 현재 거래소 형식으로 정규화.
-        
+        """Normalize an order side to the current exchange's format.
+
         Args:
-            side: "buy", "sell", "bid", "ask" 중 하나
-        
+            side: one of "buy", "sell", "bid", "ask"
+
         Returns:
-            현재 거래소에 맞는 방향 문자열
+            side string matching the current exchange
         """
         s = str(side).lower().strip()
         if s in ("buy", "bid", "long"):
@@ -349,20 +349,20 @@ class QuoteCurrency:
         return s
     
     def is_buy_side(self, side: str) -> bool:
-        """매수 방향인지 확인."""
+        """Check whether this is a buy side."""
         return str(side).lower().strip() in ("buy", "bid", "long")
-    
+
     def is_sell_side(self, side: str) -> bool:
-        """매도 방향인지 확인."""
+        """Check whether this is a sell side."""
         return str(side).lower().strip() in ("sell", "ask", "short")
     
     # =========================================================================
-    # 금액 검증 및 변환
+    # Amount validation and conversion
     # =========================================================================
-    
+
     def floor_to_unit(self, amount: float) -> float:
-        """금액을 주문 단위로 내림.
-        
+        """Floor an amount to the order unit.
+
         Examples:
             USDT: 10.567 → 10.56
         """
@@ -371,22 +371,22 @@ class QuoteCurrency:
         return float(int(float(amount) / self._config.order_unit) * self._config.order_unit)
     
     def is_valid_order_amount(self, amount: float) -> bool:
-        """주문 금액이 최소 금액 이상인지 확인."""
+        """Check whether an order amount meets the minimum."""
         return float(amount) >= self._config.min_order
-    
+
     def validate_order_amount(self, amount: float) -> Tuple[bool, str]:
-        """주문 금액 검증 및 메시지 반환.
-        
+        """Validate an order amount and return a message.
+
         Returns:
-            (valid, message) 튜플
+            (valid, message) tuple
         """
         val = float(amount)
         if val < self._config.min_order:
-            return (False, f"최소 주문금액 미달: {self.format(val)} < {self.format(self._config.min_order)}")
+            return (False, f"Below minimum order amount: {self.format(val)} < {self.format(self._config.min_order)}")
         return (True, "")
     
     # =========================================================================
-    # 유틸리티
+    # Utilities
     # =========================================================================
     
     def __repr__(self) -> str:
@@ -396,7 +396,7 @@ class QuoteCurrency:
         return self._symbol
     
     def to_dict(self) -> dict:
-        """설정을 딕셔너리로 반환."""
+        """Return the settings as a dictionary."""
         return {
             "symbol": self._config.symbol,
             "name": self._config.name,
@@ -415,32 +415,32 @@ class QuoteCurrency:
 
 
 # ============================================================
-# 글로벌 싱글톤 인스턴스
+# Global singleton instance
 # ============================================================
 
-# 환경변수에서 기축통화 설정 로드 (Bybit = USDT)
+# Load the quote currency setting from environment variables (Bybit = USDT)
 _QUOTE_CURRENCY_SYMBOL = _env_str("QUOTE_CURRENCY", "USDT").upper()
 if _QUOTE_CURRENCY_SYMBOL not in _CURRENCY_CONFIGS:
     _QUOTE_CURRENCY_SYMBOL = "USDT"
 
-# 글로벌 인스턴스 (Q로 짧게 사용 가능)
+# Global instance (usable in short form as Q)
 Q = QuoteCurrency(_QUOTE_CURRENCY_SYMBOL)
 
 
 # ============================================================
-# 편의 함수 (직접 import 가능)
+# Convenience functions (directly importable)
 # ============================================================
 
 def get_quote_currency() -> QuoteCurrency:
-    """현재 설정된 기축통화 인스턴스 반환."""
+    """Return the currently configured quote currency instance."""
     return Q
 
 
 def set_quote_currency(symbol: str) -> QuoteCurrency:
-    """기축통화 변경 (런타임 전환용).
-    
-    주의: 이 함수는 글로벌 상태를 변경합니다.
-    일반적으로 서버 시작 시 환경변수로 설정하는 것을 권장합니다.
+    """Change the quote currency (for runtime switching).
+
+    Note: this function mutates global state.
+    Configuring it via an environment variable at server startup is generally recommended.
     """
     global Q
     Q = QuoteCurrency(symbol)
@@ -448,27 +448,27 @@ def set_quote_currency(symbol: str) -> QuoteCurrency:
 
 
 def format_amount(amount: float, *, with_suffix: bool = True) -> str:
-    """금액을 현재 통화에 맞게 포맷팅."""
+    """Format an amount for the current currency."""
     return Q.format(amount, with_suffix=with_suffix)
 
 
 def market(base: str) -> str:
-    """기본 통화로 마켓 심볼 생성."""
+    """Build a market symbol from the base currency."""
     return Q.market(base)
 
 
 def normalize_market(market_str: str) -> str:
-    """마켓 심볼을 현재 통화 형식으로 정규화."""
+    """Normalize a market symbol to the current currency format."""
     return Q.normalize(market_str)
 
 
 def extract_base(market_str: str) -> str:
-    """마켓 심볼에서 기본 통화 추출."""
+    """Extract the base currency from a market symbol."""
     return Q.extract_base(market_str)
 
 
 # ============================================================
-# 테스트용 예제
+# Examples for testing
 # ============================================================
 
 if __name__ == "__main__":

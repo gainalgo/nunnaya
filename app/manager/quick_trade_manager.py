@@ -1,8 +1,8 @@
-"""QuickTradeManager: 즉시/조건부 수동 거래 관리자
+"""QuickTradeManager: immediate/conditional manual trade manager
 
-- 임의 마켓(오토코인 미등록 포함) 거래 지원
-- 조건부 트리거: N분 내 최저/최고가 근접 시 실행
-- 가드 정책: global / entry_limit_only / force
+- Supports trading arbitrary markets (including ones not registered in the engine)
+- Conditional trigger: execute when price nears the N-minute low/high
+- Guard policies: global / entry_limit_only / force
 """
 
 from __future__ import annotations
@@ -19,56 +19,56 @@ import logging
 logger = logging.getLogger(__name__)
 
 class GuardPolicy(str, Enum):
-    """가드 적용 정책"""
-    GLOBAL = "global"                    # 모든 글로벌 가드 적용
-    ENTRY_LIMIT_ONLY = "entry_limit_only"  # LMT(Entry Limit)만 적용
-    FORCE = "force"                      # 모든 가드 무시 (emergency_stop 제외)
+    """Guard application policy"""
+    GLOBAL = "global"                    # apply all global guards
+    ENTRY_LIMIT_ONLY = "entry_limit_only"  # apply only LMT (Entry Limit)
+    FORCE = "force"                      # ignore all guards (except emergency_stop)
 
 class TriggerType(str, Enum):
-    """조건부 트리거 타입"""
-    NEAR_LOW = "near_low"    # N분 내 최저가 근접 시 매수
-    NEAR_HIGH = "near_high"  # N분 내 최고가 근접 시 매도
+    """Conditional trigger type"""
+    NEAR_LOW = "near_low"    # buy when price nears the N-minute low
+    NEAR_HIGH = "near_high"  # sell when price nears the N-minute high
 
 class OrderMode(str, Enum):
-    """주문 모드"""
-    IMMEDIATE = "immediate"      # 즉시 실행
-    CONDITIONAL = "conditional"  # 조건부 트리거 후 실행
+    """Order mode"""
+    IMMEDIATE = "immediate"      # execute immediately
+    CONDITIONAL = "conditional"  # execute after conditional trigger
 
 class AmountMode(str, Enum):
-    """금액 모드"""
-    QUOTE = "quote"    # 고정 금액 (USDT)
-    PERCENT = "percent"  # 잔고 대비 %
+    """Amount mode"""
+    QUOTE = "quote"    # fixed amount (USDT)
+    PERCENT = "percent"  # % of balance
 
 class QuickOrderStatus(str, Enum):
-    """Quick Order 상태"""
-    PENDING = "pending"      # 조건 대기 중
-    TRIGGERED = "triggered"  # 트리거됨, 주문 실행 중
-    PLACED = "placed"        # 주문 완료
-    FILLED = "filled"        # 체결 완료
-    CANCELLED = "cancelled"  # 취소됨
-    EXPIRED = "expired"      # 만료됨
-    FAILED = "failed"        # 실패
+    """Quick Order status"""
+    PENDING = "pending"      # waiting for condition
+    TRIGGERED = "triggered"  # triggered, order executing
+    PLACED = "placed"        # order placed
+    FILLED = "filled"        # order filled
+    CANCELLED = "cancelled"  # cancelled
+    EXPIRED = "expired"      # expired
+    FAILED = "failed"        # failed
 
 @dataclass
 class ConditionalConfig:
-    """조건부 주문 설정"""
-    lookback_min: int = 15           # N분 lookback
+    """Conditional order settings"""
+    lookback_min: int = 15           # N-minute lookback
     trigger: TriggerType = TriggerType.NEAR_LOW
     threshold_mode: Literal["pct", "quote"] = "pct"
-    threshold_value: float = 0.2     # % 또는 금액
-    expiry_sec: int = 1800           # 유효시간 (기본 30분)
+    threshold_value: float = 0.2     # percent or amount
+    expiry_sec: int = 1800           # validity period (default 30 min)
 
 @dataclass
 class ExecutionConfig:
-    """실행 설정"""
+    """Execution settings"""
     order_type: Literal["market", "limit"] = "market"
     limit_price_mode: str = "best_bid"  # best_bid / best_ask
 
 @dataclass
 class QuickOrder:
-    """Quick Trade 주문"""
+    """Quick Trade order"""
     quick_id: str
-    market: str    # 정규화된 마켓 (BTCUSDT)
+    market: str    # normalized market (BTCUSDT)
     side: Literal["buy", "sell"]
     
     amount_mode: AmountMode = AmountMode.QUOTE
@@ -135,7 +135,7 @@ class QuickOrder:
         )
 
 class QuickTradeManager:
-    """Quick Trade 관리자"""
+    """Quick Trade manager"""
     
     MAX_PENDING_PER_MARKET = 1
     MAX_PENDING_TOTAL = 20
@@ -145,23 +145,23 @@ class QuickTradeManager:
         self.system = system
         self.pending_orders: Dict[str, QuickOrder] = {}  # quick_id -> order
         self.price_history: Dict[str, deque] = {}  # market -> [(ts, price), ...]
-        self.history_max_minutes = 120  # 최대 보관 시간 (분)
+        self.history_max_minutes = 120  # max retention time (minutes)
         self._running = False
         self._task: Optional[asyncio.Task] = None
     
     def record_price(self, market: str, price: float, ts: Optional[float] = None) -> None:
-        """가격 기록 (N분 최저/최고 계산용)"""
+        """Record price (used to compute the N-minute low/high)"""
         if ts is None:
             ts = time.time()
-        
+
         if market not in self.price_history:
-            max_samples = self.history_max_minutes * 60  # 1초 간격 가정
+            max_samples = self.history_max_minutes * 60  # assume 1-second interval
             self.price_history[market] = deque(maxlen=max_samples)
         
         self.price_history[market].append((ts, price))
     
     def get_low_high(self, market: str, lookback_min: int) -> Optional[tuple]:
-        """N분 내 최저/최고가 반환"""
+        """Return the N-minute low/high"""
         hist = self.price_history.get(market)
         if not hist:
             return None
@@ -175,42 +175,42 @@ class QuickTradeManager:
         return (min(prices), max(prices))
     
     def resolve_market(self, market_input: str) -> Optional[str]:
-        """마켓 입력값을 정규화된 마켓으로 변환 (USDT 형식)"""
+        """Normalize a market input into a normalized market (USDT format)"""
         inp = market_input.strip().upper()
 
         if not inp:
             return None
 
-        # 이미 정규화된 형태인 경우
+        # already in normalized form
         if inp.endswith("USDT"):
             return inp
 
         # Legacy format compat
             return f"{inp[4:]}USDT"
 
-        # 코인 심볼만 입력된 경우
+        # only the coin symbol was entered
         return f"{inp}USDT"
     
     def submit(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Quick Trade 주문 제출"""
+        """Submit a Quick Trade order"""
         try:
-            # 마켓 정규화
+            # normalize market
             market_input = str(request.get("market_input", "")).strip()
             market = self.resolve_market(market_input)
-            
+
             if not market:
                 return {"ok": False, "error": "Invalid market input"}
-            
-            # 펜딩 제한 확인
+
+            # check pending limits
             if len(self.pending_orders) >= self.MAX_PENDING_TOTAL:
                 return {"ok": False, "error": f"Max pending orders ({self.MAX_PENDING_TOTAL}) reached"}
-            
-            market_pending = sum(1 for o in self.pending_orders.values() 
+
+            market_pending = sum(1 for o in self.pending_orders.values()
                                 if o.market == market and o.status == QuickOrderStatus.PENDING)
             if market_pending >= self.MAX_PENDING_PER_MARKET:
                 return {"ok": False, "error": f"Already have pending order for {market}"}
-            
-            # 주문 생성
+
+            # create order
             quick_id = f"QT-{uuid.uuid4().hex[:12]}"
             
             cond_data = request.get("conditional")
@@ -242,7 +242,7 @@ class QuickTradeManager:
                 execution=execution,
             )
             
-            # 즉시 실행 또는 펜딩 등록
+            # execute immediately or register as pending
             if order.mode == OrderMode.IMMEDIATE:
                 return self._execute_order(order)
             else:
@@ -261,9 +261,9 @@ class QuickTradeManager:
             return {"ok": False, "error": str(e)}
     
     def _execute_order(self, order: QuickOrder) -> Dict[str, Any]:
-        """주문 실행"""
+        """Execute order"""
         try:
-            # 가드 평가
+            # evaluate guards
             allowed, reason = self._evaluate_guards(order)
             if not allowed:
                 order.status = QuickOrderStatus.FAILED
@@ -272,7 +272,7 @@ class QuickTradeManager:
                 self._log_order("QUICK_ORDER_BLOCKED", order, reason=reason)
                 return {"ok": False, "error": f"Blocked by guard: {reason}", "quick_id": order.quick_id}
             
-            # 실제 주문 실행
+            # place the actual order
             result = self._place_order(order)
             
             if result.get("ok"):
@@ -302,33 +302,33 @@ class QuickTradeManager:
             return {"ok": False, "error": str(e), "quick_id": order.quick_id}
     
     def _evaluate_guards(self, order: QuickOrder) -> tuple:
-        """가드 평가
-        
+        """Evaluate guards
+
         Returns:
             (allowed: bool, reason: str)
         """
         system = self.system
-        
-        # emergency_stop은 모든 정책에서 적용
+
+        # emergency_stop applies under all policies
         if getattr(system, "emergency_stop", False):
             return (False, "emergency_stop")
-        
+
         if order.guard_policy == GuardPolicy.FORCE:
-            # force: 다른 가드 무시
+            # force: ignore other guards
             return (True, "")
-        
+
         if order.guard_policy == GuardPolicy.ENTRY_LIMIT_ONLY:
-            # LMT 설정만 적용 (실제 주문 시 limit/market 결정에 사용)
+            # apply only LMT settings (used to decide limit/market at order time)
             return (True, "")
-        
-        # global: 모든 가드 적용
+
+        # global: apply all guards
         if order.side == "buy":
-            # 매수 가드들
+            # buy-side guards
             if getattr(system, "drawdown_guard", False):
-                # drawdown 체크 로직 (간략화)
+                # drawdown check logic (simplified)
                 pass
-            
-            # 글로벌 쿨다운
+
+            # global cooldown
             gcd_until = getattr(system, "_global_entry_block_until_ts", 0)
             if time.time() < gcd_until:
                 return (False, "global_cooldown")
@@ -336,53 +336,53 @@ class QuickTradeManager:
         return (True, "")
     
     def _place_order(self, order: QuickOrder) -> Dict[str, Any]:
-        """실제 거래소 주문 실행"""
+        """Place the actual exchange order"""
         try:
             system = self.system
             trade_client = getattr(system, "trade_client", None)
-            
+
             if not trade_client:
                 return {"ok": False, "error": "trade_client not available"}
-            
+
             base = order.market.replace("USDT", "") if order.market.endswith("USDT") else order.market
-            
-            # 금액/수량 계산
+
+            # compute amount/quantity
             if order.side == "buy":
-                # 매수: USDT 금액 필요
+                # buy: needs USDT amount
                 if order.amount_mode == AmountMode.PERCENT:
                     balance = trade_client.get_balance("USDT")
                     amount = balance * (order.amount_value / 100.0)
                 else:
-                    # quote 모드: 이미 USDT 금액
+                    # quote mode: already a USDT amount
                     amount = order.amount_value
             else:
-                # 매도: 코인 수량 필요
+                # sell: needs coin quantity
                 coin_balance = trade_client.get_balance(base)
-                
+
                 if order.amount_mode == AmountMode.PERCENT:
-                    # percent 모드: 보유 수량의 %
+                    # percent mode: % of held quantity
                     amount = coin_balance * (order.amount_value / 100.0)
                 else:
-                    # quote 모드: USDT 금액 → 코인 수량으로 변환
+                    # quote mode: convert USDT amount -> coin quantity
                     price_store = getattr(system, "price_store", None)
                     current_price = price_store.get_price(order.market) if price_store else None
-                    
+
                     if not current_price or current_price <= 0:
                         return {"ok": False, "error": f"Cannot get price for {order.market}"}
-                    
-                    # 지정 USDT 금액에 해당하는 코인 수량 계산
+
+                    # compute coin quantity for the given USDT amount
                     target_qty = order.amount_value / current_price
-                    
-                    # 보유 수량보다 많으면 전량 매도
+
+                    # if it exceeds the held quantity, sell the entire balance
                     amount = min(target_qty, coin_balance)
-                    
+
                     if amount <= 0:
                         return {"ok": False, "error": f"No {base} balance to sell"}
-            
+
             if amount <= 0:
                 return {"ok": False, "error": "Invalid amount"}
-            
-            # 주문 타입 결정
+
+            # decide order type
             use_limit = (
                 order.execution.order_type == "limit" or
                 (order.guard_policy == GuardPolicy.ENTRY_LIMIT_ONLY and 
@@ -416,7 +416,7 @@ class QuickTradeManager:
             return {"ok": False, "error": str(e)}
     
     def _resolve_limit_price(self, market: str, side: str, price_mode: str) -> Optional[float]:
-        """limit_price_mode에 따라 주문 가격 결정"""
+        """Decide order price based on limit_price_mode"""
         price_store = getattr(self.system, "price_store", None)
         if not price_store:
             return None
@@ -430,22 +430,22 @@ class QuickTradeManager:
         return current
 
     def check_triggers(self) -> List[QuickOrder]:
-        """조건부 주문 트리거 체크"""
+        """Check conditional order triggers"""
         triggered = []
         now = time.time()
-        
+
         for quick_id, order in list(self.pending_orders.items()):
             if order.status != QuickOrderStatus.PENDING:
                 continue
-            
-            # 만료 체크
+
+            # expiry check
             if order.conditional and (now - order.created_at) > order.conditional.expiry_sec:
                 order.status = QuickOrderStatus.EXPIRED
                 order.completed_at = now
                 self._log_order("QUICK_ORDER_EXPIRED", order)
                 continue
             
-            # 트리거 조건 체크
+            # trigger condition check
             if self._check_trigger_condition(order):
                 order.status = QuickOrderStatus.TRIGGERED
                 order.triggered_at = now
@@ -454,24 +454,24 @@ class QuickTradeManager:
         return triggered
     
     def _check_trigger_condition(self, order: QuickOrder) -> bool:
-        """트리거 조건 충족 여부 확인"""
+        """Check whether the trigger condition is met"""
         if not order.conditional:
             return False
-        
+
         cond = order.conditional
         low_high = self.get_low_high(order.market, cond.lookback_min)
-        
+
         if not low_high:
             return False
-        
+
         low, high = low_high
-        
-        # 현재가 조회
+
+        # fetch current price
         current_price = self._get_current_price(order.market)
         if not current_price:
             return False
-        
-        # threshold 계산
+
+        # compute threshold
         if cond.threshold_mode == "pct":
             if cond.trigger == TriggerType.NEAR_LOW:
                 threshold_price = low * (1 + cond.threshold_value / 100.0)
@@ -488,7 +488,7 @@ class QuickTradeManager:
                 return current_price >= threshold_price
     
     def _get_current_price(self, market: str) -> Optional[float]:
-        """현재가 조회"""
+        """Fetch current price"""
         try:
             price_store = getattr(self.system, "price_store", None)
             if price_store:
@@ -499,11 +499,11 @@ class QuickTradeManager:
             return None
 
     def cancel(self, quick_id: str) -> Dict[str, Any]:
-        """조건부 주문 취소"""
+        """Cancel a conditional order"""
         order = self.pending_orders.get(quick_id)
         if not order:
             return {"ok": False, "error": "Order not found"}
-        
+
         if order.status != QuickOrderStatus.PENDING:
             return {"ok": False, "error": f"Cannot cancel order in status: {order.status.value}"}
         
@@ -514,19 +514,19 @@ class QuickTradeManager:
         return {"ok": True, "quick_id": quick_id, "status": "cancelled"}
     
     def get_order(self, quick_id: str) -> Optional[Dict[str, Any]]:
-        """주문 조회"""
+        """Look up an order"""
         order = self.pending_orders.get(quick_id)
         if order:
             return order.to_dict()
         return None
-    
+
     def get_pending_orders(self) -> List[Dict[str, Any]]:
-        """펜딩 주문 목록"""
+        """List of pending orders"""
         return [o.to_dict() for o in self.pending_orders.values() 
                 if o.status == QuickOrderStatus.PENDING]
     
     def _log_order(self, event: str, order: QuickOrder, **extra) -> None:
-        """원장에 기록"""
+        """Record to the ledger"""
         try:
             ledger = getattr(self.system, "ledger", None)
             if ledger:
@@ -546,14 +546,14 @@ class QuickTradeManager:
             logger.warning("[quick_trade_manager] %s: %s", 'quick_trade_manager._log_order fallback', exc, exc_info=True)
     
     async def run_trigger_loop(self, interval_sec: float = 1.0) -> None:
-        """조건부 주문 트리거 루프"""
+        """Conditional order trigger loop"""
         self._running = True
         while self._running:
             try:
                 triggered = self.check_triggers()
                 for order in triggered:
                     self._execute_order(order)
-                    # 완료된 주문은 pending에서 제거
+                    # remove completed orders from pending
                     if order.quick_id in self.pending_orders:
                         del self.pending_orders[order.quick_id]
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError):
@@ -562,12 +562,12 @@ class QuickTradeManager:
             await asyncio.sleep(interval_sec)
     
     def start(self) -> None:
-        """트리거 루프 시작"""
+        """Start the trigger loop"""
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self.run_trigger_loop())
     
     def stop(self) -> None:
-        """트리거 루프 중지"""
+        """Stop the trigger loop"""
         self._running = False
         if self._task:
             self._task.cancel()

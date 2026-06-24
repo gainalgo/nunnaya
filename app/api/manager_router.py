@@ -46,7 +46,7 @@ def get_markets(request: Request):
     snap = oma.snapshot()
 
     # [PATCH] Mutual Exclusion: Hide markets that are in LongHold list
-    # OMA 관리 목록(Active/Watch/Recovery)에서 LongHold 코인을 시각적으로 제외합니다.
+    # Visually exclude LongHold coins from the OMA management lists (Active/Watch/Recovery).
     ladder = getattr(system, "ladder_manager", None)
     longhold_markets = set()
     if ladder:
@@ -96,7 +96,7 @@ def set_market_state(
     """
     system = request.app.state.system
     
-    # 거래지원 종료 예정 마켓 경고 체크
+    # Check warning for markets scheduled for delisting
     delisting_warning = None
     if state == MarketState.ACTIVE:
         pass
@@ -259,7 +259,7 @@ def approve_execution(
     system.engine.start(market)
 
     send_telegram(
-        f"✅ OMA 승인\n"
+        f"✅ OMA Approved\n"
         f"Market: {market}\n"
         f"Risk: {risk.get('band')}\n"
         f"Time: {record['approved_at']}"
@@ -418,7 +418,7 @@ def reset_pnl(request: Request):
     - Used for starting fresh tracking period
     """
     system = request.app.state.system
-    # profit_store가 리스트(closed trades)라고 가정하고 초기화
+    # Assume profit_store is a list (closed trades) and reset it
     if hasattr(system, "profit_store") and isinstance(system.profit_store, list):
         system.profit_store.clear()
         return {"ok": True, "msg": "PnL history cleared"}
@@ -539,7 +539,7 @@ def get_cost_basis(
 # ============================================================
 # Legacy API Compatibility: /api/markets/candidate
 # ------------------------------------------------------------
-# 레거시 대시보드 호환을 위한 후보 마켓 조회 엔드포인트
+# Candidate market lookup endpoint for legacy dashboard compatibility
 # ============================================================
 
 legacy_markets_router = APIRouter(
@@ -605,7 +605,7 @@ def get_candidate_markets(
 # ============================================================
 # Legacy API: /api/market/candles
 # ------------------------------------------------------------
-# 캔들 데이터 조회 (레거시 호환)
+# Candle data lookup (legacy compatibility)
 # ============================================================
 
 legacy_market_router = APIRouter(
@@ -623,12 +623,12 @@ legacy_market_router = APIRouter(
 def get_market_candles(
     request: Request,
     market: str = Query(..., description="Market code (e.g., BTCUSDT)"),
-    interval: str = Query("15", description="Candle interval: 1,3,5,15,60,240 (분) or D,W,M (일/주/월)"),
+    interval: str = Query("15", description="Candle interval: 1,3,5,15,60,240 (minutes) or D,W,M (day/week/month)"),
     count: int = Query(100, ge=1, le=200, description="Number of candles"),
 ):
     """
     Legacy endpoint for fetching candle data.
-    Supports: 1,3,5,10,15,30,60,240 (분봉), D (일봉), W (주봉), M (월봉)
+    Supports: 1,3,5,10,15,30,60,240 (minute candles), D (daily), W (weekly), M (monthly)
     """
     from app.core.rate_limiter import bybit_get
     from app.core.constants import BYBIT_MARKET_KLINE, bybit_v5_rest_category, parse_bybit_list
@@ -666,7 +666,7 @@ def get_market_candles(
 # ============================================================
 # Legacy API: /api/longhold/*
 # ------------------------------------------------------------
-# LongHold API (레거시 호환 - ladder_router의 별칭)
+# LongHold API (legacy compatibility - alias of ladder_router)
 # ============================================================
 
 legacy_longhold_router = APIRouter(

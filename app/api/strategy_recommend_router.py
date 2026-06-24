@@ -57,17 +57,17 @@ from app.api.strategy_utils import (
     _clamp_sniper_tp_sl,
 )
 
-# [2026-02-01] [PROTECTED] 전략 → topn_selector 프로필 매핑
-# DO NOT MODIFY - 각 전략은 고유한 특성에 맞는 프로필로 스코어링해야 함
-# 이 매핑을 변경하면 전략별 코인 선별이 망가집니다
+# [2026-02-01] [PROTECTED] strategy -> topn_selector profile mapping
+# DO NOT MODIFY - each strategy must be scored with a profile matching its characteristics
+# Changing this mapping breaks per-strategy coin selection
 STRATEGY_TO_PROFILE: Dict[str, str] = {
-    "PINGPONG": "pingpong",    # 박스권, 횡보, 변동성
-    "AUTOLOOP": "autorope",    # 유동성 + 적당한 변동성
-    "LADDER": "ladder",        # 트렌드 추종, 분할매수
-    "LIGHTNING": "lightning",  # 브레이크아웃, 모멘텀
-    "GAZUA": "gazua",          # 강한 상승 모멘텀
-    "CONTRARIAN": "pingpong",  # 역행 = 변동성 + 박스권 유사
-    "SNIPER": "lightning",     # 급등 저격 = 모멘텀 유사
+    "PINGPONG": "pingpong",    # range-bound, sideways, volatility
+    "AUTOLOOP": "autorope",    # liquidity + moderate volatility
+    "LADDER": "ladder",        # trend following, scaled buys
+    "LIGHTNING": "lightning",  # breakout, momentum
+    "GAZUA": "gazua",          # strong upward momentum
+    "CONTRARIAN": "pingpong",  # contrarian = volatility + range-bound similar
+    "SNIPER": "lightning",     # pump sniping = momentum-like
 }
 
 logger = logging.getLogger(__name__)
@@ -77,44 +77,44 @@ router = APIRouter()
 # ============================================================
 # Endpoint-specific lock (not shared — stays with the endpoints)
 # ============================================================
-_recommend_semaphore = threading.Semaphore(1)  # 추천 계산 동시 1개 제한 (tick loop 스레드풀 보호)
+_recommend_semaphore = threading.Semaphore(1)  # limit recommendation compute to 1 concurrent (protects tick loop thread pool)
 
 
-# 전략별 타임프레임 설정 (멀티타임프레임 분석)
+# Per-strategy timeframe settings (multi-timeframe analysis)
 STRATEGY_TIMEFRAMES = {
-    # 전략: (캔들 단위(분), 캔들 개수, 설명)
-    "LIGHTNING": (1, 60, "1분×60개=1시간 - 단타/급등락"),
-    "PINGPONG": (5, 60, "5분×60개=5시간 - 박스권 스윙"),
-    "AUTOLOOP": (15, 60, "15분×60개=15시간 - 분할매수"),
-    "LADDER": (60, 48, "1시간×48개=2일 - DCA 하락추세"),
-    "GAZUA": (240, 42, "4시간×42개=7일 - 추세추종"),
-    "SNIPER": (60, 24, "1시간×24개=1일 - 저격 타이밍"),
-    "CONTRARIAN": (15, 60, "15분×60개=15시간 - 역행 매매"),
+    # strategy: (candle unit (min), candle count, description)
+    "LIGHTNING": (1, 60, "1min x 60 = 1h - scalping/pumps"),
+    "PINGPONG": (5, 60, "5min x 60 = 5h - range swing"),
+    "AUTOLOOP": (15, 60, "15min x 60 = 15h - scaled buys"),
+    "LADDER": (60, 48, "1h x 48 = 2d - DCA downtrend"),
+    "GAZUA": (240, 42, "4h x 42 = 7d - trend following"),
+    "SNIPER": (60, 24, "1h x 24 = 1d - sniping timing"),
+    "CONTRARIAN": (15, 60, "15min x 60 = 15h - contrarian trading"),
 }
 
 def _get_strategy_timeframe(strategy: str) -> tuple:
-    """전략별 캔들 타임프레임 반환 (unit_min, count)."""
+    """Return the candle timeframe for a strategy (unit_min, count)."""
     s = str(strategy).upper()
     if s in STRATEGY_TIMEFRAMES:
         return STRATEGY_TIMEFRAMES[s][0], STRATEGY_TIMEFRAMES[s][1]
-    # 기본값: 5분 30개
+    # default: 5min x 30
     return 5, 30
 
-# ---- 추천 API 캔들 캐시 (429 방지) ----
+# ---- recommendation API candle cache (avoid 429) ----
 _ai_candle_cache: Dict[str, Tuple[float, List[float]]] = {}
-_AI_CANDLE_CACHE_TTL = 300.0  # 5분 캐시
+_AI_CANDLE_CACHE_TTL = 300.0  # 5min cache
 
 
 def _fetch_candles_for_ai(market: str, strategy: str = "AUTOLOOP") -> List[float]:
     """Fetch recent candles for on-the-fly AI analysis.
 
-    전략별 멀티타임프레임 지원:
-    - LIGHTNING: 1분 캔들 (단타)
-    - PINGPONG: 5분 캔들 (박스권)
-    - AUTOLOOP: 15분 캔들 (분할매수)
-    - LADDER: 1시간 캔들 (DCA)
-    - GAZUA: 4시간 캔들 (추세추종)
-    - SNIPER: 1시간 캔들 (저격)
+    Per-strategy multi-timeframe support:
+    - LIGHTNING: 1min candles (scalping)
+    - PINGPONG: 5min candles (range-bound)
+    - AUTOLOOP: 15min candles (scaled buys)
+    - LADDER: 1h candles (DCA)
+    - GAZUA: 4h candles (trend following)
+    - SNIPER: 1h candles (sniping)
     """
     try:
         # Normalize market format
@@ -126,10 +126,10 @@ def _fetch_candles_for_ai(market: str, strategy: str = "AUTOLOOP") -> List[float
         else:
             exchange_market = market
 
-        # 전략별 타임프레임 가져오기
+        # get the per-strategy timeframe
         unit_min, count = _get_strategy_timeframe(strategy)
 
-        # 캐시 확인
+        # check cache
         cache_key = f"{exchange_market}:{unit_min}:{count}"
         now = time_now()
         cached = _ai_candle_cache.get(cache_key)
@@ -178,7 +178,7 @@ def get_rich_recommendations(
     """
     st_raw = strategy.strip().upper()
     snipers_mode = (st_raw == "SNIPERS")
-    # SNIPER(s)는 실행 로직은 SNIPER를 공용 사용하되, 추천/라벨만 별도 분리한다.
+    # SNIPER(s) shares SNIPER's execution logic but separates only the recommendation/label.
     st = "SNIPER" if snipers_mode else st_raw
     strategy_label = "SNIPERS" if snipers_mode else st
     min_price_eff = max(0.0, float(min_price or 0.0))
@@ -186,9 +186,9 @@ def get_rich_recommendations(
     if min_price_eff > 0 and max_price_eff > 0 and max_price_eff < min_price_eff:
         min_price_eff, max_price_eff = max_price_eff, min_price_eff
 
-    # --- CACHE CHECK (900초 read-TTL — prewarm 사이클(n=20 으로 늘려 컴퓨트↑, ~540-610s)보다 길게 ─
-    #     사이클보다 짧으면 매 사이클 cold 구간 생겨 200마켓 full fetch로 느려짐.
-    #     n 은 prewarm 기본값(20)과 같아야 cache_key 적중 → 대시보드는 n=20 로 호출할 것) ---
+    # --- CACHE CHECK (900s read-TTL — longer than the prewarm cycle (n=20 raises compute, ~540-610s) ─
+    #     shorter than the cycle creates a cold window each cycle, slowing down with a 200-market full fetch.
+    #     n must equal the prewarm default (20) so the cache_key hits -> the dashboard should call with n=20) ---
     cache_key = _build_cache_key(
         "recommendations",
         strategy=strategy_label,
@@ -202,42 +202,42 @@ def get_rich_recommendations(
 
     system = request.app.state.system
 
-    # [2026-03-03] 직렬화: rank_topn_by_public_candles는 스레드풀에서 동시 1개만 실행
-    # 동시 요청이 들어오면 stale 캐시 반환 (tick loop 스레드풀 보호)
+    # [2026-03-03] serialize: rank_topn_by_public_candles runs only 1 at a time in the thread pool
+    # if concurrent requests arrive, return stale cache (protects tick loop thread pool)
     _recommend_acquired = _recommend_semaphore.acquire(blocking=False)
     if not _recommend_acquired:
-        stale = _get_cached(cache_key, ttl=86400)  # 오래된 캐시라도 반환
+        stale = _get_cached(cache_key, ttl=86400)  # return even an old cache
         if stale:
             return stale
         profile = STRATEGY_TO_PROFILE.get(st, "ladder")
         return {"ok": True, "items": [], "profile": profile, "strategy": strategy_label, "computing": True}
 
-    # [2026-02-01] 전략별 프로필 기반 랭킹 사용
+    # [2026-02-01] use per-strategy profile-based ranking
     profile = STRATEGY_TO_PROFILE.get(st, "ladder")  # fallback to ladder
 
     try:
-        # topn_selector의 프로필 기반 랭킹 호출
-        # 각 전략에 맞는 특성(변동성, 모멘텀, 유동성 등)으로 스코어링
+        # call topn_selector's profile-based ranking
+        # score using characteristics matching each strategy (volatility, momentum, liquidity, etc.)
         ranked_n = int(n * 2)
         if min_price_eff > 0 or max_price_eff > 0:
             ranked_n = int(max(n * 4, 50))
         ranked = rank_topn_by_public_candles(
-            n=ranked_n,  # 여유있게 가져와서 필터링
+            n=ranked_n,  # fetch generously then filter
             profile=profile,
-            candle_unit_minutes=5,  # 5분 캔들 (속도 vs 정확도 균형)
-            candle_count=60,        # 5시간 데이터
+            candle_unit_minutes=5,  # 5min candles (speed vs accuracy balance)
+            candle_count=60,        # 5h of data
             max_markets=200,
-            request_sleep=0.05,     # API 속도 조절
+            request_sleep=0.05,     # API rate throttling
         )
 
-        # MarketFeatures → 마켓 리스트 + 스코어
+        # MarketFeatures -> market list + score
         ranked_markets = {f.market: (score, f) for score, f in ranked}
 
     except (TypeError, ValueError) as e:
         logger.warning(f"[recommendations] topn_selector failed for {st}/{profile}: {e}")
         ranked_markets = {}
 
-    # 티커로 현재가 정보 보강
+    # enrich with current price info from tickers
     try:
         if ranked_markets:
             wanted_set = set(m.upper() for m in ranked_markets.keys())
@@ -266,7 +266,7 @@ def get_rich_recommendations(
         logger.error("[recommend] ticker fetch unexpected error", exc_info=True)
         ticker_map = {}
 
-    # 프로필 랭킹 순서대로 후보 생성 (스코어 높은 순)
+    # build candidates in profile ranking order (highest score first)
     if ranked_markets:
         top_candidates = []
         for market in ranked_markets.keys():
@@ -274,7 +274,7 @@ def get_rich_recommendations(
             if t:
                 top_candidates.append(t)
     else:
-        # fallback: 거래대금 순
+        # fallback: by trading value
         top_candidates = list(ticker_map.values())
         top_candidates.sort(key=lambda x: float(x.get("acc_trade_price_24h") or 0), reverse=True)
         top_candidates = top_candidates[:n * 2]
@@ -287,22 +287,22 @@ def get_rich_recommendations(
         vols.sort()
         median_vol = vols[len(vols) // 2]
 
-    # ★ 자본(equity) 연동 base — 옛 KRW 잔재(base_budget=100_000원)가 USDT 로 라벨만 바뀌어
-    #   $0.13 코인에 $200K 추천하던 버그 fix. 실제 자본(USDT) 기준, 없으면 보수적 200.
+    # ★ equity-linked base — fixes a bug where old KRW residue (base_budget=100,000 KRW) was just
+    #   relabeled as USDT and recommended $200K on a $0.13 coin. Based on real equity (USDT), 200 conservative if absent.
     _acct_eq = float(getattr(system, "_last_equity_usdt", 0) or 0)
     if _acct_eq <= 0:
         _acct_eq = float(getattr(system, "equity_usdt", 0) or 0)
     if _acct_eq <= 0:
         _acct_eq = 200.0
-    _budget_cap = max(10.0, _acct_eq * 0.5)   # 한 코인에 자본 절반 초과 추천 금지
+    _budget_cap = max(10.0, _acct_eq * 0.5)   # never recommend more than half of equity on one coin
 
     # Get AI Model Info (Training Data Size)
     model_info = ai_trainer.get_info()
     model_rows = model_info.get("rows", 0)
 
     # --- OPTIMIZATION: Pre-fetch candle data in parallel ---
-    # 기존에는 후보 코인마다 순차적으로 캔들 데이터를 요청하여 느렸습니다.
-    # 이제 한 번에 병렬로 요청하여 응답 속도를 대폭 개선합니다.
+    # Previously candle data was requested sequentially per candidate coin, which was slow.
+    # Now we request all in parallel at once, greatly improving response speed.
     markets_to_fetch = []
     for t in top_candidates:
         market = t.get("market")
@@ -311,7 +311,7 @@ def get_rich_recommendations(
 
     candle_histories = {}
     if markets_to_fetch:
-        # 과도한 병렬은 429/실패로 ai_score=0.5 평탄화를 유발하므로 워커를 제한한다.
+        # excessive parallelism causes 429/failures that flatten ai_score to 0.5, so limit workers.
         max_workers = min(4, len(markets_to_fetch)) or 1
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             results = executor.map(lambda m: _fetch_candles_for_ai(m, st), markets_to_fetch)
@@ -351,16 +351,16 @@ def get_rich_recommendations(
         # [PATCH] Only flag as "Active Strategy" if actually ACTIVE or RECOVERY.
         # WATCH markets are considered "Available" for re-deployment/modification.
         if oma_state in ("ACTIVE", "RECOVERY"):
-            # 컨텍스트 확인
+            # check context
             ctx = system.coordinator.contexts.get(market)
             if ctx:
-                # 전략 모드 확인
+                # check strategy mode
                 ctrls = getattr(ctx, "controls", {}) or {}
                 strat = ctrls.get("strategy", {}) or {}
                 if strat.get("enabled"):
                     active_strategy = str(strat.get("mode") or "CUSTOM").upper()
                 else:
-                    active_strategy = "AI (AUTOCOIN)" # 기본 엔진
+                    active_strategy = "AI (AUTOCOIN)" # default engine
             else:
                 active_strategy = f"{oma_state} (NO_CTX)"
 
@@ -369,7 +369,7 @@ def get_rich_recommendations(
         volatility = 0.0
         trend = 0.0
 
-        # RSI, momentum 초기값 (이전에 하드코딩 50이던 것을 실제 계산으로 수정)
+        # RSI, momentum initial values (previously hardcoded 50, now real calculation)
         rsi = 50.0
         momentum = 0.0
 
@@ -386,11 +386,11 @@ def get_rich_recommendations(
             # 3. On-the-fly AI Analysis for new candidates
             # (Use pre-fetched data from _fetch_candles_for_ai)
             hist = candle_histories.get(market)
-            # RSI 계산을 위해 최소 15개 데이터 필요 (length 14 + 1)
+            # RSI calculation needs at least 15 data points (length 14 + 1)
             if hist and len(hist) >= 15:
                 try:
-                    # hist는 이미 가격 리스트 (float list) - _fetch_candles_for_ai가 반환
-                    prices = hist  # 이미 리스트
+                    # hist is already a price list (float list) - returned by _fetch_candles_for_ai
+                    prices = hist  # already a list
                     current_price = prices[-1] if prices else 0
 
                     brain_module = getattr(system.engine, "pipeline", None)
@@ -403,7 +403,7 @@ def get_rich_recommendations(
                         momentum = getattr(b_out, "momentum", 0.0) or 0.0
                         ai_from_live = True
                     else:
-                        # Brain 없으면 indicators로 직접 계산
+                        # if no Brain, compute directly with indicators
                         volatility = indicators.volatility(prices, 20) or 0.0
                         trend = indicators.trend(prices, 20) or 0.0
                         momentum = indicators.trend(prices, 3) or 0.0
@@ -413,7 +413,7 @@ def get_rich_recommendations(
                 except (KeyError, IndexError, AttributeError, TypeError, ValueError) as e:
                     logger.warning(f"[recommendations] {market} indicator calc failed: {e}")
 
-        # AI/지표가 평탄화(0.5/0.0)될 때는 프로필 피처를 보조 입력으로 사용해 전략 성격을 보존한다.
+        # when AI/indicators flatten (0.5/0.0), use profile features as auxiliary input to preserve strategy character.
         if (
             not ai_from_live
             and profile_features is not None
@@ -439,77 +439,77 @@ def get_rich_recommendations(
                 logger.warning("[RECOMMEND_API] profile feature fallback: %s", exc, exc_info=True)
 
         # Budget suggestion logic
-        # 1) 거래대금 기반 팩터
+        # 1) trading-value based factor
         vol24 = float(t.get("acc_trade_price_24h") or 0)
         vol_factor = (vol24 / median_vol) ** 0.5 if median_vol > 0 else 1.0
         vol_factor = max(0.5, min(2.0, vol_factor))
 
-        # 2) 코인 가격 기반 최소 예산 (최소 0.001개 이상 거래 가능하도록)
+        # 2) coin-price based minimum budget (so at least 0.001 units are tradable)
         coin_price = float(t.get("trade_price") or 0)
-        # 가격대별 최소 예산: 고가 코인은 더 많은 자본 필요 (USDT 기준)
-        if coin_price >= 50_000:    # BTC급 ($50K 이상)
+        # minimum budget by price tier: high-priced coins need more capital (USDT)
+        if coin_price >= 50_000:    # BTC tier (>= $50K)
             min_budget = 500
-        elif coin_price >= 1_000:   # ETH급 ($1K 이상)
+        elif coin_price >= 1_000:   # ETH tier (>= $1K)
             min_budget = 200
-        elif coin_price >= 100:     # $100 이상
+        elif coin_price >= 100:     # >= $100
             min_budget = 100
-        elif coin_price >= 10:      # $10 이상
+        elif coin_price >= 10:      # >= $10
             min_budget = 50
-        else:                       # 저가 코인
+        else:                       # low-priced coins
             min_budget = 30
 
-        base_budget = max(10.0, _acct_eq * 0.15)   # per-deploy ≈ 자본의 15% (다중 슬롯 가정, USDT)
+        base_budget = max(10.0, _acct_eq * 0.15)   # per-deploy ≈ 15% of equity (assumes multiple slots, USDT)
 
-        # 3) RSI 기반 예산 조정
-        # RSI < 30 (과매도): 매수 기회 → 예산 증가
-        # RSI > 70 (과매수): 위험 구간 → 예산 감소
+        # 3) RSI-based budget adjustment
+        # RSI < 30 (oversold): buy opportunity -> increase budget
+        # RSI > 70 (overbought): risk zone -> decrease budget
         rsi_factor = 1.0
         if rsi < 30:
-            rsi_factor = 1.3  # 과매도 시 30% 증가
+            rsi_factor = 1.3  # +30% when oversold
         elif rsi < 40:
             rsi_factor = 1.15
         elif rsi > 70:
-            rsi_factor = 0.7  # 과매수 시 30% 감소
+            rsi_factor = 0.7  # -30% when overbought
         elif rsi > 60:
             rsi_factor = 0.85
 
-        suggested_budget = int((base_budget * vol_factor * rsi_factor) * 100) / 100  # USDT 0.01 단위
-        # 최소 예산 보장 (단, 자본 초과 금지)
+        suggested_budget = int((base_budget * vol_factor * rsi_factor) * 100) / 100  # USDT 0.01 units
+        # guarantee minimum budget (but never exceed equity)
         suggested_budget = max(suggested_budget, min(min_budget, _budget_cap))
-        suggested_budget = min(suggested_budget, _budget_cap)  # ★ 자본 절반 초과 X (옛 KRW 잔재 재발 방지)
+        suggested_budget = min(suggested_budget, _budget_cap)  # ★ never exceed half of equity (prevent old KRW residue recurrence)
 
         # Price Prediction (Heuristic based on Volatility & AI Score)
-        # AI Score가 0.5 이상일 때 상승 방향으로 예측
-        # 변동성(Daily Range)을 시간 단위로 나누어 목표가 산출
+        # predict upward direction when AI Score is >= 0.5
+        # derive target by dividing volatility (Daily Range) into time units
         pred = {}
         rec = {}
         ladder_params = {}
         gazua_params = {}
         lightning_params = {}
 
-        # 변동성 계산 (try 블록 밖에서 정의)
+        # volatility calculation (defined outside the try block)
         curr = float(t.get("trade_price") or 0)
         high = float(t.get("high_price") or curr)
         low = float(t.get("low_price") or curr)
         daily_vol_pct = (high - low) / low if low > 0 else 0.05
         change_rate_pct = float(t.get("signed_change_rate") or 0) * 100.0
 
-        # SNIPER(s) 전용 후보 필터:
-        # - 변동폭은 충분해야 하고
-        # - 급락 추세 코인은 제외
+        # SNIPER(s)-only candidate filter:
+        # - swing range must be sufficient
+        # - exclude sharply falling coins
         if snipers_mode:
-            if daily_vol_pct < 0.025:  # 2.5% 미만: 스윙 부족
+            if daily_vol_pct < 0.025:  # below 2.5%: insufficient swing
                 continue
-            if change_rate_pct <= -4.5:  # 과도한 하락: 칼날낙하 제외
+            if change_rate_pct <= -4.5:  # excessive drop: exclude falling knives
                 continue
 
         try:
 
-            # AI 확신도 (0.5~1.0 -> 0.0~1.0 scaling)
-            # 최소 0.2 정도의 가중치는 두어 목표가가 현재가보다 높게 나오도록 보정
+            # AI confidence (0.5~1.0 -> 0.0~1.0 scaling)
+            # keep at least ~0.2 weight so the target comes out above the current price
             confidence = max(0.2, (ai_score - 0.5) * 2.0)
 
-            # 시간별 예상 상승폭 (단순화된 제곱근 시간 법칙 적용)
+            # expected upside per time horizon (simplified square-root-of-time rule)
             pred["1h"] = curr * (1.0 + (daily_vol_pct / 4.9) * confidence)  # sqrt(24) approx 4.9
             pred["6h"] = curr * (1.0 + (daily_vol_pct / 2.0) * confidence)  # sqrt(4) = 2
             pred["24h"] = curr * (1.0 + daily_vol_pct * confidence)
@@ -526,12 +526,12 @@ def get_rich_recommendations(
                 rec["target"] = pred["1h"]
                 rec["stop_loss"] = curr * (1.0 - daily_vol_pct * 0.2)
 
-                # Lightning specific params: 단기 고변동성 스캘핑
-                # TP/SL은 변동성에 비례, 홀딩 시간 짧게
-                rec_tp = 1.5  # 기본 1.5%
-                rec_sl = -1.0  # 기본 -1%
+                # Lightning specific params: short-term high-volatility scalping
+                # TP/SL proportional to volatility, short holding time
+                rec_tp = 1.5  # default 1.5%
+                rec_sl = -1.0  # default -1%
 
-                # 변동성 기반 조정
+                # volatility-based adjustment
                 if daily_vol_pct > 0.08:
                     rec_tp = 3.0
                     rec_sl = -2.0
@@ -542,22 +542,22 @@ def get_rich_recommendations(
                     rec_tp = 2.0
                     rec_sl = -1.2
 
-                # AI 확신도 조정
+                # AI confidence adjustment
                 if ai_score >= 0.7:
-                    rec_tp += 0.5  # 고확신 시 목표가 상향
+                    rec_tp += 0.5  # raise target on high confidence
                 elif ai_score < 0.5:
-                    rec_tp -= 0.3  # 저확신 시 보수적
-                    rec_sl = min(rec_sl, -SNIPER_MIN_SL_PCT)  # SL 하한선 유지
+                    rec_tp -= 0.3  # conservative on low confidence
+                    rec_sl = min(rec_sl, -SNIPER_MIN_SL_PCT)  # keep SL floor
 
-                # RSI 기반 조정 (LIGHTNING)
+                # RSI-based adjustment (LIGHTNING)
                 if rsi < 30:
-                    rec_tp += 0.5  # 과매도 → 반등 기대 → TP 상향
-                    rec_sl -= 0.3  # SL 여유 확보
+                    rec_tp += 0.5  # oversold -> rebound expected -> raise TP
+                    rec_sl -= 0.3  # give SL more room
                 elif rsi > 70:
-                    rec_tp -= 0.5  # 과매수 → 보수적
-                    rec_sl = min(rec_sl + 0.3, -SNIPER_MIN_SL_PCT)  # SL 하한선 유지
+                    rec_tp -= 0.5  # overbought -> conservative
+                    rec_sl = min(rec_sl + 0.3, -SNIPER_MIN_SL_PCT)  # keep SL floor
 
-                # 최대 보유 시간 (분) - 변동성 클수록 짧게
+                # max holding time (min) - shorter the higher the volatility
                 hold_minutes = 60
                 if daily_vol_pct > 0.08:
                     hold_minutes = 30
@@ -574,11 +574,11 @@ def get_rich_recommendations(
             # Ladder specific suggestions
             if st == "LADDER":
                 # Volatility-based tuning
-                # 기본값
+                # defaults
                 base_step = 1.0
                 sl_recommend = -5.0 # default fallback
 
-                # ATR 계산 시도 (hist가 있을 경우에만)
+                # attempt ATR calculation (only if hist exists)
                 atr_14h = None
                 try:
                     hist = candle_histories.get(market) if 'candle_histories' in dir() or 'candle_histories' in locals() else None
@@ -589,10 +589,10 @@ def get_rich_recommendations(
 
                 if atr_14h and curr > 0:
                     atr_pct = (atr_14h / curr) * 100.0
-                    # 손절 = ATR(14h) * 1.5
+                    # stop loss = ATR(14h) * 1.5
                     sl_recommend = -(atr_pct * 1.5)
 
-                    # Step Gap도 ATR 비율에 맞춰 조정 (예: ATR의 0.5배)
+                    # also adjust Step Gap to the ATR ratio (e.g. 0.5x ATR)
                     base_step = max(0.5, min(5.0, atr_pct * 0.5))
                 else:
                     # Fallback to daily vol
@@ -602,32 +602,32 @@ def get_rich_recommendations(
                         base_step = 0.5
 
                 # AI & Volatility based tuning
-                # 1. Steps: 변동성이 크면 더 많은 단계로 분할하여 리스크 분산
+                # 1. Steps: higher volatility -> split into more steps to spread risk
                 rec_steps = 10
                 if daily_vol_pct > 0.10: rec_steps = 20
                 elif daily_vol_pct > 0.05: rec_steps = 15
 
-                # 2. ATR Mode: 변동성이 매우 크거나 AI 확신이 낮을 때 켜기
+                # 2. ATR Mode: enable when volatility is very high or AI confidence is low
                 rec_atr_enabled = (daily_vol_pct > 0.08) or (ai_score < 0.4)
 
-                # 3. Martingale: AI가 좋으면 공격적
+                # 3. Martingale: aggressive when AI is good
                 rec_martingale = 1.05 if daily_vol_pct > 0.03 else 1.0
                 if ai_score > 0.7: rec_martingale = 1.15
                 elif ai_score > 0.6: rec_martingale = 1.10
                 elif ai_score < 0.4: rec_martingale = 1.0
 
-                # 4. TP: 변동성 + AI Score
+                # 4. TP: volatility + AI Score
                 rec_tp = 2.0
                 if daily_vol_pct > 0.05: rec_tp = 3.0
                 if ai_score > 0.7: rec_tp += 1.0
 
-                # 5. RSI 기반 조정 (LADDER)
+                # 5. RSI-based adjustment (LADDER)
                 if rsi < 30:
-                    rec_steps = min(rec_steps + 5, 25)  # 과매도 → 더 많은 분할매수
-                    rec_martingale = min(rec_martingale + 0.05, 1.25)  # 마틴 강화
+                    rec_steps = min(rec_steps + 5, 25)  # oversold -> more scaled buys
+                    rec_martingale = min(rec_martingale + 0.05, 1.25)  # stronger martingale
                 elif rsi > 70:
-                    rec_steps = max(rec_steps - 3, 5)  # 과매수 → 진입 자제
-                    rec_tp = max(rec_tp - 0.5, 1.0)  # 보수적 TP
+                    rec_steps = max(rec_steps - 3, 5)  # overbought -> hold back entry
+                    rec_tp = max(rec_tp - 0.5, 1.0)  # conservative TP
 
                 ladder_params = {"step_pct": base_step, "martingale": rec_martingale, "max_steps": rec_steps, "step_gap_atr_enabled": rec_atr_enabled, "tp": rec_tp}
 
@@ -651,23 +651,23 @@ def get_rich_recommendations(
                     rec_sl = min(rec_sl, -8.0) # High vol -> widen SL
                     rec_tp = max(rec_tp, 20.0) # Aim for moon
 
-                # RSI 기반 조정 (GAZUA)
+                # RSI-based adjustment (GAZUA)
                 if rsi < 30:
-                    rec_tp += 3.0  # 과매도 → 큰 반등 기대
-                    rec_sl -= 1.0  # SL 여유
+                    rec_tp += 3.0  # oversold -> expect a big rebound
+                    rec_sl -= 1.0  # give SL room
                 elif rsi < 40:
                     rec_tp += 1.5
                 elif rsi > 70:
-                    rec_tp = max(rec_tp - 3.0, 5.0)  # 과매수 → 조기 익절
-                    rec_sl = max(rec_sl + 1.5, -3.0)  # SL 타이트
+                    rec_tp = max(rec_tp - 3.0, 5.0)  # overbought -> take profit early
+                    rec_sl = max(rec_sl + 1.5, -3.0)  # tighter SL
 
                 gazua_params = {"tp": rec_tp, "sl": rec_sl}
 
         except Exception as e:
             import traceback
-            logger.warning(f"[recommendations] {market} params 계산 실패: {e}\n{traceback.format_exc()}")
+            logger.warning(f"[recommendations] {market} params calculation failed: {e}\n{traceback.format_exc()}")
 
-        # recommended_params 통합 (프론트엔드 호환)
+        # consolidate recommended_params (frontend compatible)
         recommended_params = {}
         if st == "LADDER" and ladder_params:
             recommended_params = {
@@ -689,7 +689,7 @@ def get_rich_recommendations(
                 "sl_pct": gazua_params.get("sl"),
             }
         elif st == "CONTRARIAN":
-            # CONTRARIAN 파라미터 (운영 기본값: TP 15 / SL -50)
+            # CONTRARIAN params (operational defaults: TP 15 / SL -50)
             ct_tp = 15.0
             ct_sl = -50.0
             recommended_params = {
@@ -705,73 +705,73 @@ def get_rich_recommendations(
                 "entry_ob_guard_enabled": False,
             }
         elif st == "SNIPER":
-            # SNIPER: 최저가/최고가 저격 매수/매도
-            # [2026-02-02] lookback 기본값 상향 조정 (소강기/하락기 대응)
+            # SNIPER: snipe buy/sell at the low/high
+            # [2026-02-02] raised lookback defaults (to handle lulls/downturns)
             #
-            # 변동성 범위 (상향 조정):
-            # - 초고변동 (>10%): 1~2시간 (단타)
-            # - 고변동 (5~10%): 2~4시간 (스윙)
-            # - 중변동 (2~5%): 4~8시간 (중기)
-            # - 저변동 (<2%): 12~24시간 (하루 최저/최고)
+            # volatility ranges (raised):
+            # - ultra-high vol (>10%): 1~2h (scalping)
+            # - high vol (5~10%): 2~4h (swing)
+            # - mid vol (2~5%): 4~8h (mid-term)
+            # - low vol (<2%): 12~24h (daily low/high)
 
-            sn_lookback = 240  # 기본 4시간 (기존 1시간에서 상향)
+            sn_lookback = 240  # default 4h (raised from old 1h)
             sn_threshold = 0.3
-            sn_expiry = 360  # 기본 6시간 (기존 1시간에서 상향)
+            sn_expiry = 360  # default 6h (raised from old 1h)
             sn_tp = max(2.0, SNIPER_MIN_TP_PCT)
             sn_sl = SNIPER_MIN_SL_PCT
 
-            # 변동성 기반 lookback/expiry 결정 (전체 상향)
+            # determine lookback/expiry from volatility (all raised)
             if daily_vol_pct > 0.10:
-                # 초고변동: 1~2시간 (기존 5~15분)
+                # ultra-high vol: 1~2h (old 5~15min)
                 sn_lookback = 60
                 sn_expiry = 120
                 sn_threshold = 0.5
                 sn_tp = 3.0
                 sn_sl = max(SNIPER_MIN_SL_PCT, 2.0)
             elif daily_vol_pct > 0.08:
-                # 고변동: 2~3시간 (기존 15~30분)
+                # high vol: 2~3h (old 15~30min)
                 sn_lookback = 120
                 sn_expiry = 180
                 sn_threshold = 0.4
                 sn_tp = 2.5
                 sn_sl = max(SNIPER_MIN_SL_PCT, 1.8)
             elif daily_vol_pct > 0.05:
-                # 중고변동: 3~4시간 (기존 30분~1시간)
+                # mid-high vol: 3~4h (old 30min~1h)
                 sn_lookback = 180
                 sn_expiry = 240
                 sn_threshold = 0.35
                 sn_tp = 2.2
                 sn_sl = max(SNIPER_MIN_SL_PCT, 1.6)
             elif daily_vol_pct > 0.03:
-                # 중변동: 4~6시간 (기존 1~3시간)
+                # mid vol: 4~6h (old 1~3h)
                 sn_lookback = 240
                 sn_expiry = 360
                 sn_threshold = 0.3
                 sn_tp = 2.0
                 sn_sl = max(SNIPER_MIN_SL_PCT, 1.5)
             elif daily_vol_pct > 0.02:
-                # 저변동: 6~12시간 (기존 3~6시간)
+                # low vol: 6~12h (old 3~6h)
                 sn_lookback = 360
                 sn_expiry = 720
                 sn_threshold = 0.25
                 sn_tp = 1.8
                 sn_sl = max(SNIPER_MIN_SL_PCT, 1.2)
             else:
-                # 초저변동: 12~24시간 (하루 최저/최고 탐색)
-                sn_lookback = 720  # 12시간
-                sn_expiry = 1440  # 24시간
+                # ultra-low vol: 12~24h (search daily low/high)
+                sn_lookback = 720  # 12h
+                sn_expiry = 1440  # 24h
                 sn_threshold = 0.2
                 sn_tp = 1.5
                 sn_sl = max(SNIPER_MIN_SL_PCT, 1.0)
 
-            # AI 확신도 기반 조정
+            # AI confidence-based adjustment
             if ai_score >= 0.7:
                 sn_tp += 0.5
             elif ai_score < 0.4:
                 sn_tp = max(sn_tp - 0.5, SNIPER_MIN_TP_PCT)
                 sn_sl = max(sn_sl - 0.3, SNIPER_MIN_SL_PCT)
 
-            # RSI 기반 미세 조정
+            # RSI-based fine tuning
             if rsi < 30:
                 sn_threshold = max(sn_threshold - 0.05, 0.1)
                 sn_tp += 0.3
@@ -779,10 +779,10 @@ def get_rich_recommendations(
                 sn_threshold += 0.05
                 sn_expiry = max(sn_expiry // 2, 15)
 
-            # SNIPER(s): 스윙/롱홀드형으로 늘어지는 값 방지 (단기 순환에 맞게 상한 제한)
+            # SNIPER(s): prevent values stretching into swing/long-hold (cap for short-term cycling)
             if snipers_mode:
-                sn_lookback = min(sn_lookback, 180)   # 최대 3시간
-                sn_expiry = min(sn_expiry, 120)       # 최대 2시간
+                sn_lookback = min(sn_lookback, 180)   # max 3h
+                sn_expiry = min(sn_expiry, 120)       # max 2h
                 sn_threshold = max(sn_threshold, 0.25)
 
             sn_tp, sn_sl = _clamp_sniper_tp_sl(sn_tp, sn_sl)
@@ -791,11 +791,11 @@ def get_rich_recommendations(
                 "expiry_min": sn_expiry,
                 "tp_pct": round(sn_tp, 1),
                 "sl_pct": round(sn_sl, 1),
-                # Entry (저격 매수)
+                # Entry (snipe buy)
                 "entry_enabled": True,
                 "entry_lookback_min": sn_lookback,
                 "entry_threshold_pct": round(max(sn_threshold, 0.1), 2),
-                # Exit (저격 매도)
+                # Exit (snipe sell)
                 "exit_enabled": True,
                 "exit_lookback_min": sn_lookback,
                 "exit_threshold_pct": round(max(sn_threshold, 0.1), 2),
@@ -814,10 +814,10 @@ def get_rich_recommendations(
                     "hold_sell": False,
                 })
         elif st == "PINGPONG":
-            # PINGPONG: 박스권 매매 - 변동성 기반
+            # PINGPONG: range-bound trading - volatility based
             pp_tp = max(2.0, min(6.0, daily_vol_pct * 80 + 2.0)) if daily_vol_pct else 3.0
             pp_sl = -(pp_tp * 0.7)
-            # RSI 기반 조정
+            # RSI-based adjustment
             if rsi < 30:
                 pp_tp += 0.5
             elif rsi > 70:
@@ -829,12 +829,12 @@ def get_rich_recommendations(
                 "rsi_sell": 70,
             }
         elif st == "AUTOLOOP":
-            # AUTOLOOP: 분할매수 + 익절
+            # AUTOLOOP: scaled buys + take profit
             al_tp = max(1.5, min(4.0, daily_vol_pct * 60 + 1.5)) if daily_vol_pct else 2.5
-            # AI 확신도 기반 배율
+            # AI confidence-based multiplier
             conf_tier = "high" if ai_score >= 0.8 else ("medium" if ai_score >= 0.6 else "low")
             budget_mult = 1.3 if conf_tier == "high" else (1.0 if conf_tier == "medium" else 0.8)
-            # RSI 기반 조정
+            # RSI-based adjustment
             if rsi < 30:
                 al_tp += 0.3
                 budget_mult = min(budget_mult + 0.1, 1.5)
@@ -847,8 +847,8 @@ def get_rich_recommendations(
                 "confidence_tier": conf_tier,
             }
 
-        # [2026-01-30] 전략별 AI 조정 + Regime 적합도 적용
-        # Regime 추정: trend + volatility 기반
+        # [2026-01-30] apply per-strategy AI adjustment + Regime fit
+        # Regime estimation: based on trend + volatility
         est_regime = "NEUTRAL"
         if trend > 1.0 and volatility < 3.0:
             est_regime = "BULL"
@@ -858,11 +858,11 @@ def get_rich_recommendations(
         ai_adjustment = adjust_ai_score_for_strategy(ai_score, strategy=st, regime=est_regime)
         regime_fit = get_regime_fit(est_regime, strategy=st)
 
-        # AI 조정 점수 (전략-국면 적합도 반영)
+        # AI-adjusted score (reflects strategy-regime fit)
         adjusted_score = ai_adjustment.get("adjusted_score", ai_score)
         ai_should_buy = ai_adjustment.get("should_buy", True)
 
-        # 전역 TP/SL 하한 보정
+        # global TP/SL floor correction
         if isinstance(recommended_params, dict):
             if "tp_pct" in recommended_params:
                 try:
@@ -883,7 +883,7 @@ def get_rich_recommendations(
 
         items.append({
             "market": market,
-            "strategy": strategy_label,  # 요청된 전략 라벨 (SNIPERS 포함)
+            "strategy": strategy_label,  # requested strategy label (incl. SNIPERS)
             "profile": strategy_label,
             "profile_score": round(float(profile_score), 4),
             "profile_features": profile_features,
@@ -892,13 +892,13 @@ def get_rich_recommendations(
             "high_price": float(t.get("high_price") or 0),
             "low_price": float(t.get("low_price") or 0),
             "acc_trade_price_24h": float(t.get("acc_trade_price_24h") or 0),
-            "active_strategy": active_strategy, # None이면 미사용
+            "active_strategy": active_strategy, # None means unused
             "oma_state": oma_state,
             "ai_score": ai_score,
-            "ai_adjusted_score": adjusted_score,  # 전략-국면 조정 점수
-            "ai_should_buy": ai_should_buy,       # AI 매수 허용 여부
-            "regime": est_regime,                 # 추정 국면
-            "regime_fit": regime_fit,             # 전략-국면 적합도
+            "ai_adjusted_score": adjusted_score,  # strategy-regime adjusted score
+            "ai_should_buy": ai_should_buy,       # whether AI permits buying
+            "regime": est_regime,                 # estimated regime
+            "regime_fit": regime_fit,             # strategy-regime fit
             "ai_model_rows": model_rows,
             "volatility": volatility,
             "trend": trend,
@@ -915,26 +915,26 @@ def get_rich_recommendations(
         })
 
     # --------------------------------------------------------
-    # Strategy-Specific Sorting & Filtering (Strategy Advisor 로직 통합)
+    # Strategy-Specific Sorting & Filtering (integrates Strategy Advisor logic)
     # --------------------------------------------------------
     from app.manager.strategy_graduator import suggest_strategy_for_ai_features
 
-    # st는 이미 위에서 정의됨 (strategy.strip().upper())
+    # st is already defined above (strategy.strip().upper())
 
-    # 각 코인에 대해 추천 전략 계산
+    # compute a recommended strategy for each coin
     for item in items:
         try:
             rec_strategy, confidence, reason = suggest_strategy_for_ai_features(
                 momentum=float(item.get("momentum") or 0),
-                volatility=float(item.get("volatility") or 0) / 100.0,  # 퍼센트 -> 비율
+                volatility=float(item.get("volatility") or 0) / 100.0,  # percent -> ratio
                 trend=float(item.get("trend") or 0),
                 ai_prediction=float(item.get("ai_score") or 0.5),
                 rsi=float(item.get("rsi") or 50.0),
             )
             item["recommended_strategy"] = rec_strategy
             item["strategy_confidence"] = round(confidence, 3)
-            # suggest_strategy는 5개 코어 전략만 분류한다.
-            # (SNIPER/SNIPERS/CONTRARIAN)는 추천 정렬의 1차 기준으로 사용하지 않는다.
+            # suggest_strategy only classifies the 5 core strategies.
+            # (SNIPER/SNIPERS/CONTRARIAN) are not used as the primary sort key for recommendations.
             if st in ("LADDER", "LIGHTNING", "GAZUA", "PINGPONG", "AUTOLOOP"):
                 item["strategy_match"] = (rec_strategy == st)
             else:
@@ -945,28 +945,28 @@ def get_rich_recommendations(
             item["strategy_confidence"] = 0.5
             item["strategy_match"] = False
 
-    # 1) 전략 프로필 점수 우선 (핵심)
-    # 2) AI 매수 허용 여부
-    # 3) 조정 AI 점수 / 국면 적합도
-    # 4) 거래대금
-    # strategy_match는 보조 정보로만 남기고 정렬 1순위에서 제외한다.
+    # 1) strategy profile score first (core)
+    # 2) whether AI permits buying
+    # 3) adjusted AI score / regime fit
+    # 4) trading value
+    # strategy_match is kept as auxiliary info only and excluded from the primary sort.
     items.sort(key=lambda x: (
-        -float(x.get("profile_score") or 0),            # 프로필 적합도
-        -1 if x.get("ai_should_buy") else 0,            # AI 매수 허용 우선
-        -float(x.get("ai_adjusted_score") or 0),        # 조정 점수 높은 순
-        -float(x.get("regime_fit") or 0),               # 국면 적합도 높은 순
-        -float(x.get("acc_trade_price_24h") or 0),      # 거래대금 높은 순
+        -float(x.get("profile_score") or 0),            # profile fit
+        -1 if x.get("ai_should_buy") else 0,            # AI buy-permitted first
+        -float(x.get("ai_adjusted_score") or 0),        # higher adjusted score first
+        -float(x.get("regime_fit") or 0),               # higher regime fit first
+        -float(x.get("acc_trade_price_24h") or 0),      # higher trading value first
     ))
 
-    # AI should_buy=True인 것만 우선, False도 표시는 함 (경고용)
-    # 단, 완전히 제외하지는 않고 should_buy=False인 것은 뒤로
-    items = [x for x in items if x.get("ai_score", 0) >= 0.3]  # 최소 임계값 낮춤
+    # prioritize AI should_buy=True, but still show False ones (as a warning)
+    # don't fully exclude them; should_buy=False ones go to the back
+    items = [x for x in items if x.get("ai_score", 0) >= 0.3]  # lowered minimum threshold
 
-    # 전략 일치 코인 통계는 유지하되, 반환은 프로필 점수 상위 N으로 단순화한다.
+    # keep matched-strategy coin stats, but simplify the return to top-N by profile score.
     matched = [x for x in items if x.get("strategy_match")]
     final_items = items[:n]
 
-    # [2026-02-01] 프로필 기반 스코어 보강(누락 시에만)
+    # [2026-02-01] enrich profile-based score (only if missing)
     for item in final_items:
         mkt = item.get("market")
         if mkt and mkt in ranked_markets and item.get("profile_features") is None:
@@ -998,15 +998,15 @@ def get_rich_recommendations(
 
 
 # ============================================================
-# G-pre. Background pre-warm helper (hyper_system._strategy_recommend_loop 에서 호출)
+# G-pre. Background pre-warm helper (called from hyper_system._strategy_recommend_loop)
 # ============================================================
 def prewarm_recommendation(system: Any, strategy: str, n: int = 20) -> None:
-    """전략 추천 캐시를 백그라운드에서 직렬로 갱신.
+    """Serially refresh the strategy recommendation cache in the background.
 
-    hyper_system._strategy_recommend_loop 에서 전략마다 45초 간격으로 호출된다.
-    - 120초 이내 캐시가 살아있으면 건너뜀 (사이클 ~540-610s > 120s 라 매 사이클 갱신됨)
-    - 세마포어는 get_rich_recommendations 내부에서 관리하므로 여기서 별도 처리 없음
-    - 실행 실패(세마포어 경합)는 다음 사이클에서 재시도
+    Called from hyper_system._strategy_recommend_loop at 45s intervals per strategy.
+    - skips if the cache is alive within 120s (cycle ~540-610s > 120s, so it refreshes each cycle)
+    - the semaphore is managed inside get_rich_recommendations, so nothing extra here
+    - execution failures (semaphore contention) are retried on the next cycle
     """
     import types
 
@@ -1021,9 +1021,9 @@ def prewarm_recommendation(system: Any, strategy: str, n: int = 20) -> None:
         max_price=round(0.0, 8),
     )
     if _get_cached(cache_key, ttl=120):
-        return  # 아직 신선함 - 건너뜀
+        return  # still fresh - skip
 
-    # fake request: get_rich_recommendations는 request.app.state.system만 필요
+    # fake request: get_rich_recommendations only needs request.app.state.system
     state = types.SimpleNamespace(system=system)
     app_ns = types.SimpleNamespace(state=state)
     req = types.SimpleNamespace(app=app_ns)
@@ -1034,7 +1034,7 @@ def prewarm_recommendation(system: Any, strategy: str, n: int = 20) -> None:
 
 
 # ============================================================
-# F. Strategy Recommendation (어떤 코인이 어떤 전략에 적합한가)
+# F. Strategy Recommendation (which coin fits which strategy)
 # ============================================================
 @router.get(
     "/recommend",
@@ -1045,26 +1045,26 @@ def prewarm_recommendation(system: Any, strategy: str, n: int = 20) -> None:
 )
 def recommend_strategy(
     request: Request,
-    market: Optional[str] = Query(None, description="특정 마켓 (없으면 전체)"),
-    top_n: int = Query(20, description="상위 N개만"),
+    market: Optional[str] = Query(None, description="Specific market (all if omitted)"),
+    top_n: int = Query(20, description="Top N only"),
 ):
     """
-    각 코인에 대해 어떤 전략이 가장 적합한지 추천합니다.
+    Recommend which strategy best fits each coin.
 
-    - LADDER: 고변동성 + 하락 추세 (분할매수)
-    - LIGHTNING: 강한 상승 모멘텀 (단타)
-    - GAZUA: AI 상승 예측 + 횡보/상승 (추세추종)
-    - PINGPONG: 안정적 박스권 (구간매매)
+    - LADDER: high volatility + downtrend (scaled buys)
+    - LIGHTNING: strong upward momentum (scalping)
+    - GAZUA: AI upward prediction + sideways/up (trend following)
+    - PINGPONG: stable range-bound (range trading)
     """
     from app.manager.strategy_graduator import suggest_strategy_for_ai_features
 
     system = request.app.state.system
 
-    # 0) 거래지원 종료 예정 마켓 조회
-    # Note: 바이낸스는 delisting API를 제공하지 않으므로 빈 dict 사용
+    # 0) query markets scheduled for delisting
+    # Note: Binance does not provide a delisting API, so use an empty dict
     delisting_markets = {}
 
-    # 1) 마켓 목록
+    # 1) market list
     if market:
         markets = [market.upper()]
     else:
@@ -1087,7 +1087,7 @@ def recommend_strategy(
             logger.error("[RECOMMEND] market list fetch FAILED, using minimal fallback: %s", exc, exc_info=True)
             markets = [Q.market("BTC"), Q.market("ETH"), Q.market("XRP")]
 
-    # 2) 캔들 데이터 가져오기 (병렬)
+    # 2) fetch candle data (parallel)
     def fetch_candles(m):
         try:
             # Market format (already in correct format)
@@ -1113,12 +1113,12 @@ def recommend_strategy(
 
     candle_map = {}
     with ThreadPoolExecutor(max_workers=4) as ex:
-        results = list(ex.map(fetch_candles, markets[:50]))  # 최대 50개
+        results = list(ex.map(fetch_candles, markets[:50]))  # max 50
     for m, data in results:
         if data:
             candle_map[m] = data
 
-    # 3) Brain 분석 + 전략 추천
+    # 3) Brain analysis + strategy recommendation
     recommendations = []
     brain = getattr(system.engine, "pipeline", None)
     if brain and hasattr(brain, "brain"):
@@ -1131,14 +1131,14 @@ def recommend_strategy(
     logger.info(f"[recommend] candle_map has {len(candle_map)} markets")
 
     for m, candles in candle_map.items():
-        # RSI 계산을 위해 최소 15개 데이터 필요 (length 14 + 1)
+        # RSI calculation needs at least 15 data points (length 14 + 1)
         if not candles or len(candles) < 15:
             logger.warning(f"[recommend] {m}: skipped (candles={len(candles) if candles else 0})")
             continue
 
         try:
-            # 가격 히스토리 (최신순 → 과거순으로 변환)
-            # 바이낸스 klines가 리스트 형태일 수 있으므로 처리
+            # price history (convert newest-first -> oldest-first)
+            # Binance klines may come as lists, so handle that
             if candles and isinstance(candles[0], list):
                 # Raw candle format: [timestamp, open, high, low, close, volume, ...]
                 prices = [float(c[4]) for c in reversed(candles) if len(c) >= 5]
@@ -1147,7 +1147,7 @@ def recommend_strategy(
                 prices = [float(c.get("trade_price") or 0) for c in reversed(candles)]
             current_price = prices[-1] if prices else 0
 
-            # Brain 분석
+            # Brain analysis
             if brain:
                 b_out = brain.analyze(m, current_price, price_history=prices)
                 ai_score = b_out.ai_prediction
@@ -1162,7 +1162,7 @@ def recommend_strategy(
                 momentum = indicators.trend(prices, 3) or 0.0
                 rsi = indicators.rsi(prices, 14) or 50.0
 
-            # 전략 추천
+            # strategy recommendation
             strategy, confidence, reason = suggest_strategy_for_ai_features(
                 momentum=momentum,
                 volatility=volatility,
@@ -1171,7 +1171,7 @@ def recommend_strategy(
                 rsi=rsi,
             )
 
-            # 거래지원 종료 경고 체크
+            # check delisting warning
             delist_info = delisting_markets.get(m)
             is_delisting = delist_info is not None
 
@@ -1188,16 +1188,16 @@ def recommend_strategy(
                 "rsi": round(rsi, 1),
                 "delisting": is_delisting,
                 "delisting_date": delist_info.get("delisting_date") if delist_info else None,
-                "warning": "⚠️ 거래지원 종료 예정" if is_delisting else None,
+                "warning": "⚠️ Delisting scheduled" if is_delisting else None,
             })
         except (KeyError, IndexError, AttributeError, TypeError, ValueError) as e:
             logger.warning("[RECOMMEND_API] %s: %s", m, e, exc_info=True)
             continue
 
-    # 4) Confidence 순 정렬
+    # 4) sort by confidence
     recommendations.sort(key=lambda x: x["confidence"], reverse=True)
 
-    # 5) 전략별 그룹화
+    # 5) group by strategy
     by_strategy = {}
     for r in recommendations:
         s = r["recommended_strategy"]
@@ -1209,7 +1209,7 @@ def recommend_strategy(
         "ok": True,
         "total": len(recommendations),
         "recommendations": recommendations[:top_n],
-        "by_strategy": {k: v[:5] for k, v in by_strategy.items()},  # 전략별 상위 5개
+        "by_strategy": {k: v[:5] for k, v in by_strategy.items()},  # top 5 per strategy
         "summary": {
             "LADDER": len(by_strategy.get("LADDER", [])),
             "LIGHTNING": len(by_strategy.get("LIGHTNING", [])),

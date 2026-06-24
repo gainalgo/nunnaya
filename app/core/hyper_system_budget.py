@@ -1,8 +1,8 @@
 """
 HyperSystem Budget Module
-- 예산 분배 로직
+- Budget allocation logic
 - Smart Allocation
-- F&G / Regime 배율 합성
+- F&G / Regime multiplier composition
 
 [MIGRATED 2026-03-31] Bybit USDT
 """
@@ -20,14 +20,14 @@ def compute_fg_multiplier(
     budget_strategy: str,
     fear_greed_module: Optional[Any] = None,
 ) -> float:
-    """Fear & Greed 기반 예산 배율 계산.
-    
+    """Compute budget multiplier based on Fear & Greed.
+
     Args:
         budget_strategy: "regime" | "fg" | "extreme" | "hybrid"
-        fear_greed_module: get_fear_greed() 반환값
-    
+        fear_greed_module: return value of get_fear_greed()
+
     Returns:
-        배율 (1.0 = 변화 없음)
+        Multiplier (1.0 = no change)
     """
     if budget_strategy not in ("fg", "extreme", "hybrid"):
         return 1.0
@@ -41,7 +41,7 @@ def compute_fg_multiplier(
         if budget_strategy == "fg":
             return fg_result.budget_multiplier
         elif budget_strategy == "extreme":
-            # 극단값(0-25, 75-100)만 적용
+            # Apply only at extremes (0-25, 75-100)
             if fg_result.value <= 25 or fg_result.value >= 75:
                 return fg_result.budget_multiplier
             return 1.0
@@ -56,10 +56,10 @@ def compute_regime_multiplier(
     regime_detector: Optional[Any] = None,
     market: str = "BTCUSDT",
 ) -> float:
-    """Market Regime 기반 예산 배율 계산.
-    
+    """Compute budget multiplier based on Market Regime.
+
     Returns:
-        배율 (1.0 = 변화 없음)
+        Multiplier (1.0 = no change)
     """
     if regime_detector is None:
         return 1.0
@@ -84,10 +84,10 @@ def compute_smart_allocation_scores(
     min_mult: float = 0.5,
     max_mult: float = 2.0,
 ) -> Dict[str, float]:
-    """Smart Allocation 스코어 계산.
-    
+    """Compute Smart Allocation scores.
+
     Returns:
-        {market: multiplier} 딕셔너리
+        {market: multiplier} dictionary
     """
     scores: Dict[str, float] = {}
     
@@ -143,12 +143,12 @@ def distribute_budget_by_scores(
     total_budget: float,
     min_per_market: float = 5.0,
 ) -> Dict[str, float]:
-    """스코어 기반으로 예산 분배.
+    """Distribute budget based on scores.
 
     min_per_market: 5 USDT
-    
+
     Returns:
-        {market: allocated_usdt} 딕셔너리
+        {market: allocated_usdt} dictionary
     """
     if not scores or total_budget <= 0:
         return {}
@@ -163,7 +163,7 @@ def distribute_budget_by_scores(
         allocated = max(min_per_market, allocated)
         allocations[market] = allocated
     
-    # 총액 초과 시 비례 축소
+    # Scale down proportionally if total is exceeded
     total_allocated = sum(allocations.values())
     if total_allocated > total_budget:
         scale = total_budget / total_allocated
@@ -176,7 +176,7 @@ def equal_distribution(
     total_budget: float,
     min_per_market: float = 5.0,
 ) -> Dict[str, float]:
-    """균등 분배.
+    """Equal distribution.
 
     min_per_market: 5 USDT
     """

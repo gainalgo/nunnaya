@@ -2,8 +2,8 @@
 # File: app/api/strategy_ladder_router.py
 # Extracted from strategy_router.py — Phase 1-B (file diet)
 #
-# LADDER 전략 셋업/조회/중지 엔드포인트
-# [FROZEN] 코드 내용 변경 없이 이동만
+# LADDER strategy setup/query/stop endpoints
+# [FROZEN] moved only, no code content changes
 # ============================================================
 
 from fastapi import APIRouter, Request, Query, Body
@@ -72,7 +72,7 @@ class LadderSetupRequest(BaseModel):
 
 
 # ============================================================
-# Ladder 실현손익/수수료/매수/매도 리셋 API
+# Ladder realized PnL / fee / buy / sell reset API
 # ============================================================
 @router.post(
     "/ladder/reset_stats",
@@ -81,7 +81,7 @@ class LadderSetupRequest(BaseModel):
 )
 def reset_ladder_stats(request: Request, market: Optional[str] = Body(None, embed=True)):
     """
-    실현손익/수수료/매수/매도 카운트 리셋 (market 지정 시 단일, 미지정 시 전체)
+    Reset realized PnL / fee / buy / sell counts (single market if specified, otherwise all)
     """
     system = request.app.state.system
     mgr = getattr(system, "ladder_manager", None)
@@ -219,7 +219,7 @@ def setup_ladder_market(req: LadderSetupRequest, request: Request):
     ctx.update_controls(patch)
     _sync_policy_tp_sl(ctx, tp=req.tp_pct, sl=-5.0)
 
-    # 3. 즉시 첫 매수 (포지션 없을 때만)
+    # 3. Immediate first buy (only when no position)
     buy_result = None
     has_position = False
     try:
@@ -227,7 +227,7 @@ def setup_ladder_market(req: LadderSetupRequest, request: Request):
         if pos and float(pos.get("qty", 0.0) or 0.0) > 0:
             has_position = True
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
-        logger.warning("[LADDER_STRAT_API] 3. 즉시 첫 매수 (포지션 없을 때만): %s", exc, exc_info=True)
+        logger.warning("[LADDER_STRAT_API] 3. immediate first buy (only when no position): %s", exc, exc_info=True)
 
     if bool(getattr(req, "buy_now", False)) and req.budget > 0 and not has_position:
         current_price = price_store.get_price(market) or 0.0
@@ -243,7 +243,7 @@ def setup_ladder_market(req: LadderSetupRequest, request: Request):
                                 current_price = float(_tc.get("trade_price") or 0.0)
                                 break
             except Exception as exc:
-                logger.warning("[LADDER_STRAT_API] 3. 즉시 첫 매수 (포지션 없을 때만): %s", exc, exc_info=True)
+                logger.warning("[LADDER_STRAT_API] 3. immediate first buy (only when no position): %s", exc, exc_info=True)
 
         per_step_usdt = order_override if order_override is not None else (req.budget / max(req.max_steps, 1))
 
@@ -270,7 +270,7 @@ def setup_ladder_market(req: LadderSetupRequest, request: Request):
     # Persist
     system._save_context_state()
 
-    # 4. ladder_config.json 자동 생성 → ICAG V3 sync → 업비트 예약 주문
+    # 4. Auto-create ladder_config.json -> ICAG V3 sync -> Upbit reserved orders
     grid_sync_result = None
     ladder_cfg_saved = None
     try:
@@ -523,7 +523,7 @@ def list_ladder_markets(request: Request):
         total_profit = getattr(ctx, "total_profit", 0.0)
         last_signal = getattr(ctx, "last_signal", "none")
 
-        # --- 실현손익, 수수료, 매수/매도 횟수 병합 ---
+        # --- Merge realized PnL, fee, buy/sell counts ---
         realized_profit_usdt = 0.0
         total_fee_usdt = 0.0
         buy_count = 0
@@ -618,7 +618,7 @@ def list_ladder_markets(request: Request):
     summary="Get ladder step details for a market",
 )
 def get_ladder_steps(request: Request, market: str = Query(...)):
-    """계단 상세 정보 (현재 계단 위치, 각 계단 가격, 체결 여부)."""
+    """Ladder step details (current step position, each step price, fill status)."""
     system = request.app.state.system
     market = market.strip().upper()
     ctx = system.coordinator.contexts.get(market)

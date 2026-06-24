@@ -1,31 +1,30 @@
 # ============================================================
 # File: app/core/peer_brief.py
-# Autocoin OS — Peer Brief (옆 서버 가드)
+# Autocoin OS — Peer Brief (peer server guard)
 # ------------------------------------------------------------
-# 부모님 2026-05-18 통찰 [[feedback_time_based_mechanism_skeptic]]:
-#   "시간 무관 메커니즘 = 옆 서버 + 뉴스 종합 의견 + 기존 가드"
-# 의 코드화.
+# Codification of the owner's 2026-05-18 insight [[feedback_time_based_mechanism_skeptic]]:
+#   "time-independent mechanism = peer servers + aggregated news opinion + existing guards"
 #
-# 흐름:
-#   1. 각 서버는 GET /peer/brief 로 자기 최근 30분 손실 청산 + 보유 포지션 + health 노출
-#   2. 백그라운드 polling task 가 PEER_SERVER_URLS 의 옆 서버를 주기적으로 polling → 메모리 캐시
-#   3. focus_manager 진입 직전 check_peer_block() 호출 → 같은 코인+방향 옆 SL/보유 시 reject
-#   4. paper mode 시 reject 대신 로그만 (검증용)
+# Flow:
+#   1. Each server exposes its own recent 30-min loss exits + held positions + health via GET /peer/brief
+#   2. A background polling task periodically polls the peer servers in PEER_SERVER_URLS -> in-memory cache
+#   3. focus_manager calls check_peer_block() just before entry -> reject when a peer has an SL/holding on the same coin+direction
+#   4. In paper mode, log only instead of rejecting (for validation)
 #
-# 안전 fallback:
-#   - 옆 서버 timeout/응답 없음 → 캐시 미갱신 → 가드 미작동 (단독 모드)
-#   - PEER_BRIEF_ENABLED=false → 가드 자체 비활성 (default)
-#   - 한 서버 잘못된 SL → 30분 자동 윈도우 만료
+# Safe fallback:
+#   - peer server timeout/no response -> cache not refreshed -> guard inactive (standalone mode)
+#   - PEER_BRIEF_ENABLED=false -> guard itself disabled (default)
+#   - one server's wrong SL -> auto window expiry after 30 min
 #
 # ENV:
-#   PEER_SERVER_URLS=http://host1:8010,http://host2:8010   (CSV, 옆 서버 base URL — 비면 polling X)
-#   PEER_BRIEF_ENABLED=true|false      (default True — 부모님 5-18 통찰 정신, 정착)
-#   PEER_BRIEF_PAPER=true|false        (default False — 부모님 5-31 결정, 처음부터 실가동)
-#   PEER_SERVER_ID=server-a             (자기 식별자, brief 응답에 포함, 미설정 시 hostname)
-#   PEER_BRIEF_POLL_INTERVAL_SEC=20    (옆 서버 polling 주기)
-#   PEER_BRIEF_TIMEOUT_SEC=0.5         (단일 polling timeout)
-#   PEER_BRIEF_SL_WINDOW_MIN=30        (옆 SL 차단 윈도우 — 분)
-#   PEER_BRIEF_TOKEN=                  (옵션, peer 간 약식 인증 헤더)
+#   PEER_SERVER_URLS=http://host1:8010,http://host2:8010   (CSV, peer server base URLs — empty = no polling)
+#   PEER_BRIEF_ENABLED=true|false      (default True — spirit of owner's 5-18 insight, settled)
+#   PEER_BRIEF_PAPER=true|false        (default False — owner's 5-31 decision, live from the start)
+#   PEER_SERVER_ID=server-a             (own identifier, included in brief response, hostname when unset)
+#   PEER_BRIEF_POLL_INTERVAL_SEC=20    (peer server polling interval)
+#   PEER_BRIEF_TIMEOUT_SEC=0.5         (single polling timeout)
+#   PEER_BRIEF_SL_WINDOW_MIN=30        (peer SL block window — minutes)
+#   PEER_BRIEF_TOKEN=                  (optional, lightweight auth header between peers)
 # ============================================================
 from __future__ import annotations
 
@@ -46,8 +45,8 @@ from app.core.constants import env_bool, env_float, env_int
 logger = logging.getLogger(__name__)
 
 # ── Runtime override store ──
-# UI 에서 저장한 값이 .env 보다 우선. 키가 없으면 .env fallback.
-# 디스크: runtime/peer_brief_state.json
+# Values saved from the UI take precedence over .env. Falls back to .env when key is absent.
+# Disk: runtime/peer_brief_state.json
 _STATE_PATH = os.path.join("runtime", "peer_brief_state.json")
 _STATE: Dict = {}
 _STATE_LOCK = threading.Lock()
@@ -79,7 +78,7 @@ def _save_state(state: Dict) -> None:
 
 
 def update_state(patch: Dict) -> Dict:
-    """부분 update + 디스크 저장."""
+    """Partial update + disk save."""
     merged = dict(_STATE)
     merged.update(patch)
     _save_state(merged)
@@ -90,7 +89,7 @@ def get_state() -> Dict:
     return dict(_STATE)
 
 
-# 모듈 import 시 1회 load (env 보다 우선)
+# Load once at module import (takes precedence over env)
 _STATE.update(_load_state())
 
 
@@ -106,11 +105,11 @@ class PeerLossExit:
 
 @dataclass
 class PeerWinExit:
-    """옆 서버가 BE 도달 / TP / trailing exit / 흑자 청산한 자리 — '거기 좋았다' 양의 신호."""
+    """A spot where a peer server hit BE / TP / trailing exit / profitable exit — a positive 'that was a good spot' signal."""
     symbol: str
     direction: str
     ts: float
-    reason: str      # exit_reason ("TP1", "TP2", "trailing", "BE_*" 등)
+    reason: str      # exit_reason ("TP1", "TP2", "trailing", "BE_*", etc.)
     pnl_net: float
 
 
@@ -118,27 +117,27 @@ class PeerWinExit:
 class PeerActivePosition:
     symbol: str
     direction: str
-    age_min: float = 0.0        # 보유 경과(분) — 길수록 미해결(TP/SL 못 침)
-    peak_pnl_pct: float = 0.0   # 보유 중 최고 도달 수익% (한 번도 못 green이면 ~0/음수 = 헤맴)
-    pnl_pct: float = 0.0        # 현재 미실현 손익% (가격 기준, 2026-06-07 부모 — 손실 정도 표시)
-    pnl_usdt: float = 0.0       # 현재 미실현 순손익 USDT (notional×% − 왕복0.11%, Positions 패널 Net과 동일, 2026-06-07)
+    age_min: float = 0.0        # holding elapsed (min) — longer = unresolved (no TP/SL hit yet)
+    peak_pnl_pct: float = 0.0   # max profit% reached while holding (never green => ~0/negative = struggling)
+    pnl_pct: float = 0.0        # current unrealized PnL% (price based, owner 2026-06-07 — shows extent of loss)
+    pnl_usdt: float = 0.0       # current unrealized net PnL USDT (notional×% − round-trip 0.11%, same as Positions panel Net, 2026-06-07)
 
 
 @dataclass
 class PeerNearMiss:
-    """점수는 합격인데 막판 게이트/슬롯/페어락에서 차단된 진입 — '되려다 안 된' 자리 (2026-06-07 부모)."""
+    """An entry that passed the score but was blocked at a last-stage gate/slot/pair-lock — an 'almost made it' spot (owner 2026-06-07)."""
     symbol: str
     direction: str
-    score: float        # guard_score final (임계 통과한 점수)
-    reason: str         # 막은 게이트 (final_30m15m / slot_full / pair_block 등)
+    score: float        # guard_score final (score that passed the threshold)
+    reason: str         # the gate that blocked (final_30m15m / slot_full / pair_block etc.)
     ts: float
-    price: float = 0.0  # 차단 당시 가격 — 사후판정 관제용
+    price: float = 0.0  # price at block time — for post-hoc review monitoring
 
 
 @dataclass
 class PeerBrief:
     server_id: str
-    ts: float                                                        # brief 생성 시각
+    ts: float                                                        # brief creation time
     recent_losses: List[PeerLossExit] = field(default_factory=list)
     recent_wins: List[PeerWinExit] = field(default_factory=list)
     active_positions: List[PeerActivePosition] = field(default_factory=list)
@@ -237,7 +236,7 @@ class PeerBrief:
 
 # ── Env helpers ──
 def _self_url_hints() -> set:
-    """자기 서버 식별 hint 집합 (hostname / 로컬 IP / localhost)."""
+    """Set of hints identifying self server (hostname / local IP / localhost)."""
     hints = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
     try:
         import socket
@@ -245,7 +244,7 @@ def _self_url_hints() -> set:
         if hn:
             hints.add(hn)
             hints.add(hn.split(".")[0])
-        # 외부 향 로컬 IP (실제 패킷 안 보냄)
+        # outward-facing local IP (no actual packet sent)
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
@@ -257,16 +256,16 @@ def _self_url_hints() -> set:
             pass
     except OSError:
         pass
-    # self-hint 친화적 이름 토큰은 per-서버 .env(PEER_SERVER_ID) 만 (+ 위 hostname).
-    # ⚠ runtime(_STATE.server_id) 은 다른 서버 값이 복사/오저장될 수 있어(예: server-a 에
-    #   'ByBit_ServerB') self-hint 에 넣으면 진짜 peer(home)를 'home' 토큰으로 잘못 self-skip → 제외.
-    #   env 친화적 이름(ByBit_ServerA)도 subdomain 라벨(server-a)이 토큰으로 잡혀 자기
-    #   도메인 self-poll(hairpin) 자동 skip. 'bybit'/숫자 토큰은 peer 라벨과 안 겹쳐 무해.
+    # friendly-name tokens for self-hint come only from the per-server .env (PEER_SERVER_ID) (+ hostname above).
+    # ⚠ runtime (_STATE.server_id) may have another server's value copied/mis-saved into it (e.g. 'ByBit_ServerB'
+    #   on server-a); adding it to self-hint would wrongly self-skip a real peer (home) via the 'home' token -> excluded.
+    #   A friendly env name (ByBit_ServerA) also has its subdomain label (server-a) caught as a token, so a self-poll
+    #   on one's own domain (hairpin) is auto-skipped. 'bybit'/numeric tokens don't overlap peer labels, so harmless.
     env_sid = (os.getenv("PEER_SERVER_ID", "") or "").strip().lower()
     if env_sid:
         hints.add(env_sid)
         for tok in re.split(r"[^a-z0-9]+", env_sid):
-            # 라벨만 (글자시작 + 3자↑) — '1'/'01' 숫자 토큰이 IP 라벨 오skip 방지
+            # labels only (alpha start + 3 chars+) — prevents '1'/'01' numeric tokens from mis-skipping IP labels
             if len(tok) >= 3 and tok[0].isalpha():
                 hints.add(tok)
     return hints
@@ -278,20 +277,20 @@ def _is_self_url(url: str, hints: set) -> bool:
         host = (urlparse(url).hostname or "").lower()
         if not host:
             return False
-        # full host (server-b.example.com) 또는 첫 라벨 (server-b) 이 self hint 와 일치 = 자기.
-        # → PEER_SERVER_ID=server-b 로 두면 자기 public 도메인 self-poll(Cloudflare hairpin,
-        #   >10s hang → 영구 stale) 을 사전에 skip. 라벨 정확 일치라 server-c 등 오skip 없음.
+        # full host (server-b.example.com) or first label (server-b) matching a self hint = self.
+        # -> setting PEER_SERVER_ID=server-b pre-skips a self-poll on one's own public domain (Cloudflare
+        #   hairpin, >10s hang -> permanently stale). Exact label match, so no mis-skip of server-c etc.
         return host in hints or host.split(".")[0] in hints
     except (ValueError, AttributeError):
         return False
 
 
-# self-skip 로그는 결과가 바뀔 때만 (get_peer_urls 가 /peer/settings·poll 마다 호출 → spam 방지)
+# log self-skip only when the result changes (get_peer_urls is called on every /peer/settings·poll -> avoid spam)
 _LAST_SKIP_LOGGED: frozenset = frozenset()
 
 
 def get_peer_urls() -> List[str]:
-    # 1) runtime override (UI 입력) 우선
+    # 1) runtime override (UI input) takes precedence
     state_urls = _STATE.get("urls")
     if isinstance(state_urls, list) and state_urls:
         raw = ",".join(str(u) for u in state_urls if u)
@@ -299,14 +298,14 @@ def get_peer_urls() -> List[str]:
         raw = (os.getenv("PEER_SERVER_URLS", "") or "").strip()
     if not raw:
         return []
-    # robustness: CSV 분리 + 'PEER_SERVER_URLS=' prefix 자동 strip
-    # (부모님 한 줄 합치는 과정에서 prefix 복사되는 사고 대응)
+    # robustness: CSV split + auto-strip 'PEER_SERVER_URLS=' prefix
+    # (handles the accident of the prefix being copied while the owner merges into one line)
     tokens = []
     for token in raw.split(","):
         token = token.strip()
         if not token:
             continue
-        # prefix 자동 제거 (case-insensitive)
+        # auto-remove prefix (case-insensitive)
         low = token.lower()
         if low.startswith("peer_server_urls="):
             token = token.split("=", 1)[1].strip()
@@ -315,26 +314,26 @@ def get_peer_urls() -> List[str]:
         token = token.rstrip("/")
         if token and token not in tokens:
             tokens.append(token)
-    # 자기 자동 skip — 자기 hostname / 로컬 IP / PEER_SERVER_ID 매칭
+    # auto-skip self — match own hostname / local IP / PEER_SERVER_ID
     hints = _self_url_hints()
     skipped = [u for u in tokens if _is_self_url(u, hints)]
     if skipped:
         global _LAST_SKIP_LOGGED
         sk = frozenset(skipped)
-        if sk != _LAST_SKIP_LOGGED:  # 바뀔 때만 1회 — 매 호출 INFO spam 방지
+        if sk != _LAST_SKIP_LOGGED:  # once, only when changed — avoid INFO spam on every call
             logger.info("[PEER] self-URL auto-skip: %s (hints=%s)", skipped, sorted(hints))
             _LAST_SKIP_LOGGED = sk
     return [u for u in tokens if not _is_self_url(u, hints)]
 
 
 def get_server_id() -> str:
-    # 식별(identity)은 per-서버 .env(PEER_SERVER_ID) 가 1순위.
-    # ⚠ runtime override 는 다른 서버 값이 복사/오저장돼(예: server-a runtime 에 'ByBit_ServerB')
-    #   .env 를 가리는 사고가 잦음 → 다른 tunable 과 달리 server_id 만은 env 우선.
+    # identity: the per-server .env (PEER_SERVER_ID) is the top priority.
+    # ⚠ runtime override frequently has another server's value copied/mis-saved (e.g. 'ByBit_ServerB' in
+    #   server-a's runtime) masking the .env -> unlike other tunables, for server_id alone env wins.
     sid = (os.getenv("PEER_SERVER_ID", "") or "").strip()
     if sid:
         return sid
-    # env 없을 때만 runtime override(대시보드 직접 지정). hostname 자동fallback pin 은 무시.
+    # runtime override (dashboard-set directly) only when env absent. Ignore an auto-fallback hostname pin.
     try:
         import socket
         hn = socket.gethostname() or ""
@@ -347,15 +346,15 @@ def get_server_id() -> str:
 
 
 def get_peer_token() -> str:
-    # token 은 보안 차원에서 .env 만 (UI 노출 X)
+    # the token is .env-only for security (not exposed in UI)
     return (os.getenv("PEER_BRIEF_TOKEN", "") or "").strip()
 
 
 def get_cf_access_headers() -> dict:
-    """Cloudflare Access Service Token 헤더 — 옆 서버가 Access 로 보호되면 통과용.
+    """Cloudflare Access Service Token headers — to pass through when a peer server is protected by Access.
 
-    CF_ACCESS_CLIENT_ID + CF_ACCESS_CLIENT_SECRET .env 설정 시 자동 헤더 추가.
-    미설정 시 빈 dict 리턴 (Access 미보호 환경 호환).
+    Headers are added automatically when CF_ACCESS_CLIENT_ID + CF_ACCESS_CLIENT_SECRET are set in .env.
+    Returns an empty dict when unset (compatible with Access-unprotected environments).
     """
     cid = (os.getenv("CF_ACCESS_CLIENT_ID", "") or "").strip()
     csec = (os.getenv("CF_ACCESS_CLIENT_SECRET", "") or "").strip()
@@ -391,10 +390,10 @@ def get_poll_interval_sec() -> float:
 
 
 def get_timeout_sec() -> float:
-    # runtime(_STATE) > .env > default. 다른 getter 와 우선순위 통일.
-    # 2026-06-05: 코드 default 는 3.0 이지만 .env 의 PEER_BRIEF_TIMEOUT_SEC=0.5 가
-    #   이를 덮어써 fix 가 무력화됐던 사고 → .env 값 3.0 정정 + _STATE override 추가.
-    #   0.5초는 http→https 301 redirect 왕복(server-b ~0.85s)도 못 담아 stale 유발.
+    # runtime(_STATE) > .env > default. Unified priority with the other getters.
+    # 2026-06-05: the code default is 3.0, but .env's PEER_BRIEF_TIMEOUT_SEC=0.5 overrode it
+    #   and neutralized the fix -> corrected the .env value to 3.0 + added the _STATE override.
+    #   0.5s can't even hold the http->https 301 redirect round-trip (server-b ~0.85s), causing staleness.
     v = _STATE.get("timeout_sec")
     if isinstance(v, (int, float)) and v > 0:
         return max(0.1, float(v))
@@ -402,7 +401,7 @@ def get_timeout_sec() -> float:
 
 
 def get_peer_win_window_min() -> int:
-    """옆 win 신호 참조 윈도우 (분). SL 윈도우와 별개 (보통 짧게)."""
+    """Reference window (min) for peer win signals. Separate from the SL window (usually shorter)."""
     v = _STATE.get("peer_win_window_min")
     if isinstance(v, (int, float)) and v > 0:
         return max(1, int(v))
@@ -410,32 +409,32 @@ def get_peer_win_window_min() -> int:
 
 
 def get_peer_win_bonus() -> float:
-    """옆 win 매칭 시 conviction 가점. 0 = 비활성."""
+    """Conviction bonus on a peer win match. 0 = disabled."""
     v = _STATE.get("peer_win_bonus")
     if isinstance(v, (int, float)):
         return max(0.0, min(50.0, float(v)))
     return max(0.0, min(50.0, env_float("PEER_BRIEF_WIN_BONUS", 5.0)))
 
 
-# ── Cache (메모리) ──
-_BRIEF_CACHE: Dict[str, PeerBrief] = {}        # url → 최근 brief
-_LAST_POLL_TS: Dict[str, float] = {}            # url → 마지막 polling 성공 ts
-_LAST_FAIL_TS: Dict[str, float] = {}            # url → 마지막 polling 실패 ts
+# ── Cache (in-memory) ──
+_BRIEF_CACHE: Dict[str, PeerBrief] = {}        # url -> latest brief
+_LAST_POLL_TS: Dict[str, float] = {}            # url -> last successful polling ts
+_LAST_FAIL_TS: Dict[str, float] = {}            # url -> last failed polling ts
 _CACHE_LOCK = asyncio.Lock()
 
 
-# ── 자기 brief 생성 (router 응답용) ──
+# ── Build own brief (for router response) ──
 def build_my_brief(system=None) -> PeerBrief:
-    """현재 서버의 brief 를 만든다.
+    """Build the current server's brief.
 
-    - 최근 sl_window_min 분 안 손실 (pnl_net < 0) EXIT
-    - 현재 보유 포지션 (symbol, direction)
-    - 봇 health (focus_active, focus_ready, last_fill_ts)
+    - loss (pnl_net < 0) EXITs within the recent sl_window_min minutes
+    - currently held positions (symbol, direction)
+    - bot health (focus_active, focus_ready, last_fill_ts)
     """
     now = time.time()
     server_id = get_server_id()
-    # ★ [2026-06-11] recent_losses 는 함대 dir_fail 윈도우(4h)까지 담는다 — 시간차(50분) 손실 공유.
-    #   soft check_peer_sl_caution 은 자기 30분 윈도우로 재필터하므로 영향 없음.
+    # ★ [2026-06-11] recent_losses spans up to the fleet dir_fail window (4h) — to share time-staggered (50-min) losses.
+    #   soft check_peer_sl_caution re-filters with its own 30-min window, so no impact.
     window_sec = max(get_sl_window_min(), get_peer_fleet_dirfail_window_min()) * 60.0
     cutoff = now - window_sec
 
@@ -453,13 +452,13 @@ def build_my_brief(system=None) -> PeerBrief:
             sym = str(rec.get("market") or "").upper()
             dirn = str(rec.get("direction") or "").upper()
             reason = str(rec.get("exit_reason") or "")
-            # 손실 (SL 윈도우 안)
+            # loss (within SL window)
             if pnl < 0 and ts >= cutoff:
                 recent_losses.append(PeerLossExit(
                     symbol=sym, direction=dirn, ts=ts, reason=reason, pnl_net=pnl,
                 ))
-            # 흑자 청산 (win 윈도우 안) — "이 자리 좋았다" 양의 신호
-            # 흑자 (pnl > 0) 또는 BE 도달 reason 패턴
+            # profitable exit (within win window) — "this spot was good" positive signal
+            # profit (pnl > 0) or a BE-reached reason pattern
             elif (pnl > 0 or _is_win_reason(reason)) and ts >= win_cutoff:
                 recent_wins.append(PeerWinExit(
                     symbol=sym, direction=dirn, ts=ts, reason=reason, pnl_net=pnl,
@@ -478,8 +477,8 @@ def build_my_brief(system=None) -> PeerBrief:
                     sym = (getattr(pos, "market", "") or "").upper()
                     dirn = (getattr(pos, "direction", "") or "").upper()
                     if sym and dirn in ("LONG", "SHORT"):
-                        # 현재가 조회 없이 저장 필드만으로 "고전" 신호 산출:
-                        #   age = 보유 경과(분), peak_pnl = 보유 중 최고 도달 수익%(peak_profit_price)
+                        # derive a "struggling" signal from stored fields alone, no current-price lookup:
+                        #   age = holding elapsed (min), peak_pnl = max profit% reached while holding (peak_profit_price)
                         _ets = float(getattr(pos, "entry_ts", 0.0) or 0.0)
                         _age = (now - _ets) / 60.0 if _ets > 0 else 0.0
                         _ep = float(getattr(pos, "entry_price", 0.0) or 0.0)
@@ -488,7 +487,7 @@ def build_my_brief(system=None) -> PeerBrief:
                             _peak_pnl = ((_pk / _ep - 1.0) * 100.0) if dirn == "LONG" else ((1.0 - _pk / _ep) * 100.0)
                         else:
                             _peak_pnl = 0.0
-                        # 현재 미실현 손익% (캐시 현재가 — 부모님 "손실 정도", 2026-06-07)
+                        # current unrealized PnL% (cached current price — owner's "extent of loss", 2026-06-07)
                         _cur = 0.0
                         try:
                             _cur = float(fm._get_current_price(sym) or 0.0)
@@ -498,7 +497,7 @@ def build_my_brief(system=None) -> PeerBrief:
                             _pnl = ((_cur / _ep - 1.0) * 100.0) if dirn == "LONG" else ((1.0 - _cur / _ep) * 100.0)
                         else:
                             _pnl = 0.0
-                        # 순손익 USDT — notional×% − 왕복 0.11% (Positions 패널 Net 과 동일 공식)
+                        # net PnL USDT — notional×% − round-trip 0.11% (same formula as Positions panel Net)
                         _qty = float(getattr(pos, "qty", 0.0) or 0.0)
                         _notional = _ep * _qty
                         _pnl_usdt = _notional * (_pnl / 100.0) - _notional * 0.0011 if _notional > 0 else 0.0
@@ -508,7 +507,7 @@ def build_my_brief(system=None) -> PeerBrief:
                             pnl_pct=round(_pnl, 2), pnl_usdt=round(_pnl_usdt, 2),
                         ))
                 health["focus_active"] = len(active)
-                # 점수 합격인데 막판 차단된 near-miss (메모리 링버퍼, 저널 파싱 X — 2026-06-07 부모)
+                # near-miss: passed the score but blocked at the last stage (in-memory ring buffer, no journal parse — owner 2026-06-07)
                 try:
                     for nm in list(getattr(fm, "_recent_near_miss", None) or []):
                         near_miss.append(PeerNearMiss(
@@ -544,21 +543,21 @@ def build_my_brief(system=None) -> PeerBrief:
 
 
 def _is_win_reason(reason: str) -> bool:
-    """청산 사유가 '성공' 패턴인지 — TP / trailing / BE 도달 등."""
+    """Whether the exit reason is a 'success' pattern — TP / trailing / BE reached etc."""
     r = (reason or "").lower()
     if not r:
         return False
     return any(k in r for k in ("tp1", "tp2", "tp_", "trail", "be_", "breakeven", "profit"))
 
 
-# ── Polling (백그라운드) ──
+# ── Polling (background) ──
 async def _fetch_one(url: str, timeout: float) -> Optional[PeerBrief]:
-    """단일 옆 서버 polling. 자기 자신 응답 detect 시 None."""
+    """Poll a single peer server. None when self-response is detected."""
     headers = {}
     tok = get_peer_token()
     if tok:
         headers["X-Peer-Token"] = tok
-    # Cloudflare Access Service Token (옆 서버가 Access 로 보호되면 통과)
+    # Cloudflare Access Service Token (passes through when a peer server is protected by Access)
     headers.update(get_cf_access_headers())
 
     full_url = f"{url}/peer/brief"
@@ -573,7 +572,7 @@ async def _fetch_one(url: str, timeout: float) -> Optional[PeerBrief]:
             return None
         data = resp.json()
         brief = PeerBrief.from_dict(data)
-        # 자기 self-polling detect — brief.server_id 가 자기 ID 와 같으면 cache 차단
+        # detect self-polling — block caching when brief.server_id equals own ID
         if brief is not None:
             my_id = get_server_id()
             if my_id and brief.server_id and brief.server_id == my_id:
@@ -586,7 +585,7 @@ async def _fetch_one(url: str, timeout: float) -> Optional[PeerBrief]:
 
 
 async def _poll_loop():
-    """백그라운드 polling task — main.py lifespan 에서 시작."""
+    """Background polling task — started in main.py lifespan."""
     logger.info("[PEER] poll loop entering — interval=%.1fs timeout=%.2fs",
                 get_poll_interval_sec(), get_timeout_sec())
     while True:
@@ -605,7 +604,7 @@ async def _poll_loop():
                             _LAST_POLL_TS[url] = now
                         else:
                             _LAST_FAIL_TS[url] = now
-                            # 만료된 캐시는 삭제 — stale brief 로 차단 X
+                            # delete expired cache — don't block on a stale brief
                             last_ok = _LAST_POLL_TS.get(url, 0.0)
                             stale_sec = get_poll_interval_sec() * 4.0
                             if last_ok > 0 and (now - last_ok) > stale_sec:
@@ -624,7 +623,7 @@ _poll_task: Optional[asyncio.Task] = None
 
 
 def start_poll_loop() -> Optional[asyncio.Task]:
-    """main.py lifespan startup 에서 호출."""
+    """Called from main.py lifespan startup."""
     global _poll_task
     if _poll_task is not None and not _poll_task.done():
         return _poll_task
@@ -646,16 +645,16 @@ def stop_poll_loop():
     _poll_task = None
 
 
-# ── Gate (sync, focus_manager 호출) ──
+# ── Gate (sync, called by focus_manager) ──
 def check_peer_block(symbol: str, direction: str) -> Tuple[bool, str]:
-    """옆 서버가 같은 코인+방향 최근 SL 또는 현재 보유 시 (True, reason).
+    """(True, reason) when a peer server has a recent SL or current holding on the same coin+direction.
 
-    리턴:
-        (True, reason)  → 차단 (실제 reject)
-        (False, "")     → 통과
-        (False, "paper:...")  → paper mode = 매칭 있지만 차단 안 함 (로그용)
+    Returns:
+        (True, reason)  -> block (actual reject)
+        (False, "")     -> pass
+        (False, "paper:...")  -> paper mode = match present but not blocked (for logging)
 
-    enabled=False → 항상 (False, "")
+    enabled=False -> always (False, "")
     """
     if not is_enabled():
         return False, ""
@@ -671,7 +670,7 @@ def check_peer_block(symbol: str, direction: str) -> Tuple[bool, str]:
     matched_sl: Optional[Tuple[str, PeerLossExit]] = None
     matched_active: Optional[Tuple[str, PeerActivePosition]] = None
 
-    # 스냅샷 (lock 없이 dict 복제) — race condition 무해 (옆 polling 은 별도 task)
+    # snapshot (copy dict without lock) — race condition harmless (peer polling is a separate task)
     for url, brief in list(_BRIEF_CACHE.items()):
         if brief is None:
             continue
@@ -708,13 +707,13 @@ def check_peer_block(symbol: str, direction: str) -> Tuple[bool, str]:
 
 
 def check_peer_win_bonus(symbol: str, direction: str) -> Tuple[float, str]:
-    """옆 서버 양의 신호 — 같은 코인+방향 옆 서버 최근 N분 win 매칭 시 (bonus, source).
+    """Peer positive signal — (bonus, source) when a peer server has a win on the same coin+direction within the last N minutes.
 
-    리턴:
-        (0.0, "")        — 매칭 없음 / 비활성
-        (bonus, source)  — 가점 + 출처 (예: "BiBit_Home BNBUSDT/LONG 3m ago TP1")
+    Returns:
+        (0.0, "")        — no match / disabled
+        (bonus, source)  — bonus + source (e.g. "BiBit_Home BNBUSDT/LONG 3m ago TP1")
 
-    가점은 *한 번만* (가장 가까운 win). 여러 옆 서버 매칭돼도 중복 가산 X.
+    The bonus is applied *only once* (the nearest win). No double-counting even if multiple peers match.
     """
     if not is_enabled():
         return 0.0, ""
@@ -751,9 +750,9 @@ def check_peer_win_bonus(symbol: str, direction: str) -> Tuple[float, str]:
 
 
 def get_peer_sl_penalty() -> float:
-    """옆 서버 같은 코인+방향 최근 SL 매칭 시 conviction(guard_score) 감점. 0 = 비활성.
-    ⚠ 하드차단 아님 — 본체 지표(현재 반등 포함)가 강하면 이 감점을 넘어 진입한다.
-    부모님 2026-06-06: "옆은 자체 로직 진입 전 한 번 더 생각하는 참고 차원."."""
+    """Conviction (guard_score) penalty on a peer recent-SL match on the same coin+direction. 0 = disabled.
+    ⚠ Not a hard block — if the core indicators (including a current rebound) are strong, entry proceeds past this penalty.
+    Owner 2026-06-06: "the peer is a reference to think once more before the own logic enters."."""
     v = _STATE.get("peer_sl_penalty")
     if isinstance(v, (int, float)):
         return max(0.0, min(50.0, float(v)))
@@ -761,14 +760,14 @@ def get_peer_sl_penalty() -> float:
 
 
 def check_peer_sl_caution(symbol: str, direction: str) -> Tuple[float, str]:
-    """옆 서버 같은 코인+방향 최근 SL(손실 청산) → (penalty, source). 소프트 감점용.
+    """Peer recent SL (loss exit) on the same coin+direction -> (penalty, source). For a soft penalty.
 
-    리턴:
-        (0.0, "")        — 매칭 없음 / 비활성
+    Returns:
+        (0.0, "")        — no match / disabled
         (penalty, source)
-    ⚠ 하드차단 아님 (옛 check_peer_block 폐기). '보유'는 무시하고 최근 SL 만 본다.
-    "SL 자리 무변화 재진입" 은 본체 가드(Reentry/dir_fail_window) + 이 감점으로 걸러지고,
-    "지표 반등" 이면 본체 conviction 이 높아 감점을 넘으므로 부모님 "반등 가점" 이 자연 처리됨.
+    ⚠ Not a hard block (the old check_peer_block is retired). Ignores 'holdings', looks only at recent SLs.
+    "Re-entry into an unchanged SL spot" is filtered by the core guards (Reentry/dir_fail_window) + this penalty,
+    while an "indicator rebound" has high core conviction that exceeds the penalty, so the owner's "rebound bonus" is handled naturally.
     """
     if not is_enabled():
         return 0.0, ""
@@ -784,7 +783,7 @@ def check_peer_sl_caution(symbol: str, direction: str) -> Tuple[float, str]:
     now = time.time()
     cutoff = now - window_sec
 
-    best: Optional[Tuple[str, PeerLossExit]] = None  # (server_id, loss) — 가장 최근
+    best: Optional[Tuple[str, PeerLossExit]] = None  # (server_id, loss) — most recent
     for url, brief in list(_BRIEF_CACHE.items()):
         if brief is None:
             continue
@@ -805,9 +804,9 @@ def check_peer_sl_caution(symbol: str, direction: str) -> Tuple[float, str]:
 
 
 def get_peer_struggle_penalty() -> float:
-    """옆이 같은 코인+방향을 N분+ 들고도 한 번도 제대로 green 못 친(헤맴/오실레이션) 자리면 conviction 감점.
-    부모님 2026-06-06 TON 사례: 한 서버가 진입 후 방향 바뀜·5~10분 엎치락뒤치락 중인데 다른 서버가
-    같은 방향 또 진입하는 것 방지. ⚠ 하드차단 X, soft nudge — 건강한 수익 라이딩은 안 건드림."""
+    """Conviction penalty when a peer has held the same coin+direction for N+ min without ever properly going green (struggling/oscillating).
+    Owner's 2026-06-06 TON case: prevents another server from re-entering the same direction while one server's position
+    flipped direction after entry and is seesawing for 5~10 min. ⚠ Not a hard block, a soft nudge — leaves healthy profit riding untouched."""
     v = _STATE.get("peer_struggle_penalty")
     if isinstance(v, (int, float)):
         return max(0.0, min(50.0, float(v)))
@@ -815,7 +814,7 @@ def get_peer_struggle_penalty() -> float:
 
 
 def get_peer_struggle_age_min() -> float:
-    """고전 판정 — 보유 N분 이상 (runtime _STATE > env). UI 조절용."""
+    """Struggle decision — held N+ minutes (runtime _STATE > env). For UI tuning."""
     v = _STATE.get("peer_struggle_age_min")
     if isinstance(v, (int, float)) and v > 0:
         return max(1.0, float(v))
@@ -823,7 +822,7 @@ def get_peer_struggle_age_min() -> float:
 
 
 def get_peer_struggle_peak_pct() -> float:
-    """고전 판정 — 보유 중 최고 도달 수익% 가 이 미만이면 '못 green'(헤맴). (runtime _STATE > env). UI 조절용."""
+    """Struggle decision — if the max profit% reached while holding is below this, it 'never went green' (struggling). (runtime _STATE > env). For UI tuning."""
     v = _STATE.get("peer_struggle_peak_pct")
     if isinstance(v, (int, float)):
         return float(v)
@@ -831,11 +830,11 @@ def get_peer_struggle_peak_pct() -> float:
 
 
 def check_peer_struggle_caution(symbol: str, direction: str) -> Tuple[float, str]:
-    """옆이 같은 코인+방향을 '고전 중 보유'(age ≥ N분 AND peak_pnl < 임계 = 한 번도 제대로 못 green)
-    → (penalty, source). 수익 라이딩(peak_pnl 높음)이나 갓 진입(age 짧음)은 감점 안 함.
+    """A peer 'holding while struggling' the same coin+direction (age >= N min AND peak_pnl < threshold = never properly went green)
+    -> (penalty, source). Profit riding (high peak_pnl) or a fresh entry (short age) is not penalized.
 
-    age/peak_pnl 은 brief 의 PeerActivePosition 에 실려옴(현재가 조회 불필요). 옛 brief(필드 0)는
-    age_min=0 이라 자동 제외 → 하위호환 안전.
+    age/peak_pnl ride along in the brief's PeerActivePosition (no current-price lookup needed). An old brief (field 0)
+    has age_min=0 so is auto-excluded -> backward-compat safe.
     """
     if not is_enabled():
         return 0.0, ""
@@ -848,7 +847,7 @@ def check_peer_struggle_caution(symbol: str, direction: str) -> Tuple[float, str
         return 0.0, ""
 
     age_min_req = get_peer_struggle_age_min()
-    peak_max = get_peer_struggle_peak_pct()  # 이 %↑ green 찍었으면 건강 → 제외
+    peak_max = get_peer_struggle_peak_pct()  # green above this % = healthy -> excluded
 
     for url, brief in list(_BRIEF_CACHE.items()):
         if brief is None:
@@ -863,11 +862,11 @@ def check_peer_struggle_caution(symbol: str, direction: str) -> Tuple[float, str
 
 
 def get_peer_conflict_penalty() -> float:
-    """옆이 '반대 방향'을 건강하게(수익권 도달) 보유 중인데 내가 그 반대로 진입하려 할 때 conviction 감점.
-    부모님 2026-06-07 자가충돌(ZEC Home LONG ↔ server-c SHORT): 반대 보유는 헤지라 손실은 줄지만
-    수수료 먹고 이익 0 → 신중해야. ⚠ 단, 상대가 '헤맴'(peak 낮음 = 방향 꺾이는 중)이면 감점 X —
-    그땐 내 반대 진입이 '전환 포착'(레짐 flip)이라 오히려 맞을 수 있음. 하드차단 X, soft nudge. 0=비활성.
-    runtime _STATE > env. (UI 조절용)"""
+    """Conviction penalty when a peer is healthily holding the 'opposite direction' (reached profit) and I try to enter against it.
+    Owner's 2026-06-07 self-conflict (ZEC Home LONG <-> server-c SHORT): an opposite holding is a hedge so the loss shrinks
+    but it eats fees for 0 profit -> be cautious. ⚠ But if the other side is 'struggling' (low peak = direction turning over) no penalty —
+    then my opposite entry is a 'turn catch' (regime flip) and may actually be right. Not a hard block, a soft nudge. 0=disabled.
+    runtime _STATE > env. (for UI tuning)"""
     v = _STATE.get("peer_conflict_penalty")
     if isinstance(v, (int, float)):
         return max(0.0, min(50.0, float(v)))
@@ -875,13 +874,13 @@ def get_peer_conflict_penalty() -> float:
 
 
 def check_peer_conflict_caution(symbol: str, direction: str) -> Tuple[float, str]:
-    """옆이 '반대 방향'을 건강하게(peak ≥ 임계 = 수익권 도달) 보유 중인데 내가 그 반대로
-    진입 → (penalty, source). 자가충돌(자본 상쇄·수수료로 이익0) 신중용. soft 감점.
+    """A peer is healthily holding the 'opposite direction' (peak >= threshold = reached profit) and I enter against it
+    -> (penalty, source). For caution against self-conflict (capital cancels out, fees yield 0 profit). Soft penalty.
 
-    ★ 비대칭 (부모님 2026-06-07): 상대가 '헤맴'(peak < 임계 = 한 번도 제대로 green 못 침)이면 감점 0 —
-      상대 방향이 꺾이는 중 → 내 반대 진입은 '전환 포착'이므로 막지 않는다([[feedback_regime_flip_asymmetric]]).
-    건강 판정 임계 = get_peer_struggle_peak_pct() 재사용 (struggle 과 같은 기준선, 노브 1개로 통일).
-    peak_pnl_pct 는 brief 의 PeerActivePosition 에 실려옴. 옛 brief(필드 0)는 peak 0 < 임계 → 자동 제외(안전).
+    ★ Asymmetric (owner 2026-06-07): if the other side is 'struggling' (peak < threshold = never properly went green), penalty 0 —
+      the other side's direction is turning over -> my opposite entry is a 'turn catch', so don't block it ([[feedback_regime_flip_asymmetric]]).
+    Healthy-decision threshold = reuse get_peer_struggle_peak_pct() (same baseline as struggle, unified into one knob).
+    peak_pnl_pct rides along in the brief's PeerActivePosition. An old brief (field 0) has peak 0 < threshold -> auto-excluded (safe).
     """
     if not is_enabled():
         return 0.0, ""
@@ -894,9 +893,9 @@ def check_peer_conflict_caution(symbol: str, direction: str) -> Tuple[float, str
         return 0.0, ""
     opp = "SHORT" if dirn == "LONG" else "LONG"
 
-    peak_min = get_peer_struggle_peak_pct()  # 상대 peak 이 이 %↑ = 건강(수익권) → 충돌 신중 / 미만 = 헤맴 → 통과
+    peak_min = get_peer_struggle_peak_pct()  # other side's peak above this % = healthy (in profit) -> caution on conflict / below = struggling -> pass
 
-    best: Optional[Tuple[str, PeerActivePosition]] = None  # 가장 건강한(peak 큰) 반대 포지션
+    best: Optional[Tuple[str, PeerActivePosition]] = None  # healthiest (largest peak) opposite position
     for url, brief in list(_BRIEF_CACHE.items()):
         if brief is None:
             continue
@@ -904,7 +903,7 @@ def check_peer_conflict_caution(symbol: str, direction: str) -> Tuple[float, str
             if ap.symbol != sym or ap.direction != opp:
                 continue
             if ap.peak_pnl_pct < peak_min:
-                continue  # 상대가 헤맴 = 전환 신호 → 감점 X (turn-catch)
+                continue  # other side struggling = turn signal -> no penalty (turn-catch)
             if best is None or ap.peak_pnl_pct > best[1].peak_pnl_pct:
                 best = (brief.server_id or url, ap)
 
@@ -915,14 +914,14 @@ def check_peer_conflict_caution(symbol: str, direction: str) -> Tuple[float, str
     return penalty, src
 
 
-# ── 🌊 [2026-06-15 부모] 함대 몰림(crowding) — 옆이 같은 코인+'같은' 방향 보유 시 soft 감점 ──
-#   오늘 TRUMP LONG: 4서버가 4분 안에 거의 동시 진입(341~345분 전) → 분산 깨짐 → 골고루 −3.5%.
-#   기존 struggle 감점은 'age≥5분 AND peak<0.3%'(헤맴) 조건이라 갓 진입한 건강 보유는 안 셈 →
-#   동시 진입 구멍. 부모님 "옆 SL뿐 아니라 *현재 보유현황*도 참조하라" → 옆이 지금 같은 방향
-#   들고 있으면 그 자체가 몰림 신호. ⚠ 하드차단 X(부모님 "보고도 들어가야"), soft 감점만 —
-#   본체 conviction 강하면 넘어 진입. graduated(옆 1서버당 N점, cap 까지). default OFF(opt-in).
+# ── 🌊 [2026-06-15 owner] fleet crowding — soft penalty when peers hold the same coin+'same' direction ──
+#   Today's TRUMP LONG: 4 servers entered almost simultaneously within 4 min (341~345 min ago) -> diversification broke -> all evenly −3.5%.
+#   The existing struggle penalty has the condition 'age>=5 min AND peak<0.3%' (struggling), so it doesn't count a freshly-entered
+#   healthy holding -> a simultaneous-entry hole. Owner: "reference not only peer SLs but also *current holdings*" -> if a peer is
+#   currently holding the same direction, that itself is a crowding signal. ⚠ Not a hard block (owner "must enter even after seeing"), soft penalty only —
+#   enters past it when core conviction is strong. graduated (N points per peer server, up to cap). default OFF (opt-in).
 def get_peer_crowding_penalty() -> float:
-    """옆 서버 1대당 같은 코인+같은 방향 보유 시 conviction 감점(graduated). 0 = 비활성(default)."""
+    """Conviction penalty per peer server holding the same coin+same direction (graduated). 0 = disabled (default)."""
     v = _STATE.get("peer_crowding_penalty")
     if isinstance(v, (int, float)):
         return max(0.0, min(50.0, float(v)))
@@ -930,7 +929,7 @@ def get_peer_crowding_penalty() -> float:
 
 
 def get_peer_crowding_cap() -> float:
-    """몰림 감점 총 상한(점). 여러 서버 몰려도 이 이상은 안 깎음."""
+    """Total cap (points) for the crowding penalty. Even with many servers crowding, deducts no more than this."""
     v = _STATE.get("peer_crowding_cap")
     if isinstance(v, (int, float)) and v > 0:
         return max(1.0, min(50.0, float(v)))
@@ -938,10 +937,10 @@ def get_peer_crowding_cap() -> float:
 
 
 def check_peer_crowding_caution(symbol: str, direction: str) -> Tuple[float, str]:
-    """옆 서버들이 같은 코인+'같은' 방향을 *현재 보유 중*인 서버 수 → (penalty, source). soft 감점.
+    """Number of peer servers *currently holding* the same coin+'same' direction -> (penalty, source). Soft penalty.
 
-    struggle/conflict 와 달리 age·peak 조건 없음 — '갓 진입한 건강 보유'도 몰림으로 셈(동시 진입 차단).
-    penalty = min(cap, 보유서버수 × per). 옆 캐시 비면 0 = fail-open. 같은 방향만(반대는 conflict 담당).
+    Unlike struggle/conflict, no age·peak condition — counts even a 'freshly-entered healthy holding' as crowding (blocks simultaneous entry).
+    penalty = min(cap, holding-server-count × per). Empty peer cache -> 0 = fail-open. Same direction only (opposite is handled by conflict).
     """
     if not is_enabled():
         return 0.0, ""
@@ -965,14 +964,14 @@ def check_peer_crowding_caution(symbol: str, direction: str) -> Tuple[float, str
     if n <= 0:
         return 0.0, ""
     penalty = min(get_peer_crowding_cap(), n * per)
-    src = f"함대 {sym}/{dirn} 옆 {n}서버 보유 몰림 (서버당 −{per:.0f}, cap {get_peer_crowding_cap():.0f})"
+    src = f"fleet {sym}/{dirn} crowding: {n} peer servers holding (−{per:.0f} per server, cap {get_peer_crowding_cap():.0f})"
     return penalty, src
 
 
-# ── 🛡️ [2026-06-11 부모] 함대 dir_fail — 같은 코인·방향 손실 함대 누적 차단 ──
-#   오늘 VELVET LONG: server-b 8:59→server-a 9:43→home 9:48 순차(50분 시간차) 줄초상.
-#   기존 check_peer_sl_caution(soft 8점·30분)은 ① 윈도우 30분<시간차49분 ② soft 가 강신호 못 막음 → 실패.
-#   부모님 "손실 기록 서로 확인 못 해 진입 자유로웠다" → 함대(옆+나) 같은 코인+방향 누적 N회 → 하드 차단.
+# ── 🛡️ [2026-06-11 owner] fleet dir_fail — block on fleet-cumulative losses for the same coin·direction ──
+#   Today's VELVET LONG: server-b 8:59->server-a 9:43->home 9:48 sequential (50-min stagger) string of deaths.
+#   The existing check_peer_sl_caution (soft 8 pts·30 min) failed because ① window 30 min < 49-min stagger ② soft can't stop a strong signal.
+#   Owner: "they couldn't see each other's loss records so entered freely" -> fleet (peers+me) cumulative N losses on the same coin+direction -> hard block.
 def get_peer_fleet_dirfail_enabled() -> bool:
     v = _STATE.get("fleet_dirfail_enabled")
     if isinstance(v, bool):
@@ -981,7 +980,7 @@ def get_peer_fleet_dirfail_enabled() -> bool:
 
 
 def get_peer_fleet_dirfail_max() -> int:
-    """함대 누적 손실 N회 이상 = 차단 (옆+나 합산). default 2 = 첫 시도 허용·2번째부터 막음."""
+    """Fleet-cumulative losses >= N = block (peers+me combined). default 2 = allow first attempt, block from the 2nd."""
     v = _STATE.get("fleet_dirfail_max")
     if isinstance(v, (int, float)) and v > 0:
         return max(1, int(v))
@@ -989,7 +988,7 @@ def get_peer_fleet_dirfail_max() -> int:
 
 
 def get_peer_fleet_dirfail_window_min() -> int:
-    """함대 손실 누적 윈도우(분) — 로컬 dir_fail 4h(240분)와 통일. 시간차 손실 커버."""
+    """Fleet loss accumulation window (min) — unified with local dir_fail 4h (240 min). Covers time-staggered losses."""
     v = _STATE.get("fleet_dirfail_window_min")
     if isinstance(v, (int, float)) and v > 0:
         return max(1, int(v))
@@ -997,11 +996,11 @@ def get_peer_fleet_dirfail_window_min() -> int:
 
 
 def check_peer_direction_fail_caution(symbol: str, direction: str, local_count: int = 0) -> Tuple[bool, str]:
-    """함대(옆 서버들 + 나) 같은 코인+방향 누적 손실 ≥ max → (blocked, source). 하드 차단용.
+    """Fleet (peer servers + me) cumulative losses on the same coin+direction >= max -> (blocked, source). For a hard block.
 
-    local_count = 내 저널의 같은 코인+방향 윈도우내 손실 수 (focus_manager 에서 계산해 전달).
-    peer_count = 모든 옆 brief.recent_losses 중 같은 코인+방향+윈도우내 손실 수.
-    합산 ≥ max → 진입 차단. paper/dry 면 차단 안 함(로그만). _BRIEF_CACHE 비면 peer 0 = fail-open.
+    local_count = number of losses on the same coin+direction within the window from my own journal (computed and passed by focus_manager).
+    peer_count = number of losses on the same coin+direction within the window across all peer brief.recent_losses.
+    sum >= max -> block entry. In paper/dry, don't block (log only). Empty _BRIEF_CACHE -> peer 0 = fail-open.
     """
     if not is_enabled() or not get_peer_fleet_dirfail_enabled():
         return False, ""
@@ -1026,15 +1025,15 @@ def check_peer_direction_fail_caution(symbol: str, direction: str, local_count: 
     if total < fail_max:
         return False, ""
     win_h = get_peer_fleet_dirfail_window_min() / 60.0
-    src = (f"함대 {sym}/{dirn} {total}실패≥{fail_max} "
-           f"(peer {peer_count}/{len(servers)}서버 + 로컬 {local_count}, {win_h:.0f}h 윈도우)")
+    src = (f"fleet {sym}/{dirn} {total} fails>={fail_max} "
+           f"(peer {peer_count}/{len(servers)} servers + local {local_count}, {win_h:.0f}h window)")
     if is_paper():
         return False, f"paper:{src}"
     return True, src
 
 
 def get_cache_snapshot() -> dict:
-    """대시보드/디버그용 — 현재 캐시 상태."""
+    """For dashboard/debug — current cache state."""
     now = time.time()
     peers = []
     for url in get_peer_urls():
@@ -1050,7 +1049,7 @@ def get_cache_snapshot() -> dict:
             "recent_wins": len(brief.recent_wins) if brief else 0,
             "active_positions": len(brief.active_positions) if brief else 0,
             "stale": brief is None,
-            # ── 상세 (Peer Brief Scanner, 2026-06-07 부모) — 캐시에 이미 있는 것 노출 ──
+            # ── details (Peer Brief Scanner, owner 2026-06-07) — expose what's already in the cache ──
             "positions": [
                 {"symbol": p.symbol, "direction": p.direction, "age_min": p.age_min,
                  "peak_pnl_pct": p.peak_pnl_pct, "pnl_pct": p.pnl_pct, "pnl_usdt": p.pnl_usdt}

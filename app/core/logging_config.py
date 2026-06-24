@@ -1,9 +1,9 @@
 """
-중앙 로깅 설정 모듈.
+Central logging configuration module.
 
-환경 변수(LOG_LEVEL, LOG_FORMAT)를 읽어 루트 로거를 구성합니다.
-표준 포맷 또는 JSON 구조화 로깅을 지원합니다.
-앱 시작 시 setup_logging()을 한 번 호출하여 사용합니다.
+Reads environment variables (LOG_LEVEL, LOG_FORMAT) to configure the root logger.
+Supports standard format or JSON structured logging.
+Call setup_logging() once at app startup.
 """
 
 import json
@@ -13,7 +13,7 @@ from datetime import datetime
 
 
 def _json_formatter(record: logging.LogRecord) -> str:
-    """LogRecord를 JSON 문자열로 직렬화합니다."""
+    """Serialize a LogRecord into a JSON string."""
     data = {
         "timestamp": datetime.utcfromtimestamp(record.created).isoformat() + "Z",
         "level": record.levelname,
@@ -26,7 +26,7 @@ def _json_formatter(record: logging.LogRecord) -> str:
 
 
 class JsonFormatter(logging.Formatter):
-    """JSON 구조화 로깅용 포매터."""
+    """Formatter for JSON structured logging."""
 
     def format(self, record: logging.LogRecord) -> str:
         return _json_formatter(record)
@@ -34,8 +34,8 @@ class JsonFormatter(logging.Formatter):
 
 def setup_logging() -> None:
     """
-    환경 변수에 따라 루트 로거를 구성합니다.
-    앱 시작 시 한 번만 호출합니다.
+    Configure the root logger based on environment variables.
+    Call only once at app startup.
     """
     level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
@@ -45,7 +45,7 @@ def setup_logging() -> None:
     root = logging.getLogger()
     root.setLevel(level)
 
-    # 기존 핸들러 제거 (중복 방지)
+    # Remove existing handlers (avoid duplicates)
     for h in root.handlers[:]:
         root.removeHandler(h)
 
@@ -60,7 +60,7 @@ def setup_logging() -> None:
 
     root.addHandler(handler)
 
-    # ★ 파일 핸들러 추가 — runtime/focus.log (진단용)
+    # ★ Add file handler — runtime/focus.log (for diagnostics)
     try:
         log_dir = os.path.join(os.getcwd(), "runtime")
         os.makedirs(log_dir, exist_ok=True)
@@ -73,7 +73,7 @@ def setup_logging() -> None:
         )
         fh.setLevel(logging.INFO)
         fh.setFormatter(logging.Formatter(fmt, datefmt="%Y-%m-%d %H:%M:%S"))
-        # ★ 2-2: ERROR 이상 무조건 기록 + 주요 네임스페이스 INFO 기록
+        # ★ 2-2: always record ERROR and above + record INFO for key namespaces
         _FILE_LOG_NAMESPACES = ("focus", "whale", "harpoon", "triage", "bybit", "recovery", "engine", "hyper")
         _FILE_LOG_TAGS = ("[FOCUS]", "[WHALE", "[HARPOON]", "[TRIAGE", "[BYBIT", "[RECOVERY", "[ENGINE", "[HYPER")
 
@@ -91,7 +91,7 @@ def setup_logging() -> None:
         fh.addFilter(_file_log_filter)
         root.addHandler(fh)
     except Exception:
-        pass  # 파일 못 만들어도 서버 죽이지 않음
+        pass  # don't kill the server even if the file can't be created
 
-    # ★ Windows asyncio ProactorEventLoop 노이즈 억제 (기능 영향 없음)
+    # ★ Suppress Windows asyncio ProactorEventLoop noise (no functional impact)
     logging.getLogger("asyncio").setLevel(logging.WARNING)

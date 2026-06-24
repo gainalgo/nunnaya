@@ -5,11 +5,11 @@
 """
 6-cell Bucket System: Volatility(Low/Mid/High) × Regime(Range/Trend)
 
-각 버킷은 해당 시장 조건에서의 거래 결과를 축적하고,
-PINGPONG/AUTOLOOP의 TP/SL/진입 파라미터를 점진적으로 조정한다.
+Each bucket accumulates trade results under its market condition and
+incrementally adjusts the TP/SL/entry parameters of PINGPONG/AUTOLOOP.
 
-조정 범위는 ×0.7 ~ ×1.4 로 제한되어 극단적 파라미터 이탈을 방지한다.
-최소 10회 거래 후부터 보정값을 반환한다.
+Adjustment range is clamped to ×0.7 ~ ×1.4 to prevent extreme parameter drift.
+Calibration values are returned only after a minimum of 10 trades.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 _STATE_PATH = os.getenv("OMA_CALIBRATOR_STATE_PATH", "runtime/online_calibrator.json")
 _MIN_TRADES = 10
-_VOL_LOW = 1.5   # ATR% 경계
+_VOL_LOW = 1.5   # ATR% boundary
 _VOL_HIGH = 4.0
 
 def _sf(x: Any, default: float = 0.0) -> float:
@@ -48,10 +48,10 @@ def _default_bucket() -> Dict[str, Any]:
     }
 
 class OnlineCalibrator:
-    """시장 조건별 전략 파라미터 온라인 보정기.
+    """Online calibrator for strategy parameters per market condition.
 
     Bucket: Volatility(Low/Mid/High) × Regime(Range/Trend) × Strategy
-    → 총 12개 셀 (6 조건 × PP/AL 2개 전략)
+    → 12 cells total (6 conditions × 2 strategies PP/AL)
     """
 
     def __init__(self, state_path: str = _STATE_PATH):
@@ -84,9 +84,9 @@ class OnlineCalibrator:
 
     # ── Classification ──
     def classify_bucket(self, atr_pct: float, regime: str) -> str:
-        """ATR%와 국면으로 버킷 키 결정.
+        """Determine the bucket key from ATR% and regime.
 
-        Returns: 'LOW_RANGE', 'MID_TREND', 'HIGH_RANGE' 등
+        Returns: e.g. 'LOW_RANGE', 'MID_TREND', 'HIGH_RANGE'
         """
         if atr_pct < _VOL_LOW:
             vol = "LOW"
@@ -107,9 +107,9 @@ class OnlineCalibrator:
         sl_pct: float = 0.0,
         hold_sec: float = 0.0,
     ) -> None:
-        """거래 결과를 해당 버킷에 기록.
+        """Record a trade result into the corresponding bucket.
 
-        EMA 방식으로 최근 결과에 더 높은 가중치.
+        Uses EMA so recent results carry higher weight.
         """
         key = f"{bucket_key}:{strategy.upper()}"
         b = self._buckets.setdefault(key, _default_bucket())
@@ -132,9 +132,9 @@ class OnlineCalibrator:
     def get_adjustments(
         self, bucket_key: str, strategy: str
     ) -> Optional[Dict[str, float]]:
-        """버킷 기반 보정 배율 반환.
+        """Return bucket-based calibration multipliers.
 
-        Returns None if 거래 수 부족 (< MIN_TRADES).
+        Returns None if trade count is insufficient (< MIN_TRADES).
         PP: pp_tp_mult, pp_sl_mult, pp_gap_mult
         AL: al_rsi_shift, al_trail_mult
         """
@@ -149,8 +149,8 @@ class OnlineCalibrator:
         strat = strategy.upper()
 
         if strat == "PINGPONG":
-            # 승률 높으면 TP 확대, SL 유지
-            # 승률 낮으면 SL 타이트, TP 축소
+            # High win rate → widen TP, keep SL
+            # Low win rate → tighten SL, shrink TP
             tp_mult = 1.0 + (win_rate - 0.5) * 0.4
             sl_mult = 1.0 - (win_rate - 0.5) * 0.2
             gap_mult = tp_mult
@@ -160,8 +160,8 @@ class OnlineCalibrator:
                 "pp_gap_mult": max(0.8, min(1.3, gap_mult)),
             }
         elif strat == "AUTOLOOP":
-            # 승률 높으면 RSI 매수 기준 완화 (진입 쉽게), 트레일링 확대
-            # 승률 낮으면 RSI 기준 강화 (진입 어렵게), 트레일링 축소
+            # High win rate → relax RSI buy threshold (easier entry), widen trailing
+            # Low win rate → tighten RSI threshold (harder entry), shrink trailing
             rsi_shift = (win_rate - 0.5) * 10.0
             trail_mult = 1.0 + (win_rate - 0.5) * 0.3
             return {
@@ -174,7 +174,7 @@ class OnlineCalibrator:
     def update_from_trades(
         self, trades: List[Dict[str, Any]]
     ) -> int:
-        """과거 거래 기록 일괄 반영. Returns 반영된 건수."""
+        """Apply past trade records in bulk. Returns the number applied."""
         count = 0
         for t in trades:
             try:
@@ -197,7 +197,7 @@ class OnlineCalibrator:
 
     # ── Summary ──
     def summary(self) -> Dict[str, Any]:
-        """전체 버킷 요약."""
+        """Summary of all buckets."""
         out: Dict[str, Any] = {}
         for key, b in self._buckets.items():
             trades = int(b.get("trades", 0))

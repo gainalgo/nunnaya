@@ -78,8 +78,8 @@ def compute_cycle_targets(
         fallback_atr = entry_price * 0.01
         atr = fallback_atr if fallback_atr > 0 else 1.0
 
-    # ★ ATR 변동성 스케일링 (업비트 GreenPen 3단계 Step 1)
-    # 변동성 큰 코인 → TP/SL 넓게, 작은 코인 → 좁게 (자동 적응)
+    # ★ ATR volatility scaling (Upbit GreenPen 3-stage, Step 1)
+    # High-volatility coins → wider TP/SL, low-volatility → tighter (auto-adapt)
     atr_pct = (atr / entry_price) * 100 if entry_price > 0 else 1.5
     vol_scale = max(0.7, min(1.8, atr_pct / 1.5))
 
@@ -87,29 +87,30 @@ def compute_cycle_targets(
     tp2_dist = atr * tp2_mult * vol_scale
     sl_dist = atr * sl_mult * vol_scale
 
-    # ★ SL 최소값: 가격의 0.5% (금 같은 저변동 자산 보호)
+    # ★ SL minimum: 0.5% of price (protects low-volatility assets like gold)
     min_sl_dist = entry_price * 0.005
     if sl_dist < min_sl_dist:
         sl_dist = min_sl_dist
 
-    # ★ TP 최소거리 (fee-guard, 2026-05-15 부모): 진입가×min_tp_distance_pct.
-    #    저변동 코인(ATR 매우 작음)에서 cycle_tp가 수수료 왕복(0.11%)보다 가깝게 잡혀
-    #    진입 직후 즉시 TP hit + 수수료 손실 패턴 방지. 0.0이면 비활성.
+    # ★ TP minimum distance (fee-guard, 2026-05-15 owner): entry_price × min_tp_distance_pct.
+    #    On low-volatility coins (very small ATR), cycle_tp can land closer than the
+    #    fee round-trip (0.11%), causing an instant TP hit + fee loss right after entry.
+    #    This prevents that pattern. 0.0 disables it.
     if min_tp_distance_pct > 0.0 and entry_price > 0:
         min_tp_dist = entry_price * (min_tp_distance_pct / 100.0)
         if tp1_dist < min_tp_dist:
             tp1_dist = min_tp_dist
-        # TP2는 항상 TP1보다 멀리
+        # TP2 must always be farther than TP1
         if tp2_dist < tp1_dist * 1.5:
             tp2_dist = tp1_dist * 1.5
 
-    # Enforce minimum RR ratio (SL을 넓히는 방향만 — 좁히기 금지)
-    # 기존: sl_dist = tp1_dist / min_rr → SL 압축 → 즉사 원인
-    # 수정: RR 부족하면 TP를 올리거나 그대로 유지 (SL 건드리지 않음)
+    # Enforce minimum RR ratio (only widen SL — never tighten it)
+    # Old: sl_dist = tp1_dist / min_rr → SL compression → instant-death cause
+    # Fixed: if RR is insufficient, raise TP or keep as-is (never touch SL)
     if sl_dist > 0:
         actual_rr = tp1_dist / sl_dist
         if actual_rr < min_rr:
-            # TP1이 부족하면 TP1을 올림 (SL 압축 대신)
+            # If TP1 is insufficient, raise TP1 (instead of compressing SL)
             tp1_dist = sl_dist * min_rr
             tp2_dist = max(tp2_dist, tp1_dist * 1.5)
 
@@ -244,20 +245,20 @@ def compute_position_size(
         leverage: position leverage multiplier.
         max_daily_plans: max trades per day (Green Pen default: 3).
     """
-    # max_daily_plans <= 10: 예산을 계획 수로 분배 (초록펜 3M 규율)
-    # max_daily_plans > 10: 분배 없이 전체 예산 사용 (무제한 모드)
+    # max_daily_plans <= 10: split budget across the plan count (Green Pen 3M discipline)
+    # max_daily_plans > 10: use the full budget without splitting (unlimited mode)
     if max_daily_plans <= 10:
         plan_budget = budget_usdt / max(max_daily_plans, 1)
     else:
-        plan_budget = budget_usdt  # 무제한: 매 진입 시 전체 예산 기준
+        plan_budget = budget_usdt  # unlimited: full budget on every entry
     risk_amount = plan_budget * (risk_pct / 100.0)
 
     if sl_distance <= 0 or current_price <= 0:
         return PositionSizing(qty=0, risk_usdt=0, sl_distance=0, leverage_qty=0)
 
     qty = risk_amount / sl_distance
-    # leverage는 마진(증거금)만 줄임 — 포지션 크기를 키우면 안 됨
-    # 수정 전: leverage_qty = qty * leverage (QTY 폭발 버그)
+    # leverage only reduces margin — it must not increase position size
+    # Before fix: leverage_qty = qty * leverage (QTY explosion bug)
     leverage_qty = qty
 
     return PositionSizing(

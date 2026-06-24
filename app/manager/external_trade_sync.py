@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-External Trade Sync - 외부 거래를 원장에 동기화.
+External Trade Sync - sync externally executed trades into the ledger.
 
 File: app/manager/external_trade_sync.py
 
-외부에서 실행된 거래(거래소 앱/웹에서 직접 실행)를 원장에 FILL_SYNC 이벤트로 기록하여
-정확한 PnL 히스토리를 유지합니다.
+Records trades executed outside the bot (directly on the exchange app/web) into
+the ledger as FILL_SYNC events to keep an accurate PnL history.
 
 Design:
-- 거래소 API에서 체결 완료된 주문 목록 조회
-- 원장에 없는 주문(uuid 기준)을 FILL_SYNC 이벤트로 추가
-- append-only 원칙 유지
+- Fetch the list of filled orders from the exchange API
+- Append orders not yet in the ledger (by uuid) as FILL_SYNC events
+- Keep the append-only principle
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def _s(x: Any, default: str = "") -> str:
         return default
 
 class ExternalTradeSync:
-    """외부 거래 동기화 관리자."""
+    """Manager for syncing external trades."""
 
     def __init__(
         self,
@@ -60,7 +60,7 @@ class ExternalTradeSync:
         self._load_state()
 
     def _load_state(self) -> None:
-        """동기화 상태 로드 (이미 동기화된 uuid 목록)."""
+        """Load sync state (list of already-synced uuids)."""
         try:
             if os.path.exists(self._state_path):
                 with open(self._state_path, "r", encoding="utf-8") as f:
@@ -71,7 +71,7 @@ class ExternalTradeSync:
             self._synced_uuids = set()
 
     def _save_state(self) -> None:
-        """동기화 상태 저장."""
+        """Save sync state."""
         from app.core.io_utils import safe_write_json
         try:
             safe_write_json(self._state_path, {
@@ -82,7 +82,7 @@ class ExternalTradeSync:
             logger.warning("[recovered] external_trade_sync state save: %s", e)
 
     def _get_ledger_uuids(self, since_ts: float = 0.0) -> Set[str]:
-        """원장에서 기존 FILL_* 이벤트의 uuid 수집."""
+        """Collect uuids of existing FILL_* events from the ledger."""
         uuids: Set[str] = set()
         try:
             records = self._ledger.tail_records(since_ts=since_ts, tail_lines=50000)
@@ -103,14 +103,14 @@ class ExternalTradeSync:
         max_pages: int = 5,
         lookback_days: int = 30,
     ) -> Dict[str, Any]:
-        """특정 마켓의 외부 거래를 동기화.
-        
+        """Sync external trades for a specific market.
+
         Returns:
             {
                 "market": str,
-                "synced": int,      # 새로 동기화된 거래 수
-                "skipped": int,     # 이미 존재하여 스킵된 수
-                "errors": int,      # 오류 수
+                "synced": int,      # number of newly synced trades
+                "skipped": int,     # number skipped (already present)
+                "errors": int,      # number of errors
                 "orders_checked": int,
             }
         """
@@ -119,7 +119,7 @@ class ExternalTradeSync:
         errors = 0
 
         try:
-            # 거래소에서 체결 완료된 주문 조회
+            # Fetch filled orders from the exchange
             orders = self._client.list_done_orders(market=market, max_pages=max_pages)
         except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as e:
             logger.warning("[ExternalTradeSync] sync_market(%s) failed: %s", market, e, exc_info=True)
@@ -132,7 +132,7 @@ class ExternalTradeSync:
                 "error_msg": str(e),
             }
 
-        # 원장에 있는 uuid 수집
+        # Collect uuids already in the ledger
         since_ts = time.time() - (lookback_days * 86400)
         ledger_uuids = self._get_ledger_uuids(since_ts=since_ts)
         all_known = ledger_uuids | self._synced_uuids
@@ -143,12 +143,12 @@ class ExternalTradeSync:
                 if not uuid_:
                     continue
 
-                # 이미 동기화된 경우 스킵
+                # Skip if already synced
                 if uuid_ in all_known:
                     skipped += 1
                     continue
 
-                # 체결되지 않은 주문 스킵
+                # Skip unfilled orders
                 executed_vol = _f(o.get("executed_volume"))
                 if executed_vol <= 0:
                     skipped += 1
@@ -160,7 +160,7 @@ class ExternalTradeSync:
                 paid_fee = _f(o.get("paid_fee"))
                 funds = executed_vol * avg_price if avg_price > 0 else 0.0
 
-                # FILL_SYNC 이벤트로 원장에 기록
+                # Record into the ledger as a FILL_SYNC event
                 event = "FILL_SYNC_BUY" if side == "bid" else "FILL_SYNC_SELL"
                 self._ledger.append(
                     event,
@@ -185,7 +185,7 @@ class ExternalTradeSync:
                 errors += 1
                 continue
 
-        # 상태 저장
+        # Save state
         if synced > 0:
             self._save_state()
 
@@ -203,8 +203,8 @@ class ExternalTradeSync:
         max_pages: int = 5,
         lookback_days: int = 30,
     ) -> Dict[str, Any]:
-        """현재 보유 중인 모든 마켓의 외부 거래 동기화.
-        
+        """Sync external trades for all currently held markets.
+
         Args:
             holdings: {market: {qty, avg_buy_price, ...}}
         
@@ -244,17 +244,17 @@ class ExternalTradeSync:
         markets: List[str],
         max_pages: int = 10,
     ) -> Dict[str, Any]:
-        """지정된 마켓들의 전체 거래 내역을 거래소에서 재구축.
-        
-        주의: 기존 원장 데이터와 중복될 수 있음. 
-        초기 설정 또는 원장 손실 시에만 사용 권장.
+        """Rebuild the full trade history for the given markets from the exchange.
+
+        Note: may duplicate existing ledger data.
+        Recommended only for initial setup or after ledger loss.
         """
         results: Dict[str, Any] = {}
         for market in markets:
             results[market] = self.sync_market(
                 market=market,
                 max_pages=max_pages,
-                lookback_days=365,  # 1년치
+                lookback_days=365,  # one year
             )
         return results
 

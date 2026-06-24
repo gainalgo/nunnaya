@@ -342,8 +342,8 @@ async def get_slot_recommendations(
 ) -> Dict[str, Any]:
     """Get recommended slot distribution based on recent performance.
     
-    [2026-02-04] 실거래 데이터가 부족할 때 백테스트 결과를 가중치 기반으로 혼합.
-    가중치는 Reserved Settings에서 전략별로 설정 가능 (0%=실거래만, 100%=백테스트만)
+    [2026-02-04] When real-trade data is insufficient, blend backtest results in by weight.
+    The weight is configurable per-strategy in Reserved Settings (0%=real trades only, 100%=backtest only)
 
     Args:
         request: FastAPI request object (for accessing app.state.system)
@@ -392,7 +392,7 @@ async def get_slot_recommendations(
     # Analyze strategy performance
     strategy_perf = analyzer.analyze_strategy_performance(records, since_ts=since_ts)
 
-    # [2026-02-04] 백테스트 가중치 로드 (전략별)
+    # [2026-02-04] Load backtest weights (per-strategy)
     backtest_weights = {
         "PINGPONG": getattr(system, "backtest_weight_pingpong", 0.10),
         "AUTOLOOP": getattr(system, "backtest_weight_autoloop", 0.15),
@@ -403,19 +403,19 @@ async def get_slot_recommendations(
         "SNIPER": getattr(system, "backtest_weight_sniper", 0.30),
     }
     
-    # [2026-02-04] 백테스트 데이터 로드 (use_backtest=True일 때)
+    # [2026-02-04] Load backtest data (when use_backtest=True)
     backtest_scores = {}
     if use_backtest:
         try:
             from app.backtest.backtest_runner import BacktestRunner
             runner = BacktestRunner()
             
-            # 간단한 마켓 샘플 (실제로는 인기 마켓 상위 10개 정도)
+            # A simple market sample (in practice, roughly the top 10 popular markets)
             sample_markets = ["BTCUSDT", "ETHUSDT", "XRPUSDT"]
-            
-            # 캐시 확인
+
+            # Check cache
             for strategy in all_strategies:
-                cache_key = f"{strategy}_SAMPLE_30"  # 30일 백테스트
+                cache_key = f"{strategy}_SAMPLE_30"  # 30-day backtest
                 if cache_key in runner.results_cache:
                     result = runner.results_cache[cache_key]
                     backtest_scores[strategy] = {
@@ -424,7 +424,7 @@ async def get_slot_recommendations(
                         "total_trades": result.total_trades
                     }
         except (KeyError, AttributeError, TypeError, ValueError) as e:
-            # 백테스트 실패 시 로그만 남기고 계속 진행
+            # On backtest failure, just log and keep going
             import logging
             logging.warning(f"Backtest data load failed: {e}")
 
@@ -434,12 +434,12 @@ async def get_slot_recommendations(
         perf = strategy_perf.get(strategy)
         real_trade_count = perf.total_trades if perf else 0
         
-        # [2026-02-04] 실거래 데이터 점수 계산
-        real_score = 1.0  # 기본값
+        # [2026-02-04] Compute real-trade data score
+        real_score = 1.0  # default
         real_reason = "No data"
-        
+
         if perf and perf.total_trades >= min_trades_per_strategy:
-            # 충분한 실거래 데이터 있음
+            # Sufficient real-trade data available
             win_rate_score = perf.win_rate / 100.0
             roi_score = max(0.0, min(1.0, (perf.roi_pct + 50.0) / 100.0))
             trade_bonus = min(0.2, perf.total_trades / 100.0)
@@ -447,14 +447,14 @@ async def get_slot_recommendations(
             real_score = max(0.5, min(2.0, composite * 1.5))
             real_reason = "Real trades"
         
-        # [2026-02-04] 백테스트 데이터 점수 계산
+        # [2026-02-04] Compute backtest data score
         backtest_score = 1.0
         backtest_reason = "No backtest"
         
         if use_backtest and strategy in backtest_scores:
             bt = backtest_scores[strategy]
             if bt["total_trades"] > 0:
-                # 극단값 클리핑 (25-75% 승률, -30%~+50% ROI)
+                # Clip extreme values (25-75% win rate, -30%~+50% ROI)
                 bt_win_rate = max(25.0, min(75.0, bt["win_rate"]))
                 bt_roi = max(-30.0, min(50.0, bt["roi_pct"]))
                 
@@ -464,27 +464,27 @@ async def get_slot_recommendations(
                 backtest_score = max(0.5, min(2.0, bt_composite * 1.5))
                 backtest_reason = f"Backtest ({bt['total_trades']} trades)"
         
-        # [2026-02-04] 가중 혼합 (실거래 부족 시 백테스트 비중 증가)
+        # [2026-02-04] Weighted blend (raise backtest share when real trades are scarce)
         weight = backtest_weights.get(strategy, 0.15)
-        
-        # 실거래 데이터 양에 따라 가중치 조정
+
+        # Adjust weight based on the amount of real-trade data
         if real_trade_count >= 30:
-            # 충분한 실거래 → 백테스트 비중 감소
+            # Plenty of real trades → reduce backtest share
             effective_weight = weight * 0.3
         elif real_trade_count >= 15:
-            # 보통 → 백테스트 절반 비중
+            # Moderate → half backtest share
             effective_weight = weight * 0.5
         elif real_trade_count >= min_trades_per_strategy:
-            # 최소 충족 → 백테스트 기본 비중
+            # Minimum met → default backtest share
             effective_weight = weight
         else:
-            # 실거래 부족 → 백테스트 우선 (최대 75%)
+            # Real trades scarce → prioritize backtest (max 75%)
             effective_weight = min(0.75, weight * 1.5)
-        
-        # 최종 점수 = 실거래 × (1-w) + 백테스트 × w
+
+        # Final score = real × (1-w) + backtest × w
         final_score = (real_score * (1.0 - effective_weight)) + (backtest_score * effective_weight)
-        
-        # 최종 이유
+
+        # Final reason
         if real_trade_count < min_trades_per_strategy and use_backtest and strategy in backtest_scores:
             reason = f"Backtest-weighted ({int(effective_weight*100)}%)"
         elif real_trade_count >= min_trades_per_strategy:

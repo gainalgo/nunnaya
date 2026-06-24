@@ -2,10 +2,10 @@
 # File: app/manager/risk_budget.py
 # Autocoin OS v3-H — Risk Budget System
 # ------------------------------------------------------------
-# 목적:
-# - 일일 최대 손실 한도 관리
-# - 한도 도달 시 신규 진입 중단
-# - 자본 보호 자동화
+# Purpose:
+# - Manage the daily maximum loss limit
+# - Halt new entries once the limit is reached
+# - Automate capital protection
 # ============================================================
 
 from __future__ import annotations
@@ -20,65 +20,65 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 class RiskMode(Enum):
-    """리스크 모드."""
-    NORMAL = "normal"           # 정상 운영
-    CAUTION = "caution"         # 주의 (50% 소진)
-    WARNING = "warning"         # 경고 (75% 소진)
-    DEFENSE = "defense"         # 방어 (100% 소진, 진입 중단)
-    RECOVERY = "recovery"       # 회복 중 (수익 발생 시)
+    """Risk mode."""
+    NORMAL = "normal"           # normal operation
+    CAUTION = "caution"         # caution (50% used)
+    WARNING = "warning"         # warning (75% used)
+    DEFENSE = "defense"         # defense (100% used, entries halted)
+    RECOVERY = "recovery"       # recovering (when profit appears)
 
 @dataclass
 class DailyRiskState:
-    """일일 리스크 상태."""
+    """Daily risk state."""
     date: str  # YYYY-MM-DD
-    
-    # 손익
+
+    # PnL
     realized_pnl_usdt: float = 0.0
     unrealized_pnl_usdt: float = 0.0
     total_pnl_usdt: float = 0.0
-    
-    # 리스크 버짓
+
+    # risk budget
     daily_loss_limit_usdt: float = 0.0
     used_budget_usdt: float = 0.0
     remaining_budget_usdt: float = 0.0
-    
-    # 상태
+
+    # status
     mode: RiskMode = RiskMode.NORMAL
     new_entry_allowed: bool = True
-    
-    # 카운터
+
+    # counters
     trade_count: int = 0
     win_count: int = 0
     loss_count: int = 0
-    
-    # 시간
+
+    # time
     last_update_ts: float = 0.0
 
 @dataclass
 class RiskAction:
-    """리스크 액션."""
+    """Risk action."""
     action: str  # "block_entry", "reduce_budget", "alert", "none"
     reason: str
     severity: str  # "info", "warning", "critical"
     details: Dict[str, Any] = field(default_factory=dict)
 
 class RiskBudgetManager:
-    """리스크 버짓 관리자.
-    
-    기능:
-    1. 일일 최대 손실 한도 설정 (총 자본의 X%)
-    2. 실시간 PnL 추적
-    3. 한도 도달 시 자동 방어 모드
-    4. 단계별 경고 시스템
+    """Risk budget manager.
+
+    Features:
+    1. Set the daily maximum loss limit (X% of total capital)
+    2. Track PnL in real time
+    3. Automatic defense mode when the limit is reached
+    4. Tiered warning system
     """
 
     def __init__(
         self,
-        daily_loss_limit_pct: float = 2.0,  # 총 자본의 2%
+        daily_loss_limit_pct: float = 2.0,  # 2% of total capital
         caution_threshold_pct: float = 50.0,
         warning_threshold_pct: float = 75.0,
         defense_threshold_pct: float = 100.0,
-        recovery_required_pct: float = 25.0,  # 방어 모드 해제 위해 25% 회복 필요
+        recovery_required_pct: float = 25.0,  # 25% recovery required to exit defense mode
         state_path: str = "runtime/risk_budget_state.json",
     ):
         self.daily_loss_limit_pct = daily_loss_limit_pct
@@ -92,11 +92,11 @@ class RiskBudgetManager:
         self._load_state()
 
     def _get_today(self) -> str:
-        """오늘 날짜 반환."""
+        """Return today's date."""
         return time.strftime("%Y-%m-%d", time.localtime())
 
     def _load_state(self) -> None:
-        """상태 로드."""
+        """Load state."""
         if not self.state_path or not os.path.exists(self.state_path):
             return
         
@@ -124,7 +124,7 @@ class RiskBudgetManager:
             logger.warning("[risk_budget] %s: %s", 'risk_budget._load_state fallback', exc, exc_info=True)
 
     def _save_state(self) -> None:
-        """상태 저장."""
+        """Save state."""
         if not self.state_path or not self._state:
             return
 
@@ -151,14 +151,14 @@ class RiskBudgetManager:
             logger.warning("[risk_budget] %s: %s", 'risk_budget._save_state fallback', exc, exc_info=True)
 
     def init_daily_budget(self, total_capital_usdt: float) -> DailyRiskState:
-        """일일 버짓 초기화."""
+        """Initialize the daily budget."""
         today = self._get_today()
-        
-        # 이미 오늘 상태가 있으면 반환
+
+        # return if today's state already exists
         if self._state and self._state.date == today:
             return self._state
-        
-        # 새로운 날 시작
+
+        # start of a new day
         daily_limit = total_capital_usdt * (self.daily_loss_limit_pct / 100)
         
         self._state = DailyRiskState(
@@ -177,34 +177,34 @@ class RiskBudgetManager:
         unrealized_pnl_usdt: float = 0.0,
         trade_result: Optional[str] = None,  # "win" or "loss"
     ) -> RiskAction:
-        """PnL 업데이트 및 리스크 체크."""
+        """Update PnL and run the risk check."""
         if not self._state:
             return RiskAction(action="none", reason="no_state", severity="info")
-        
-        # PnL 업데이트
+
+        # update PnL
         self._state.realized_pnl_usdt = realized_pnl_usdt
         self._state.unrealized_pnl_usdt = unrealized_pnl_usdt
         self._state.total_pnl_usdt = realized_pnl_usdt + unrealized_pnl_usdt
-        
-        # 거래 결과 카운트
+
+        # count the trade result
         if trade_result == "win":
             self._state.win_count += 1
             self._state.trade_count += 1
         elif trade_result == "loss":
             self._state.loss_count += 1
             self._state.trade_count += 1
-        
-        # 손실 계산 (음수면 손실)
+
+        # compute the loss (negative means a loss)
         if self._state.total_pnl_usdt < 0:
             self._state.used_budget_usdt = abs(self._state.total_pnl_usdt)
         else:
             self._state.used_budget_usdt = 0.0
-        
+
         self._state.remaining_budget_usdt = max(
             0, self._state.daily_loss_limit_usdt - self._state.used_budget_usdt
         )
-        
-        # 모드 결정
+
+        # determine the mode
         action = self._evaluate_risk()
         
         self._state.last_update_ts = time.time()
@@ -213,18 +213,18 @@ class RiskBudgetManager:
         return action
 
     def _evaluate_risk(self) -> RiskAction:
-        """리스크 평가 및 모드 전환."""
+        """Evaluate risk and switch mode."""
         if not self._state or self._state.daily_loss_limit_usdt <= 0:
             return RiskAction(action="none", reason="no_limit", severity="info")
-        
+
         usage_pct = (self._state.used_budget_usdt / self._state.daily_loss_limit_usdt) * 100
-        
+
         old_mode = self._state.mode
-        
-        # 방어 모드에서 회복 체크
+
+        # check for recovery while in defense mode
         if old_mode == RiskMode.DEFENSE:
             if self._state.total_pnl_usdt >= 0:
-                # 손실 복구됨
+                # loss recovered
                 self._state.mode = RiskMode.NORMAL
                 self._state.new_entry_allowed = True
                 return RiskAction(
@@ -234,7 +234,7 @@ class RiskBudgetManager:
                     details={"pnl": self._state.total_pnl_usdt},
                 )
             elif usage_pct < (self.defense_threshold_pct - self.recovery_required_pct):
-                # 부분 회복
+                # partial recovery
                 self._state.mode = RiskMode.RECOVERY
                 self._state.new_entry_allowed = False
                 return RiskAction(
@@ -243,7 +243,7 @@ class RiskBudgetManager:
                     severity="warning",
                 )
         
-        # 모드 전환
+        # mode transition
         if usage_pct >= self.defense_threshold_pct:
             self._state.mode = RiskMode.DEFENSE
             self._state.new_entry_allowed = False
@@ -280,11 +280,11 @@ class RiskBudgetManager:
             return RiskAction(action="none", reason="within_budget", severity="info")
 
     def is_entry_allowed(self) -> Tuple[bool, str]:
-        """신규 진입 허용 여부."""
+        """Whether new entries are allowed."""
         if not self._state:
             return (True, "no_state")
-        
-        # 날짜 체크
+
+        # date check
         if self._state.date != self._get_today():
             return (True, "new_day")
         
@@ -294,7 +294,7 @@ class RiskBudgetManager:
         return (True, f"allowed:{self._state.mode.value}")
 
     def get_budget_multiplier(self) -> float:
-        """현재 모드에 따른 예산 승수."""
+        """Budget multiplier for the current mode."""
         if not self._state:
             return 1.0
         
@@ -310,11 +310,11 @@ class RiskBudgetManager:
             return 1.0
 
     def get_state(self) -> Optional[DailyRiskState]:
-        """현재 상태 반환."""
+        """Return the current state."""
         return self._state
 
     def get_summary(self) -> Dict[str, Any]:
-        """상태 요약."""
+        """State summary."""
         if not self._state:
             return {"initialized": False}
         
@@ -345,6 +345,6 @@ class RiskBudgetManager:
         }
 
     def force_reset(self, total_capital_usdt: float) -> DailyRiskState:
-        """강제 리셋 (관리자용)."""
+        """Force reset (for administrators)."""
         self._state = None
         return self.init_daily_budget(total_capital_usdt)

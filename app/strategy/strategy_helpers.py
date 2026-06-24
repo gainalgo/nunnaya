@@ -33,9 +33,9 @@ _SIGNAL_TELEGRAM_ENABLED = str(os.getenv("OMA_TELEGRAM_SIGNAL_ENABLED", "0")).st
 
 
 def send_signal_telegram(msg: str) -> None:
-    """신호(체결 전) 알림은 선택적으로만 발송한다.
+    """Signal (pre-fill) notifications are sent only optionally.
 
-    실제 체결 알림은 order_state_machine의 [BUY]/[SELL] 알림을 기준으로 본다.
+    Actual fill notifications are based on order_state_machine's [BUY]/[SELL] alerts.
     """
     if not _SIGNAL_TELEGRAM_ENABLED:
         return
@@ -74,33 +74,33 @@ except ImportError:
     _get_calibrator = None
 
 
-# ── LongHold 전환 지원 ──────────────────────────────────────────
+# ── LongHold conversion support ──────────────────────────────────────────
 _LONGHOLD_PATH = os.path.join("runtime", "longhold_config.json")
-# [2026-03-15] 공유 락으로 통일 — ladder_manager와 동일한 락 사용
+# [2026-03-15] Unified to a shared lock — same lock as ladder_manager
 from app.core.longhold_file_lock import longhold_file_lock as _longhold_write_lock
 
 
 def _check_btc_regime_for_longhold() -> bool:
-    """BTC 국면이 LongHold 전환에 적합한지 확인.
+    """Check whether the BTC regime is suitable for LongHold conversion.
 
-    TREND / RECOVERY → True (회복 가능성)
-    SHOCK / DRIFT    → False (추가 하락 위험)
+    TREND / RECOVERY → True (recovery possible)
+    SHOCK / DRIFT    → False (further downside risk)
     """
     try:
         from app.monitor.btc_leading_signal import get_btc_leading_detector
         det = get_btc_leading_detector()
         if det is None:
-            return True  # detector 없으면 보수적으로 LongHold
+            return True  # No detector → conservatively LongHold
         regime = det.get_regime_for_lightning()
         return regime in ("TREND", "RECOVERY")
     except (ImportError, AttributeError, TypeError):
-        logger.warning("[LongHold] BTC regime 확인 실패 → 보수적 LongHold 유지", exc_info=True)
+        logger.warning("[LongHold] BTC regime check failed → keeping conservative LongHold", exc_info=True)
         return True
 
 
 def _register_longhold(market: str, strategy_name: str, entry_price: float,
                         current_price: float) -> bool:
-    """runtime/longhold_config.json 에 마켓을 LongHold로 등록.
+    """Register the market as LongHold in runtime/longhold_config.json.
 
     Returns True if registration succeeded.
     """
@@ -113,7 +113,7 @@ def _register_longhold(market: str, strategy_name: str, entry_price: float,
                     with open(_LONGHOLD_PATH, "r", encoding="utf-8") as f:
                         store = _json.load(f)
                 except (OSError, json.JSONDecodeError, TypeError, ValueError):
-                    logger.warning("[LongHold] longhold_config.json 읽기 실패 (_register)", exc_info=True)
+                    logger.warning("[LongHold] failed to read longhold_config.json (_register)", exc_info=True)
                     store = {}
 
             if not isinstance(store.get("defaults"), dict):
@@ -134,13 +134,13 @@ def _register_longhold(market: str, strategy_name: str, entry_price: float,
             if not isinstance(store.get("history"), list):
                 store["history"] = []
 
-            # 이미 등록된 마켓이면 중복 등록/알림 방지
+            # Already-registered market → prevent duplicate registration/notification
             cur = store["markets"].get(market, {})
             if isinstance(cur, dict) and cur.get("enabled", False):
                 return False
 
             now = time.time()
-            cur = {}  # 새로 등록
+            cur = {}  # New registration
             cur.update({
                 "enabled": True,
                 "strategy": "LADDER",
@@ -171,31 +171,31 @@ def _register_longhold(market: str, strategy_name: str, entry_price: float,
             safe_write_json(_LONGHOLD_PATH, store)
         return True
     except (OSError, json.JSONDecodeError, KeyError, AttributeError, TypeError, ValueError, OverflowError):
-        logger.warning("[LongHold] 등록 실패: %s", market if 'market' in dir() else '?', exc_info=True)
+        logger.warning("[LongHold] registration failed: %s", market if 'market' in dir() else '?', exc_info=True)
         return False
 
 
 def _try_convert_to_longhold(ctx, market: str, strategy_name: str,
                               entry_price: float, current_price: float,
                               meta: dict) -> "Decision | None":
-    """SL 확인 후 LongHold 전환 시도. 성공하면 hold Decision 반환, 실패하면 None."""
+    """Attempt LongHold conversion after SL check. Returns a hold Decision on success, None on failure."""
     if not _check_btc_regime_for_longhold():
         meta["longhold_skip"] = "btc_bear"
-        return None  # BTC 하락 국면 → 정상 SL 매도
+        return None  # BTC downtrend regime → normal SL sell
 
-    # current_price가 0이면 시세 보정
+    # If current_price is 0, fix up the quote
     if current_price == 0:
         try:
-            # ctx에서 price 추출
+            # Extract price from ctx
             current_price = float(getattr(ctx, "price", 0)) or float(getattr(ctx, "last_price", 0))
             if not current_price:
-                # position에서 avg_price 등
+                # avg_price etc. from position
                 pos = getattr(ctx, "position", None)
                 if pos:
                     current_price = float(pos.get("avg_price", 0) or pos.get("entry", 0) or pos.get("price", 0))
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[STRAT_HELP] position에서 avg_price 등: %s", exc, exc_info=True)
-    # 이미 등록된 마켓이면 중복 알림/등록 방지
+            logger.warning("[STRAT_HELP] avg_price etc. from position: %s", exc, exc_info=True)
+    # Already-registered market → prevent duplicate notification/registration
     import json as _json
     try:
         with _longhold_write_lock:
@@ -205,19 +205,19 @@ def _try_convert_to_longhold(ctx, market: str, strategy_name: str,
                     with open(_LONGHOLD_PATH, "r", encoding="utf-8") as f:
                         store = _json.load(f)
                 except (OSError, json.JSONDecodeError, TypeError, ValueError):
-                    logger.warning("[LongHold] longhold_config.json 읽기 실패 (_try_convert)", exc_info=True)
+                    logger.warning("[LongHold] failed to read longhold_config.json (_try_convert)", exc_info=True)
                     store = {}
             if isinstance(store.get("markets"), dict) and market in store["markets"] and store["markets"][market].get("enabled", False):
-                return None  # 이미 등록됨
+                return None  # Already registered
     except (OSError, json.JSONDecodeError, KeyError, AttributeError, TypeError, ValueError) as exc:
-        logger.warning("[STRAT_HELP] 이미 등록된 마켓이면 중복 알림/등록 방지: %s", exc, exc_info=True)
+        logger.warning("[STRAT_HELP] already-registered market duplicate-guard: %s", exc, exc_info=True)
 
     if _register_longhold(market, strategy_name, entry_price, current_price):
         ctx.set_var("longhold_converted", True)
         ctx.set_var("longhold_convert_ts", time.time())
         meta["longhold"] = True
         meta["longhold_reason"] = f"SL→LongHold ({strategy_name})"
-        # #3 이중 안전: context controls에도 user_sell_only 설정
+        # #3 Double safety: also set user_sell_only on context controls
         try:
             from app.manager.market_controls import apply_engine_controls
             _sys = getattr(ctx, "system", None)
@@ -228,10 +228,10 @@ def _try_convert_to_longhold(ctx, market: str, strategy_name: str,
             logger.warning("[LongHold] engine controls apply failed for %s: %s", market, _lh_err)
         try:
             send_telegram(
-                f"🔒 LongHold 전환: {market}\n"
-                f"전략: {strategy_name}\n"
-                f"진입가: {entry_price:,.0f} → 현재가: {current_price:,.0f}\n"
-                f"BTC 국면 양호 → 손절 대신 장기보유 전환"
+                f"🔒 LongHold conversion: {market}\n"
+                f"Strategy: {strategy_name}\n"
+                f"Entry: {entry_price:,.0f} → Current: {current_price:,.0f}\n"
+                f"BTC regime favorable → convert to long-term hold instead of stop-loss"
             )
         except (AttributeError, TypeError, ValueError) as _tg_err:
             logger.warning("[LongHold] telegram notify failed: %s", _tg_err, exc_info=True)
@@ -240,7 +240,7 @@ def _try_convert_to_longhold(ctx, market: str, strategy_name: str,
 
 
 def _unregister_longhold(market: str) -> bool:
-    """runtime/longhold_config.json 에서 마켓 제거."""
+    """Remove the market from runtime/longhold_config.json."""
     import json as _json
     try:
         with _longhold_write_lock:
@@ -266,20 +266,20 @@ def _unregister_longhold(market: str) -> bool:
             safe_write_json(_LONGHOLD_PATH, store)
         return True
     except (OSError, json.JSONDecodeError, KeyError, AttributeError, TypeError, ValueError, OverflowError):
-        logger.warning("[LongHold] unregister 실패", exc_info=True)
+        logger.warning("[LongHold] unregister failed", exc_info=True)
         return False
 
 
 def _calc_longhold_release_pct(ctx, entry_price: float) -> float:
-    """[2026-05-30] ATR 기반 동적 LongHold 회복 임계 계산.
+    """[2026-05-30] Compute the dynamic ATR-based LongHold recovery threshold.
 
-    부모님 결단: "ATR 동적 (자동 적응)" — 코인 변동성에 따라 회복 임계 자동 조절.
-    - 변동성 큰 코인 (예: LINK) → 큰 회복 폭 필요 (휩쏘 회복 X)
-    - 변동성 작은 코인 (예: BTC) → 작은 회복도 의미 있음
+    Owner's decision: "ATR dynamic (auto-adaptive)" — recovery threshold auto-adjusts to coin volatility.
+    - High-volatility coin (e.g. LINK) → larger recovery margin needed (no whipsaw recovery)
+    - Low-volatility coin (e.g. BTC) → even a small recovery is meaningful
 
-    산식: release_pct = ATR%(14) × 1.5 (multiplier)
-    Clamp: min 1.0% (너무 빠른 해제 방지) ~ max 8.0% (영원 묶임 방지)
-    Fallback: 데이터 부족 시 2.0% (옛 hardcoded default)
+    Formula: release_pct = ATR%(14) × 1.5 (multiplier)
+    Clamp: min 1.0% (prevent too-early release) ~ max 8.0% (prevent being locked forever)
+    Fallback: 2.0% when data is insufficient (old hardcoded default)
     """
     _DEFAULT_PCT = 2.0
     _MULT = 1.5
@@ -297,17 +297,17 @@ def _calc_longhold_release_pct(ctx, entry_price: float) -> float:
         release_pct = atr_pct * _MULT
         return max(_MIN_PCT, min(_MAX_PCT, release_pct))
     except (KeyError, AttributeError, TypeError, ValueError, ZeroDivisionError):
-        logger.warning("[LongHold] ATR 회복 임계 계산 실패 → default %.1f%% 사용", _DEFAULT_PCT, exc_info=True)
+        logger.warning("[LongHold] ATR recovery threshold computation failed → using default %.1f%%", _DEFAULT_PCT, exc_info=True)
         return _DEFAULT_PCT
 
 
 def _check_longhold_recovery(ctx, pos, price: float, strategy_name: str) -> bool:
-    """LongHold 코인이 진입가 이상으로 회복했는지 확인.
+    """Check whether a LongHold coin has recovered to at or above its entry price.
 
-    회복 시 LongHold 플래그 해제 + longhold_config에서 제거 → True 반환.
-    전략이 정상 운영 재개하도록 한다.
+    On recovery, clear the LongHold flag + remove from longhold_config → return True.
+    Lets the strategy resume normal operation.
 
-    [2026-05-30] 임계값 = ATR 동적 (부모님 결단). _calc_longhold_release_pct 참고.
+    [2026-05-30] Threshold = ATR dynamic (owner's decision). See _calc_longhold_release_pct.
     """
     try:
         entry = 0.0
@@ -319,14 +319,14 @@ def _check_longhold_recovery(ctx, pos, price: float, strategy_name: str) -> bool
             return False
 
         profit_pct = (price - entry) / entry * 100.0
-        # [2026-05-30] ATR 동적 임계 (부모님 결단 — 코인 변동성에 적응)
+        # [2026-05-30] ATR dynamic threshold (owner's decision — adapts to coin volatility)
         _LONGHOLD_RELEASE_PCT = _calc_longhold_release_pct(ctx, entry)
         if profit_pct >= _LONGHOLD_RELEASE_PCT:
             market = str(getattr(ctx, "market", "") or "")
             ctx.set_var("longhold_converted", False)
             ctx.set_var("longhold_convert_ts", 0)
             _unregister_longhold(market)
-            # user_sell_only 해제 — 정상 자동매매 복귀
+            # Release user_sell_only — resume normal automated trading
             try:
                 from app.manager.market_controls import apply_engine_controls
                 _sys = getattr(ctx, "system", None)
@@ -337,28 +337,28 @@ def _check_longhold_recovery(ctx, pos, price: float, strategy_name: str) -> bool
                 logger.warning("[LongHold] recovery controls restore failed for %s: %s", market, _lh_err)
             try:
                 send_telegram(
-                    f"🔓 LongHold 자동 해제: {market}\n"
-                    f"전략: {strategy_name}\n"
-                    f"진입가: {entry:,.0f} → 현재가: {price:,.0f} ({profit_pct:+.1f}%)\n"
-                    f"ATR 동적 임계: {_LONGHOLD_RELEASE_PCT:.2f}% 도달\n"
-                    f"가격 회복 → 정상 전략 운영 복귀"
+                    f"🔓 LongHold auto-release: {market}\n"
+                    f"Strategy: {strategy_name}\n"
+                    f"Entry: {entry:,.0f} → Current: {price:,.0f} ({profit_pct:+.1f}%)\n"
+                    f"ATR dynamic threshold: {_LONGHOLD_RELEASE_PCT:.2f}% reached\n"
+                    f"Price recovered → resume normal strategy operation"
                 )
             except (AttributeError, TypeError, ValueError) as _tg_err:
                 logger.warning("[LongHold] recovery telegram failed: %s", _tg_err, exc_info=True)
-            return True  # 해제됨 → 전략 정상 진행
+            return True  # Released → strategy proceeds normally
     except (KeyError, AttributeError, TypeError, ValueError) as _rec_err:
         logger.warning("[LongHold] recovery check error for %s: %s", getattr(ctx, "market", "?"), _rec_err)
-    return False  # 아직 미회복 → LongHold 유지
+    return False  # Not yet recovered → keep LongHold
 
 
 def _restore_longhold_flag_from_config(ctx) -> bool:
-    """서버 재시작 시 longhold_config.json에서 ctx 플래그 복원.
+    """Restore the ctx flag from longhold_config.json on server restart.
 
-    in-memory longhold_converted가 False인데 config에 등록되어 있으면
-    플래그를 복원. 중복 _try_convert_to_longhold 호출 방지.
+    If in-memory longhold_converted is False but it is registered in config,
+    restore the flag. Prevents duplicate _try_convert_to_longhold calls.
     """
     if ctx.get_var("longhold_converted", False):
-        return True  # 이미 설정됨
+        return True  # Already set
     market = str(getattr(ctx, "market", "") or "").strip().upper()
     if not market:
         return False
@@ -380,10 +380,10 @@ def _restore_longhold_flag_from_config(ctx) -> bool:
 
 
 def _night_mode_adjust_sl(sl_pct: float, ctx: Any) -> float:
-    """Night Mode 활성 시 SL을 넓혀서 일시 하락에 조기 손절 방지.
+    """When Night Mode is active, widen SL to avoid early stop-loss on temporary dips.
 
-    예: sl_pct=-2.5, multiplier=1.5 → -3.75%
-    SL은 음수이므로 multiplier를 곱하면 더 넓어짐.
+    e.g. sl_pct=-2.5, multiplier=1.5 → -3.75%
+    SL is negative, so multiplying by the multiplier widens it further.
     """
     try:
         system = getattr(ctx, "system", None)
@@ -396,15 +396,15 @@ def _night_mode_adjust_sl(sl_pct: float, ctx: Any) -> float:
         mult = float(getattr(system, 'night_mode_sl_multiplier', 1.5) or 1.5)
         if mult <= 1.0:
             return sl_pct
-        # sl_pct는 음수 (-2.5) → 더 넓히려면 절대값을 키움
+        # sl_pct is negative (-2.5) → to widen, grow the absolute value
         return -(abs(sl_pct) * mult)
     except (KeyError, AttributeError, TypeError, ValueError):
-        logger.warning("[NightMode] SL 조정 실패", exc_info=True)
+        logger.warning("[NightMode] SL adjustment failed", exc_info=True)
         return sl_pct
 
 
 def adjust_order_amount_and_price(amount: float, price: float, market: str = "BTCUSDT") -> Tuple[float, float]:
-    """거래소 조건에 맞게 주문 금액과 가격 단위를 자동 보정."""
+    """Auto-adjust order amount and price tick to match exchange constraints."""
     from app.integrations.bybit_trade import adjust_price_to_tick
     amount = max(amount, Q.min_order)
     price = adjust_price_to_tick(price)
@@ -426,13 +426,13 @@ def _inject_candle_1m_telemetry(ctx: Any, telemetry: Dict[str, Any]) -> None:
         try:
             mkt = str(getattr(ctx, "market", "") or "")
         except (KeyError, AttributeError, TypeError):
-            logger.warning("[Telemetry] ctx.market 접근 실패", exc_info=True)
+            logger.warning("[Telemetry] failed to access ctx.market", exc_info=True)
             mkt = ""
         if not mkt:
             try:
                 mkt = str(getattr(ctx, "code", "") or "")
             except (KeyError, AttributeError, TypeError):
-                logger.warning("[Telemetry] ctx.code 접근 실패", exc_info=True)
+                logger.warning("[Telemetry] failed to access ctx.code", exc_info=True)
                 mkt = ""
         if not mkt:
             return
@@ -649,10 +649,10 @@ def _evaluate_reversal_buy_guard(
 
     rsi_now = float(rsi_value) if rsi_value is not None else float(indicators.rsi(history, 14) or 50.0)
     meta["reversal_rsi"] = round(rsi_now, 3)
-    # [2026-03-07] neutral zone(45~55) 게이트와 rsi_low_static 동기화
-    # SNIPER(S)는 RSI 42~48까지 허용하므로 neutral zone과 겹침.
-    # rsi_low_static >= neutral_min이면 전략이 명시적으로 중립 RSI를 허용한 것이므로
-    # neutral zone 차단을 건너뛴다.
+    # [2026-03-07] Sync the neutral-zone (45~55) gate with rsi_low_static.
+    # SNIPER(S) allows RSI 42~48, so it overlaps the neutral zone.
+    # If rsi_low_static >= neutral_min, the strategy has explicitly allowed neutral RSI,
+    # so skip the neutral-zone block.
     if float(rsi_low_static) < float(neutral_min):
         if float(neutral_min) < rsi_now < float(neutral_max):
             meta["reversal_blocked"] = "rsi_neutral"
@@ -728,7 +728,7 @@ def _evaluate_reversal_buy_guard(
 
 
 # ----------------------------------------------------------------------
-# Helper: Unified Buy Timing (통일 매수 타이밍)
+# Helper: Unified Buy Timing
 # ----------------------------------------------------------------------
 def should_buy_global_default(ctx: Any, price: float, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """Unified entry check: buy_now, bounce + EMA cross + RSI + momentum + AI."""
@@ -777,14 +777,14 @@ def should_buy_global_default(ctx: Any, price: float, params: Dict[str, Any]) ->
 
 
 # ----------------------------------------------------------------------
-# Helper: Regime Detection (국면 감지 — PP/AL 공용)
+# Helper: Regime Detection (shared by PP/AL)
 # ----------------------------------------------------------------------
 def _detect_regime(history: list[float], fast: int = 20, slow: int = 60) -> str:
-    """EMA spread 기반 간단 국면 판별.
+    """Simple regime classification based on EMA spread.
 
     Returns: "TREND" | "RANGE" | "UNKNOWN"
-    - |spread| >= 0.4% → TREND (추세)
-    - |spread| < 0.4%  → RANGE (횡보)
+    - |spread| >= 0.4% → TREND
+    - |spread| < 0.4%  → RANGE
     """
     if not history or len(history) < slow + 5:
         return "UNKNOWN"
@@ -797,10 +797,10 @@ def _detect_regime(history: list[float], fast: int = 20, slow: int = 60) -> str:
 
 
 def _check_regime_hysteresis(ctx: Any, regime: str, prefix: str, required: int = 3) -> bool:
-    """히스테리시스: 동일 국면이 N회 연속이면 True 반환.
+    """Hysteresis: returns True when the same regime occurs N times in a row.
 
-    ctx.set_var 기반으로 연속 카운트를 추적한다.
-    쿨다운(30분): 마지막 전환 이후 30분간 재전환 차단.
+    Tracks the consecutive count via ctx.set_var.
+    Cooldown (30 min): blocks re-switching for 30 min after the last switch.
     """
     key_dir = f"{prefix}_regime_dir"
     key_cnt = f"{prefix}_regime_cnt"
@@ -810,19 +810,19 @@ def _check_regime_hysteresis(ctx: Any, regime: str, prefix: str, required: int =
         prev_cnt = int(ctx.get_var(key_cnt) or 0)
         switch_ts = float(ctx.get_var(key_ts) or 0.0)
     except (TypeError, ValueError):
-        logger.warning("[Regime] 히스테리시스 상태 파싱 실패: prefix=%s", prefix, exc_info=True)
+        logger.warning("[Regime] failed to parse hysteresis state: prefix=%s", prefix, exc_info=True)
         prev_dir, prev_cnt, switch_ts = "", 0, 0.0
 
     if regime == prev_dir:
         cnt = prev_cnt + 1
     else:
         cnt = 1
-        # 쿨다운: 30분 이내 재전환 차단
+        # Cooldown: block re-switching within 30 min
         if switch_ts > 0 and (time.time() - switch_ts) < 1800:
             try:
                 ctx.set_var(key_cnt, 0)
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-                logger.warning("[STRAT_HELP] 쿨다운: 30분 이내 재전환 차단: %s", exc, exc_info=True)
+                logger.warning("[STRAT_HELP] cooldown: block re-switch within 30 min: %s", exc, exc_info=True)
             return False
 
     try:
@@ -831,15 +831,15 @@ def _check_regime_hysteresis(ctx: Any, regime: str, prefix: str, required: int =
         if cnt >= required and prev_dir != regime:
             ctx.set_var(key_ts, time.time())
     except (OSError, TypeError, ValueError, OverflowError) as exc:
-        logger.warning("[STRAT_HELP] 쿨다운: 30분 이내 재전환 차단: %s", exc, exc_info=True)
+        logger.warning("[STRAT_HELP] cooldown: block re-switch within 30 min: %s", exc, exc_info=True)
 
     return cnt >= required
 
 
 def _is_breakout(history: list[float], price: float) -> bool:
-    """돌파 감지: 볼린저 상단 + 상승 모멘텀 동시 충족.
+    """Breakout detection: Bollinger upper band + upward momentum both satisfied.
 
-    PP 포지션 보유 중 돌파 시 밴드 익절을 억제하고 trailing으로 전환하기 위한 판단.
+    Used to suppress band take-profit and switch to trailing on a breakout while holding a PP position.
     """
     if not history or len(history) < 30:
         return False
@@ -851,7 +851,7 @@ def _is_breakout(history: list[float], price: float) -> bool:
     upper = sma + 2.0 * std
     if price < upper:
         return False
-    # 상승 모멘텀: 최근 5틱 상승 + EMA20 위
+    # Upward momentum: last 5 ticks rising + above EMA20
     ema20 = indicators.ema(history, 20)
     if price <= ema20:
         return False
@@ -865,10 +865,10 @@ def _is_breakout(history: list[float], price: float) -> bool:
 # Helper: ATR Dynamic Limits (TP/SL)
 # ----------------------------------------------------------------------
 def _apply_atr_dynamic_limits(ctx: Any, params: Dict[str, Any], price: float, history: list[float], meta: Dict[str, Any], prefix: str) -> None:
-    """ATR 기반 동적 TP/SL 계산 및 Lock 처리.
+    """Compute ATR-based dynamic TP/SL and handle locking.
 
-    tp_sl_mode="manual"이면 전체 건너뜀 (사용자 고정값 보호).
-    tp_sl_mode="auto"(기본)이면 ATR 기반으로 동적 계산.
+    If tp_sl_mode="manual", skip entirely (protect user fixed values).
+    If tp_sl_mode="auto" (default), compute dynamically from ATR.
     """
     if not history or len(history) < 20:
         return
@@ -916,7 +916,7 @@ def _apply_atr_dynamic_limits(ctx: Any, params: Dict[str, Any], price: float, hi
     if dynamic_tp is not None:
         meta["dynamic_tp"] = float(dynamic_tp)
 
-    # ── GreenPen Cycle TP/SL 훅 (greenpen_enabled=True 일 때만) ──
+    # ── GreenPen Cycle TP/SL hook (only when greenpen_enabled=True) ──
     if bool(params.get("greenpen_enabled", False)) and price > 0:
         try:
             from app.strategy.greenpen.cycle_tp import compute_cycle_targets
@@ -934,28 +934,28 @@ def _apply_atr_dynamic_limits(ctx: Any, params: Dict[str, Any], price: float, hi
                 meta["gp_rr"] = gp.rr_ratio
                 meta["gp_atr"] = atr_val
         except Exception:
-            pass  # GreenPen import 실패 시 기존 로직 유지
+            pass  # On GreenPen import failure, keep existing logic
 
 
-# ── 공통 DCA 헬퍼 (PINGPONG/AUTOLOOP/LIGHTNING/CONTRARIAN 공유) ──
+# ── Common DCA helper (shared by PINGPONG/AUTOLOOP/LIGHTNING/CONTRARIAN) ──
 def _common_dca_check(
     ctx, price: float, entry_price: float, params: dict,
     strategy_prefix: str, meta: dict,
 ) -> "Decision | None":
     """
-    공통 DCA 물타기 로직.  SNIPER DCA의 간소화 버전.
+    Common DCA averaging-down logic. A simplified version of SNIPER DCA.
 
-    [2026-05-30] 부모님 결단 4️⃣ "C 강화 (LongHold 정신 일치)" — 옛 4단계/깊이 2% → 8단계/4%
-    - 묶임 견딤 정신: SL 까지 가는 도중 더 깊이 견디며 평단가 낮춤
-    - 6️⃣ budget cap (plugin budget) 자동 안전망 → over-allocation 차단
+    [2026-05-30] Owner's decision 4️⃣ "Strengthen C (aligned with LongHold spirit)" — old 4 steps / depth 2% → 8 steps / 4%
+    - Endure-the-lockup spirit: hold deeper on the way to SL while lowering the average price
+    - 6️⃣ budget cap (plugin budget) automatic safety net → blocks over-allocation
 
-    Defaults (강화):
-    - dca_step_pct: 0.5% 유지 (자주 발동)
-    - dca_add_ratio: 0.25 (옛 0.30 → 약간 ↓, 단계 늘어서 사이즈 분산)
-    - dca_max_depth_pct: 4.0% (옛 2.0 → 2배, 깊이 견딤)
-    - pyramid 1.0 → 2.5 max (옛 2.0), 단계당 0.20 증가 (옛 0.25, 완만하게)
-    - 자동 단계 수 = depth/step = 8 (옛 4)
-    반환: Decision("buy") 또는 None (DCA 해당 없음)
+    Defaults (strengthened):
+    - dca_step_pct: keep 0.5% (triggers often)
+    - dca_add_ratio: 0.25 (old 0.30 → slightly ↓, more steps spread the size out)
+    - dca_max_depth_pct: 4.0% (old 2.0 → 2x, endure deeper)
+    - pyramid 1.0 → 2.5 max (old 2.0), +0.20 per step (old 0.25, gentler)
+    - automatic step count = depth/step = 8 (old 4)
+    Returns: Decision("buy") or None (DCA not applicable)
     """
     if entry_price <= 0 or price <= 0:
         return None
@@ -987,7 +987,7 @@ def _common_dca_check(
     drop_from_initial = ((dca_initial_entry - price) / dca_initial_entry * 100) if dca_initial_entry > 0 else 0.0
     next_dca_level = (dca_count + 1) * dca_step_pct
 
-    # [2026-05-30] 피라미드 배율 완만하게 — 횟수마다 20% 증가, 최대 2.5배 (옛 25% / 2.0)
+    # [2026-05-30] Gentler pyramid multiplier — +20% per add, max 2.5x (old 25% / 2.0)
     pyramid_mult = min(1.0 + dca_count * 0.20, 2.5)
     effective_ratio = round(dca_add_ratio * pyramid_mult, 4)
 
@@ -1009,7 +1009,7 @@ def _common_dca_check(
 
 
 def _reset_dca_state(ctx, strategy_prefix: str):
-    """DCA 상태 초기화 (새 포지션 진입 시)."""
+    """Reset DCA state (on new position entry)."""
     try:
         ctx.set_var(f"{strategy_prefix}_dca_count", 0)
         ctx.set_var(f"{strategy_prefix}_dca_initial_entry", 0.0)

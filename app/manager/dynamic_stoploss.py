@@ -2,10 +2,10 @@
 # File: app/manager/dynamic_stoploss.py
 # Autocoin OS v3-H — Dynamic Stop-Loss System
 # ------------------------------------------------------------
-# 목적:
-# - 시간 경과에 따른 손절 라인 동적 조정
-# - 오래 보유할수록 타이트한 손절
-# - 트레일링 스탑 지원
+# Purpose:
+# - Dynamically adjust the stop-loss line as time passes
+# - Tighter stop-loss the longer a position is held
+# - Trailing stop support
 # ============================================================
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 from app.core.constants import env_bool
 
-# [MIGRATED 2026-01-23] Market Regime 연동
+# [MIGRATED 2026-01-23] Market Regime integration
 try:
     from app.core.market_regime import get_regime_detector, MarketRegime
 except ImportError:
@@ -34,27 +34,27 @@ if TYPE_CHECKING:
     from typing import Protocol
 
     class RegimeInfo(Protocol):
-        """국면 정보 프로토콜 (타입 힌트용)."""
+        """Market regime info protocol (for type hints)."""
         @property
         def regime(self) -> Any: ...
 
 
-# 변동성 기반 스케일링 상수
-ATR_REF = 1.5  # 기준 변동성 (%)
+# Volatility-based scaling constants
+ATR_REF = 1.5  # Reference volatility (%)
 VOL_SCALE_MIN = 0.7
 VOL_SCALE_MAX = 1.8
 
-# 국면별 SL 폭 배수
+# SL width multiplier per regime
 REGIME_SL_MULT: Dict[str, float] = {
-    "BULL": 1.20,      # SL 넓게
-    "BEAR": 0.75,      # SL 타이트
+    "BULL": 1.20,      # Wider SL
+    "BEAR": 0.75,      # Tighter SL
     "SIDEWAYS": 0.90,
     "VOLATILE": 1.30,
 }
 
-# TP 추천 상수
-TP_RATIO = 1.5  # SL 대비 TP 비율
-TP_MIN = 1.5    # 최소 TP %
+# TP recommendation constants
+TP_RATIO = 1.5  # TP ratio relative to SL
+TP_MIN = 1.5    # Minimum TP %
 
 REGIME_TP_MULT: Dict[str, float] = {
     "BULL": 1.25,
@@ -65,33 +65,33 @@ REGIME_TP_MULT: Dict[str, float] = {
 
 
 class StopLossMode(Enum):
-    """손절 모드."""
-    FIXED = "fixed"              # 고정 손절
-    TIME_DECAY = "time_decay"    # 시간 경과에 따라 타이트해짐
-    TRAILING = "trailing"        # 트레일링 스탑
-    HYBRID = "hybrid"            # 혼합 (시간 + 트레일링)
+    """Stop-loss mode."""
+    FIXED = "fixed"              # Fixed stop-loss
+    TIME_DECAY = "time_decay"    # Tightens as time passes
+    TRAILING = "trailing"        # Trailing stop
+    HYBRID = "hybrid"            # Hybrid (time + trailing)
 
 
 @dataclass
 class PositionInfo:
-    """포지션 정보."""
+    """Position info."""
     market: str
     entry_price: float
     entry_ts: float
     current_price: float
     quantity: float
-    highest_price: float = 0.0  # 보유 중 최고가
-    lowest_price: float = 0.0   # 보유 중 최저가
+    highest_price: float = 0.0  # Highest price while held
+    lowest_price: float = 0.0   # Lowest price while held
     strategy: str = ""
 
 
 @dataclass
 class StopLossLevel:
-    """손절 레벨."""
+    """Stop-loss level."""
     market: str
     stop_price: float
-    stop_pct: float          # 진입가 대비 손절 %
-    trigger_price: float     # 트리거 가격 (트레일링용)
+    stop_pct: float          # Stop-loss % relative to entry price
+    trigger_price: float     # Trigger price (for trailing)
     mode: StopLossMode
     reason: str
     urgency: str             # "none", "watch", "close", "immediate"
@@ -100,55 +100,55 @@ class StopLossLevel:
 
 
 class DynamicStopLossManager:
-    """동적 손절 관리자.
-    
-    시간 기반 손절 로직:
-    - 0-30분: -7% 손절 (넓은 여유)
-    - 30분-1시간: -5% 손절
-    - 1-2시간: -4% 손절
-    - 2-4시간: -3% 손절
-    - 4시간+: -2% 손절 (타이트)
-    
-    트레일링 스탑:
-    - 최고가 대비 일정 % 하락 시 손절
+    """Dynamic stop-loss manager.
+
+    Time-based stop-loss logic:
+    - 0-30 min: -7% stop (wide room)
+    - 30 min-1 hr: -5% stop
+    - 1-2 hr: -4% stop
+    - 2-4 hr: -3% stop
+    - 4 hr+: -2% stop (tight)
+
+    Trailing stop:
+    - Stop out on a set % drop from the highest price
     """
 
     def __init__(
         self,
-        # 시간 기반 손절 (분, 손절%)
+        # Time-based stop-loss (minutes, stop%)
         time_decay_schedule: Optional[List[Tuple[int, float]]] = None,
-        
-        # 트레일링 스탑
-        trailing_activation_pct: float = 3.0,  # 수익 3% 이상 시 활성화
-        trailing_distance_pct: float = 2.0,    # 최고가 대비 2% 하락 시 손절
-        
-        # 최소/최대 손절
+
+        # Trailing stop
+        trailing_activation_pct: float = 3.0,  # Activate when profit >= 3%
+        trailing_distance_pct: float = 2.0,    # Stop out on 2% drop from highest price
+
+        # Min/max stop-loss
         min_stop_pct: float = 1.5,
         max_stop_pct: float = 10.0,
-        
-        # 전략별 보정
+
+        # Per-strategy adjustment
         strategy_adjustments: Optional[Dict[str, float]] = None,
     ):
         self.time_decay_schedule = time_decay_schedule or [
-            (0, -7.0),      # 0-30분: -7%
-            (30, -5.0),     # 30-60분: -5%
-            (60, -4.0),     # 1-2시간: -4%
-            (120, -3.0),    # 2-4시간: -3%
-            (240, -2.5),    # 4-8시간: -2.5%
-            (480, -2.0),    # 8시간+: -2%
+            (0, -7.0),      # 0-30 min: -7%
+            (30, -5.0),     # 30-60 min: -5%
+            (60, -4.0),     # 1-2 hr: -4%
+            (120, -3.0),    # 2-4 hr: -3%
+            (240, -2.5),    # 4-8 hr: -2.5%
+            (480, -2.0),    # 8 hr+: -2%
         ]
-        
+
         self.trailing_activation = trailing_activation_pct
         self.trailing_distance = trailing_distance_pct
         self.min_stop = min_stop_pct
         self.max_stop = max_stop_pct
-        
+
         self.strategy_adjustments = strategy_adjustments or {
-            "PINGPONG": 1.0,     # 기본
+            "PINGPONG": 1.0,     # Default
             "AUTOLOOP": 1.0,
-            "LADDER": 1.5,       # 더 넓은 손절 (DCA 특성)
-            "LIGHTNING": 0.7,    # 더 타이트 (빠른 손절)
-            "GAZUA": 1.3,        # 더 넓은 손절 (장기 홀드)
+            "LADDER": 1.5,       # Wider stop (DCA nature)
+            "LIGHTNING": 0.7,    # Tighter (fast stop-loss)
+            "GAZUA": 1.3,        # Wider stop (long-term hold)
         }
 
     def calculate_stop_level(
@@ -158,46 +158,46 @@ class DynamicStopLossManager:
         regime: Optional["RegimeInfo"] = None,
         atr_pct: Optional[float] = None,
     ) -> StopLossLevel:
-        """손절 레벨 계산."""
+        """Calculate the stop-loss level."""
         now = time.time()
         held_sec = now - position.entry_ts
         held_min = held_sec / 60
-        
+
         entry = position.entry_price
         current = position.current_price
         highest = position.highest_price if position.highest_price > 0 else current
-        
-        # 현재 손익률
+
+        # Current P&L %
         current_pnl_pct = ((current - entry) / entry) * 100 if entry > 0 else 0
         highest_pnl_pct = ((highest - entry) / entry) * 100 if entry > 0 else 0
-        
-        # 변동성 기반 스케일링
+
+        # Volatility-based scaling
         if atr_pct is not None and atr_pct > 0:
             vol_scale = max(VOL_SCALE_MIN, min(VOL_SCALE_MAX, atr_pct / ATR_REF))
         else:
             vol_scale = 1.0
-        
-        # 1. 시간 기반 손절 %
+
+        # 1. Time-based stop-loss %
         time_stop_pct = self._get_time_based_stop(held_min)
-        
-        # 2. 전략 보정
+
+        # 2. Strategy adjustment
         strat_adj = self.strategy_adjustments.get(position.strategy.upper(), 1.0)
         time_stop_pct *= strat_adj
-        
-        # 국면별 트레일링 파라미터 조절
+
+        # Adjust trailing params per regime
         if regime and regime.regime.value == "VOLATILE":
             effective_trailing_activation = max(1.0, self.trailing_activation * 0.7)
             effective_trailing_distance = max(0.8, self.trailing_distance * 0.6)
         else:
             effective_trailing_activation = self.trailing_activation
             effective_trailing_distance = self.trailing_distance
-        
-        # 3. 트레일링 스탑 체크
+
+        # 3. Trailing stop check
         trailing_stop_pct = None
         if highest_pnl_pct >= effective_trailing_activation:
             trailing_stop_pct = highest_pnl_pct - effective_trailing_distance
-        
-        # 4. 모드별 최종 손절 결정
+
+        # 4. Determine final stop-loss per mode
         if mode == StopLossMode.FIXED:
             final_stop_pct = time_stop_pct
             reason = f"fixed:{time_stop_pct:.1f}%"
@@ -219,21 +219,21 @@ class DynamicStopLossManager:
                 final_stop_pct = time_stop_pct
                 reason = f"hybrid_time:{held_min:.0f}min→{time_stop_pct:.1f}%"
         
-        # 국면별 SL 폭 조절
+        # Adjust SL width per regime
         if regime is not None:
             sl_mult = REGIME_SL_MULT.get(regime.regime.value, 1.0)
             final_stop_pct *= sl_mult
-        
-        # 5. 최소/최대 제한
+
+        # 5. Min/max clamp
         final_stop_pct = max(-self.max_stop, min(-self.min_stop, final_stop_pct))
-        
-        # 6. 손절 가격 계산
+
+        # 6. Compute stop-loss price
         stop_price = entry * (1 + final_stop_pct / 100)
-        
-        # 7. 긴급도 판단
+
+        # 7. Determine urgency
         urgency = self._determine_urgency(current_pnl_pct, final_stop_pct)
-        
-        # TP 추천값 계산
+
+        # Compute recommended TP value
         regime_value = regime.regime.value if regime else None
         tp_mult = REGIME_TP_MULT.get(regime_value, 1.0) if regime_value else 1.0
         tp_pct = max(TP_MIN, abs(final_stop_pct) * TP_RATIO * tp_mult * vol_scale)
@@ -267,7 +267,7 @@ class DynamicStopLossManager:
         )
 
     def _get_time_based_stop(self, held_min: float) -> float:
-        """시간 기반 손절 % 반환."""
+        """Return the time-based stop-loss %."""
         for i, (threshold_min, stop_pct) in enumerate(self.time_decay_schedule):
             if i + 1 < len(self.time_decay_schedule):
                 next_threshold = self.time_decay_schedule[i + 1][0]
@@ -276,29 +276,29 @@ class DynamicStopLossManager:
             else:
                 if held_min >= threshold_min:
                     return stop_pct
-        
-        # 기본값
+
+        # Default
         return self.time_decay_schedule[-1][1] if self.time_decay_schedule else -5.0
 
     def _determine_urgency(self, current_pnl_pct: float, stop_pct: float) -> str:
-        """긴급도 판단."""
+        """Determine urgency."""
         distance_to_stop = current_pnl_pct - stop_pct
-        
+
         if current_pnl_pct <= stop_pct:
-            return "immediate"  # 이미 손절 레벨 도달
+            return "immediate"  # Already reached stop-loss level
         elif distance_to_stop < 1.0:
-            return "close"      # 손절까지 1% 미만
+            return "close"      # Less than 1% to stop-loss
         elif distance_to_stop < 2.0:
-            return "watch"      # 손절까지 2% 미만
+            return "watch"      # Less than 2% to stop-loss
         else:
-            return "none"       # 여유 있음
+            return "none"       # Plenty of room
 
     def should_stop_loss(
         self,
         position: PositionInfo,
         mode: StopLossMode = StopLossMode.HYBRID,
     ) -> Tuple[bool, StopLossLevel]:
-        """손절 실행 여부."""
+        """Whether to execute the stop-loss."""
         level = self.calculate_stop_level(position, mode)
         should_stop = position.current_price <= level.stop_price
         return (should_stop, level)
@@ -308,16 +308,16 @@ class DynamicStopLossManager:
         positions: List[PositionInfo],
         mode: StopLossMode = StopLossMode.HYBRID,
     ) -> List[Tuple[PositionInfo, StopLossLevel, bool]]:
-        """여러 포지션 일괄 체크."""
+        """Batch-check multiple positions."""
         results = []
         for pos in positions:
             should_stop, level = self.should_stop_loss(pos, mode)
             results.append((pos, level, should_stop))
         return results
 
-    # [MIGRATED 2026-01-23] Market Regime 연동
+    # [MIGRATED 2026-01-23] Market Regime integration
     def get_regime_scale(self, market: str = "BTCUSDT") -> Dict[str, float]:
-        """현재 시장 국면에 따른 TP/SL 스케일 반환."""
+        """Return the TP/SL scale based on the current market regime."""
         if not REGIME_TP_SL_ENABLED or get_regime_detector is None:
             return {"sl": 1.0, "tp": 1.0, "trail": 1.0}
         
@@ -335,24 +335,24 @@ def get_dynamic_stop_pct(
     strategy: str = "PINGPONG",
     highest_pnl_pct: float = 0.0,
 ) -> Tuple[float, str]:
-    """간단한 동적 손절 % 계산.
-    
+    """Simple dynamic stop-loss % calculation.
+
     Returns:
         (stop_pct, reason)
     """
     manager = DynamicStopLossManager()
-    
+
     now = time.time()
     held_min = (now - entry_ts) / 60
-    
-    # 시간 기반 손절
+
+    # Time-based stop-loss
     time_stop = manager._get_time_based_stop(held_min)
-    
-    # 전략 보정
+
+    # Strategy adjustment
     strat_adj = manager.strategy_adjustments.get(strategy.upper(), 1.0)
     time_stop *= strat_adj
-    
-    # 트레일링 체크
+
+    # Trailing check
     if highest_pnl_pct >= manager.trailing_activation:
         trailing_stop = highest_pnl_pct - manager.trailing_distance
         if trailing_stop > time_stop:

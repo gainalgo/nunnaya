@@ -1,22 +1,22 @@
-"""WhaleRadar — 고래 탐지 엔진 🐋
+"""WhaleRadar — whale detection engine 🐋
 
-고래 전조 패턴 + PA 백윅 시그널(GreenPen 이론) 통합 탐지기.
-FOCUS 스캔 루프에서 60초마다 호출, 추가 API 콜 없이 기존 5M kline 재사용.
+Combined detector for whale precursor patterns + PA back-wick signals (GreenPen theory).
+Called every 60s from the FOCUS scan loop, reusing existing 5M klines with no extra API calls.
 
-탐지 계층:
-  Layer 1  Precursor   (거래량, 압축, 드리프트, 시험펌프)
+Detection layers:
+  Layer 1  Precursor   (volume, squeeze, drift, test pump)
   Layer 2  PA Pattern  (Pin, Engulf, 3-candle)
-  Layer 3  Back Wick   (SIG 생존 확인)
-  Layer 4  Zone        (S/R 존 검증)
+  Layer 3  Back Wick   (SIG survival check)
+  Layer 4  Zone        (S/R zone validation)
   Layer 5  Classify    (A Flash / B Grind / C Hunt / D Rotation)
 
-점수:
+Score:
   >= 7  🐋🐋🐋 WHALE POD   conviction +3
   >= 5  🐋🐋   HIGH ALERT  conviction +2
-  >= 3  🐋     WATCH       conviction +1 + 텔레그램
+  >= 3  🐋     WATCH       conviction +1 + telegram
   <  3         Normal      no action
 
-사용:
+Usage:
   from app.core.whale_radar import whale_radar
   sig = whale_radar.scan("ZECUSDT", klines_5m, zones=[...])
   if sig:
@@ -38,13 +38,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class WhaleSignal:
-    """단일 고래 탐지 신호."""
+    """A single whale detection signal."""
     market: str
     timestamp: float
     score: int                  # 0-10
     direction: str              # "LONG" | "SHORT"
     pattern_type: str           # A_FLASH / B_GRIND / C_HUNT / D_ROTATION / UNKNOWN
-    # ── 상세 ──
+    # ── details ──
     precursors: Dict[str, Any] = field(default_factory=dict)
     pa_pattern: str = ""        # PIN_BUY / PIN_SELL / ENGULF_BUY / ENGULF_SELL / PAT3_BUY / PAT3_SELL
     back_wick_valid: bool = False
@@ -81,10 +81,10 @@ def _parse_candle(raw: list) -> Dict:
 
 
 def _candles(raw_klines: list) -> List[Dict]:
-    """raw klines → parsed candle list (oldest first). 중복 파싱 방지."""
+    """raw klines → parsed candle list (oldest first). Avoids double-parsing."""
     if not raw_klines:
         return []
-    # 이미 dict이면 그대로
+    # already a dict → return as-is
     if isinstance(raw_klines[0], dict) and "open" in raw_klines[0]:
         return raw_klines
     return [_parse_candle(r) for r in raw_klines]
@@ -94,17 +94,17 @@ def _candles(raw_klines: list) -> List[Dict]:
 #  Layer 1 — Precursor Detection
 # ─────────────────────────────────────────────
 
-_WINDOW = 12          # 60분 = 5M × 12
-_BASELINE = 100       # 평균 기준 100캔들
-_VOL_BUILDUP_THR = 0.50   # 후반 거래량 50%+ 증가
-_SQUEEZE_THR = 0.25        # 레인지 25%+ 압축
-_DRIFT_THR = 0.8           # 방향 드리프트 0.8%+
-_TEST_PUMP_MIN = 0.3       # 시험 펌프 최소 0.3%
-_ACCUM_BIAS_MIN = 7        # 12캔들 중 7개+ 같은 방향
+_WINDOW = 12          # 60 min = 5M × 12
+_BASELINE = 100       # 100-candle average baseline
+_VOL_BUILDUP_THR = 0.50   # second-half volume +50% increase
+_SQUEEZE_THR = 0.25        # range squeeze of 25%+
+_DRIFT_THR = 0.8           # directional drift of 0.8%+
+_TEST_PUMP_MIN = 0.3       # test pump minimum 0.3%
+_ACCUM_BIAS_MIN = 7        # 7+ of 12 candles in the same direction
 
 
 def _detect_precursors(candles: List[Dict]) -> Dict[str, Any]:
-    """최근 60분(12캔들) 전조 분석. 기준선은 100캔들 평균."""
+    """Analyze precursors over the last 60 min (12 candles). Baseline is the 100-candle average."""
     result = {
         "accumulation": False, "accumulation_count": 0,
         "test_pump": False, "test_pump_count": 0, "test_pump_details": [],
@@ -117,13 +117,13 @@ def _detect_precursors(candles: List[Dict]) -> Dict[str, Any]:
     if len(candles) < _WINDOW + 10:
         return result
 
-    window = candles[-_WINDOW:]           # 최근 12캔들
+    window = candles[-_WINDOW:]           # last 12 candles
     baseline = candles[-_BASELINE - _WINDOW:-_WINDOW] if len(candles) >= _BASELINE + _WINDOW else candles[:-_WINDOW]
 
     if not baseline:
         return result
 
-    # ── 1. Accumulation Bias (매집 편향) ──
+    # ── 1. Accumulation Bias ──
     bull_count = sum(1 for c in window if c["bullish"])
     bear_count = _WINDOW - bull_count
     if bull_count >= _ACCUM_BIAS_MIN:
@@ -134,12 +134,12 @@ def _detect_precursors(candles: List[Dict]) -> Dict[str, Any]:
         result["direction_hint"] = "SHORT"
     result["accumulation_count"] = max(bull_count, bear_count)
 
-    # ── 2. Micro Test Pump (시험 펌프) ──
+    # ── 2. Micro Test Pump ──
     test_pumps = []
     for i in range(len(window) - 1):
         c = window[i]
         n = window[i + 1]
-        # 양봉 시험: body가 크고 다음 캔들이 50%+ 되돌림
+        # bullish test: large body and the next candle retraces 50%+
         if c["body_pct"] >= _TEST_PUMP_MIN:
             if c["bullish"] and not n["bullish"] and n["body"] > c["body"] * 0.3:
                 test_pumps.append({"idx": i, "dir": "UP", "size_pct": c["body_pct"]})
@@ -149,7 +149,7 @@ def _detect_precursors(candles: List[Dict]) -> Dict[str, Any]:
     result["test_pump_count"] = len(test_pumps)
     result["test_pump_details"] = test_pumps
 
-    # ── 3. Volume Buildup (거래량 축적) ──
+    # ── 3. Volume Buildup ──
     avg_base_vol = sum(c["vol"] for c in baseline) / len(baseline) if baseline else 1
     first_half_vol = sum(c["vol"] for c in window[:6]) / 6
     second_half_vol = sum(c["vol"] for c in window[6:]) / 6
@@ -158,12 +158,12 @@ def _detect_precursors(candles: List[Dict]) -> Dict[str, Any]:
         result["vol_buildup_pct"] = round(vol_change * 100, 1)
         if vol_change >= _VOL_BUILDUP_THR:
             result["vol_buildup"] = True
-    # 또는 전반적 거래량이 기준선 대비 2배+
+    # or overall volume is 2x+ the baseline
     window_avg = sum(c["vol"] for c in window) / _WINDOW
     if avg_base_vol > 0 and window_avg / avg_base_vol >= 2.0:
         result["vol_buildup"] = True
 
-    # ── 4. Range Squeeze (레인지 압축) ──
+    # ── 4. Range Squeeze ──
     recent_ranges = [c["range_pct"] for c in window[-6:]]
     baseline_ranges = [c["range_pct"] for c in baseline[-20:]] if len(baseline) >= 20 else [c["range_pct"] for c in baseline]
     if baseline_ranges:
@@ -175,7 +175,7 @@ def _detect_precursors(candles: List[Dict]) -> Dict[str, Any]:
             if squeeze >= _SQUEEZE_THR:
                 result["squeeze"] = True
 
-    # ── 5. Net Drift (방향 드리프트) ──
+    # ── 5. Net Drift ──
     if window[0]["close"] > 0:
         drift = (window[-1]["close"] - window[0]["close"]) / window[0]["close"] * 100
         result["drift_pct"] = round(drift, 3)
@@ -207,13 +207,13 @@ def _detect_precursors(candles: List[Dict]) -> Dict[str, Any]:
 #  Layer 2 — PA Pattern Detection
 # ─────────────────────────────────────────────
 
-_PIN_WICK_RATIO = 0.60      # 핀바: 꼬리가 전체 레인지의 60%+
-_PIN_BODY_RATIO = 0.35      # 핀바: 몸통이 전체 레인지의 35% 이하
-_ENGULF_BODY_RATIO = 1.2    # 장악형: 현재 몸통이 이전의 1.2배+
+_PIN_WICK_RATIO = 0.60      # pin bar: wick is 60%+ of the full range
+_PIN_BODY_RATIO = 0.35      # pin bar: body is 35% or less of the full range
+_ENGULF_BODY_RATIO = 1.2    # engulfing: current body is 1.2x+ the previous one
 
 
 def _detect_pa_pattern(candles: List[Dict]) -> Dict[str, Any]:
-    """최근 5캔들에서 PA 패턴 탐지.
+    """Detect PA patterns over the last 5 candles.
 
     Returns: {pattern, direction, candle_idx, confirmation_at, back_wick_candle_idx}
     """
@@ -221,17 +221,17 @@ def _detect_pa_pattern(candles: List[Dict]) -> Dict[str, Any]:
         "pattern": "",           # PIN / ENGULF / PAT3
         "pa_name": "",           # PIN_BUY, ENGULF_SELL, etc.
         "direction": "",         # LONG / SHORT
-        "signal_candle_idx": -1, # 시그널 캔들 위치 (끝에서 역순)
-        "confirmation_at": 0,    # 확인 캔들 번호 (Pat1→2, Pat2→3, Pat3→4)
+        "signal_candle_idx": -1, # signal candle position (reverse-indexed from the end)
+        "confirmation_at": 0,    # confirmation candle number (Pat1→2, Pat2→3, Pat3→4)
         "detected": False,
     }
     if len(candles) < 6:
         return result
 
-    recent = candles[-5:]  # 최근 5캔들
+    recent = candles[-5:]  # last 5 candles
 
-    # ── Pat 1: Pin Bar (핀바) ──
-    # 최근 2~4번째 캔들에서 핀바 검색 (맨 마지막은 아직 미완성일 수 있음)
+    # ── Pat 1: Pin Bar ──
+    # Search the 2nd–4th most recent candles for a pin bar (the very last may still be incomplete)
     for offset in range(1, 4):  # candles[-2], candles[-3], candles[-4]
         if offset >= len(recent):
             break
@@ -244,7 +244,7 @@ def _detect_pa_pattern(candles: List[Dict]) -> Dict[str, Any]:
         upper_ratio = c["upper_wick"] / rng
         body_ratio = c["body"] / rng
 
-        # BUY Pin: 긴 아래꼬리 (지지선에서 반등)
+        # BUY Pin: long lower wick (bounce off support)
         if lower_ratio >= _PIN_WICK_RATIO and body_ratio <= _PIN_BODY_RATIO and lower_ratio > upper_ratio * 2:
             result.update({
                 "pattern": "PIN", "pa_name": "PIN_BUY", "direction": "LONG",
@@ -252,7 +252,7 @@ def _detect_pa_pattern(candles: List[Dict]) -> Dict[str, Any]:
             })
             return result
 
-        # SELL Pin: 긴 위꼬리 (저항선에서 하락)
+        # SELL Pin: long upper wick (rejection at resistance)
         if upper_ratio >= _PIN_WICK_RATIO and body_ratio <= _PIN_BODY_RATIO and upper_ratio > lower_ratio * 2:
             result.update({
                 "pattern": "PIN", "pa_name": "PIN_SELL", "direction": "SHORT",
@@ -260,7 +260,7 @@ def _detect_pa_pattern(candles: List[Dict]) -> Dict[str, Any]:
             })
             return result
 
-    # ── Pat 2: Engulfing (장악형) ──
+    # ── Pat 2: Engulfing ──
     for offset in range(1, 4):
         if offset + 1 >= len(recent):
             break
@@ -290,22 +290,22 @@ def _detect_pa_pattern(candles: List[Dict]) -> Dict[str, Any]:
             })
             return result
 
-    # ── Pat 3: Three-candle reversal (삼봉/모닝스타/이브닝스타) ──
+    # ── Pat 3: Three-candle reversal (morning star / evening star) ──
     for offset in range(1, 3):
         if offset + 2 >= len(recent):
             break
-        c1 = recent[-(offset + 2)]  # 첫째
-        c2 = recent[-(offset + 1)]  # 가운데 (작은 몸통)
-        c3 = recent[-offset]         # 셋째
+        c1 = recent[-(offset + 2)]  # first
+        c2 = recent[-(offset + 1)]  # middle (small body)
+        c3 = recent[-offset]         # third
 
         if c1["body"] <= 0 or c3["body"] <= 0:
             continue
 
-        # 가운데 캔들이 작아야 함 (indecision)
+        # the middle candle must be small (indecision)
         if c2["body"] > min(c1["body"], c3["body"]) * 0.5:
             continue
 
-        # Morning Star (BUY): 음→작은→양, 셋째가 첫째의 50%+ 회복
+        # Morning Star (BUY): down → small → up, third recovers 50%+ of the first
         if (not c1["bullish"] and c3["bullish"] and
                 c3["close"] > (c1["open"] + c1["close"]) / 2):
             result.update({
@@ -314,7 +314,7 @@ def _detect_pa_pattern(candles: List[Dict]) -> Dict[str, Any]:
             })
             return result
 
-        # Evening Star (SELL): 양→작은→음, 셋째가 첫째의 50%+ 하락
+        # Evening Star (SELL): up → small → down, third drops 50%+ of the first
         if (c1["bullish"] and not c3["bullish"] and
                 c3["close"] < (c1["open"] + c1["close"]) / 2):
             result.update({
@@ -331,9 +331,9 @@ def _detect_pa_pattern(candles: List[Dict]) -> Dict[str, Any]:
 # ─────────────────────────────────────────────
 
 def _check_back_wick(candles: List[Dict], pa: Dict) -> Dict[str, Any]:
-    """PA 패턴 후 백윅 생존 확인.
+    """Confirm back-wick survival after a PA pattern.
 
-    백윅 = 확인 캔들의 꼬리. 후속 캔들이 이 레벨을 깨지 않으면 SIG 유효.
+    Back wick = the confirmation candle's wick. SIG is valid if subsequent candles do not break this level.
     """
     result = {"valid": False, "level": 0.0, "destroyed": False, "reason": ""}
 
@@ -344,14 +344,14 @@ def _check_back_wick(candles: List[Dict], pa: Dict) -> Dict[str, Any]:
     sig_idx = pa["signal_candle_idx"]
     conf_offset = pa["confirmation_at"]  # Pat1→2, Pat2→3, Pat3→4
 
-    # 확인 캔들 = 시그널 캔들 뒤의 conf_offset-1 번째
-    # recent[-sig_idx]가 시그널 → 확인 캔들은 recent[-sig_idx + (conf_offset - 1)]
+    # confirmation candle = the (conf_offset-1)th candle after the signal candle
+    # recent[-sig_idx] is the signal → confirmation candle is recent[-sig_idx + (conf_offset - 1)]
     conf_candle_pos = sig_idx - (conf_offset - 1)
 
     if conf_candle_pos < 1:
-        # 확인 캔들이 아직 안 나왔거나 마지막 캔들 → 검증 불가
+        # confirmation candle has not formed yet or is the last candle → cannot validate
         result["reason"] = "awaiting_confirmation"
-        # 아직 확인 대기 중이면 일단 유효로 간주 (기회 놓치지 않기 위해)
+        # while still awaiting confirmation, treat as valid for now (so we don't miss the opportunity)
         result["valid"] = True
         return result
 
@@ -363,11 +363,11 @@ def _check_back_wick(candles: List[Dict], pa: Dict) -> Dict[str, Any]:
     conf = recent[-conf_candle_pos]
     direction = pa["direction"]
 
-    # 백윅 레벨 결정
+    # determine the back-wick level
     if direction == "LONG":
-        # BUY 시그널 → 확인 캔들의 아래꼬리 끝 = 백윅 레벨
+        # BUY signal → tip of the confirmation candle's lower wick = back-wick level
         result["level"] = conf["low"]
-        # 후속 캔들이 이 레벨 아래로 내려가면 파괴
+        # destroyed if a subsequent candle drops below this level
         subsequent = recent[-conf_candle_pos + 1:] if conf_candle_pos > 1 else []
         for s in subsequent:
             if s["low"] < result["level"]:
@@ -375,7 +375,7 @@ def _check_back_wick(candles: List[Dict], pa: Dict) -> Dict[str, Any]:
                 result["reason"] = "wick_broken_below"
                 return result
     else:
-        # SELL 시그널 → 확인 캔들의 위꼬리 끝 = 백윅 레벨
+        # SELL signal → tip of the confirmation candle's upper wick = back-wick level
         result["level"] = conf["high"]
         subsequent = recent[-conf_candle_pos + 1:] if conf_candle_pos > 1 else []
         for s in subsequent:
@@ -390,13 +390,13 @@ def _check_back_wick(candles: List[Dict], pa: Dict) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────
-#  Layer 4 — Zone Validation (간이)
+#  Layer 4 — Zone Validation (lightweight)
 # ─────────────────────────────────────────────
 
 def _check_zone(candles: List[Dict], pa: Dict, zones: list | None) -> bool:
-    """PA 신호가 S/R 존에서 발생했는지 확인.
+    """Check whether the PA signal occurred at an S/R zone.
 
-    zones가 없으면 캔들 데이터에서 간이 S/R 계산.
+    If no zones are provided, compute a lightweight S/R from the candle data.
     """
     if not pa.get("detected"):
         return False
@@ -407,7 +407,7 @@ def _check_zone(candles: List[Dict], pa: Dict, zones: list | None) -> bool:
 
     current_price = candles[-1]["close"]
 
-    # FOCUS zones가 있으면 활용
+    # use FOCUS zones if available
     if zones:
         for z in zones:
             ztype = z.get("type", "")
@@ -418,7 +418,7 @@ def _check_zone(candles: List[Dict], pa: Dict, zones: list | None) -> bool:
                     return True
                 if direction == "SHORT" and "resistance" in ztype.lower():
                     return True
-            # 가까운 존 (가격의 0.5% 이내)
+            # nearby zone (within 0.5% of price)
             dist_pct = min(abs(current_price - low), abs(current_price - high)) / current_price * 100
             if dist_pct < 0.5:
                 if direction == "LONG" and "support" in ztype.lower():
@@ -426,12 +426,12 @@ def _check_zone(candles: List[Dict], pa: Dict, zones: list | None) -> bool:
                 if direction == "SHORT" and "resistance" in ztype.lower():
                     return True
 
-    # 간이 S/R: 최근 100캔들의 주요 고/저점
+    # lightweight S/R: major highs/lows over the last 100 candles
     if len(candles) >= 50:
         highs = sorted([c["high"] for c in candles[-100:]], reverse=True)
         lows = sorted([c["low"] for c in candles[-100:]])
 
-        # 상위 5% 영역 = 저항, 하위 5% 영역 = 지지
+        # top 5% region = resistance, bottom 5% region = support
         top5 = len(highs) // 20 or 1
         bot5 = len(lows) // 20 or 1
         resistance_zone = sum(highs[:top5]) / top5
@@ -439,7 +439,7 @@ def _check_zone(candles: List[Dict], pa: Dict, zones: list | None) -> bool:
 
         price_range = resistance_zone - support_zone
         if price_range > 0:
-            proximity = 0.03  # 가격 범위의 3% 이내
+            proximity = 0.03  # within 3% of the price range
             if direction == "LONG" and (current_price - support_zone) / price_range < proximity * 3:
                 return True
             if direction == "SHORT" and (resistance_zone - current_price) / price_range < proximity * 3:
@@ -453,12 +453,12 @@ def _check_zone(candles: List[Dict], pa: Dict, zones: list | None) -> bool:
 # ─────────────────────────────────────────────
 
 def _classify_pattern(precursors: Dict, pa: Dict) -> str:
-    """패턴 유형 분류.
+    """Classify the pattern type.
 
-    A_FLASH:  거래량 급증 + 핀바 → 1캔들 폭발
-    B_GRIND:  레인지 압축 + 매집 → 지속 펌프
-    C_HUNT:   반전 위킹 → 청산 사냥
-    D_ROTATION: multi-coin (scan_multiple에서 결정)
+    A_FLASH:  volume spike + pin bar → 1-candle explosion
+    B_GRIND:  range squeeze + accumulation → sustained pump
+    C_HUNT:   reversal wicking → liquidation hunt
+    D_ROTATION: multi-coin (decided in scan_multiple)
     """
     squeeze = precursors.get("squeeze", False)
     accum = precursors.get("accumulation", False)
@@ -466,24 +466,24 @@ def _classify_pattern(precursors: Dict, pa: Dict) -> str:
     test = precursors.get("test_pump", False)
     pa_type = pa.get("pattern", "")
 
-    # B_GRIND: 스퀴즈 + 매집 (더 크고 오래 감)
+    # B_GRIND: squeeze + accumulation (bigger and longer-lasting)
     if squeeze and accum:
         return "B_GRIND"
 
-    # A_FLASH: 거래량 + 핀바 (빠르고 강력)
+    # A_FLASH: volume + pin bar (fast and powerful)
     if vol and pa_type == "PIN":
         return "A_FLASH"
 
-    # A_FLASH: 거래량 + 시험펌프 (고래 유력)
+    # A_FLASH: volume + test pump (likely a whale)
     if vol and test:
         return "A_FLASH"
 
-    # C_HUNT: 큰 위킹 후 즉시 반전 (아직 미구현 — 향후 OI 데이터 필요)
-    # 현재는 큰 꼬리 + 작은 몸통으로 간이 추정
+    # C_HUNT: big wicking followed by an immediate reversal (not implemented yet — needs OI data later)
+    # for now, roughly estimated from a large wick + small body
     if pa_type == "PIN" and precursors.get("squeeze_pct", 0) < 10:
         return "C_HUNT"
 
-    # 기본값
+    # default
     if precursors["score"] >= 3:
         return "B_GRIND" if squeeze else "A_FLASH"
 
@@ -495,7 +495,7 @@ def _classify_pattern(precursors: Dict, pa: Dict) -> str:
 # ─────────────────────────────────────────────
 
 def _calculate_score(precursors: Dict, pa: Dict, back_wick: Dict, zone_valid: bool) -> int:
-    """종합 점수 계산 (0-10)."""
+    """Compute the composite score (0-10)."""
     score = precursors.get("score", 0)  # max 5
 
     # PA Layer (max 3)
@@ -511,11 +511,11 @@ def _calculate_score(precursors: Dict, pa: Dict, back_wick: Dict, zone_valid: bo
 
 
 def _estimate_move(candles: List[Dict], pattern_type: str) -> float:
-    """ATR 기반 기대 이동량 (%). TF별 런닝 사이클 근사."""
+    """ATR-based expected move (%). Approximates the running cycle per TF."""
     if len(candles) < 20:
         return 0.0
 
-    # 20캔들 ATR
+    # 20-candle ATR
     atr_sum = sum(c["range"] for c in candles[-20:])
     atr = atr_sum / 20
     price = candles[-1]["close"]
@@ -524,12 +524,12 @@ def _estimate_move(candles: List[Dict], pattern_type: str) -> float:
 
     atr_pct = atr / price * 100
 
-    # 패턴별 배수 (PDF 기반)
+    # per-pattern multipliers (PDF-based)
     multipliers = {
-        "A_FLASH": 3.0,     # ATR × 3 (빠른 폭발, 짧음)
-        "B_GRIND": 6.0,     # ATR × 6 (느리지만 크게 감)
-        "C_HUNT": 2.0,      # ATR × 2 (되돌림만)
-        "D_ROTATION": 4.0,  # ATR × 4 (중간)
+        "A_FLASH": 3.0,     # ATR × 3 (fast explosion, short)
+        "B_GRIND": 6.0,     # ATR × 6 (slow but goes far)
+        "C_HUNT": 2.0,      # ATR × 2 (retracement only)
+        "D_ROTATION": 4.0,  # ATR × 4 (medium)
         "UNKNOWN": 2.0,
     }
     mult = multipliers.get(pattern_type, 2.0)
@@ -537,7 +537,7 @@ def _estimate_move(candles: List[Dict], pattern_type: str) -> float:
 
 
 def _score_to_boost(score: int) -> int:
-    """점수 → conviction 부스트."""
+    """score → conviction boost."""
     if score >= 7:
         return 3  # 🐋🐋🐋 WHALE POD
     if score >= 5:
@@ -561,31 +561,31 @@ def _score_label(score: int) -> str:
 #  Main WhaleRadar Class
 # ─────────────────────────────────────────────
 
-_ALERT_COOLDOWN = 300  # 같은 코인 알림 5분 간격
-_HISTORY_MAX = 200     # 히스토리 최대 보관
+_ALERT_COOLDOWN = 300  # 5-min interval between alerts for the same coin
+_HISTORY_MAX = 200     # max history retained
 
 
 class WhaleRadar:
-    """고래 탐지 메인 엔진."""
+    """Main whale detection engine."""
 
     def __init__(self):
         self._history: List[WhaleSignal] = []
         self._last_alert_ts: Dict[str, float] = {}  # market → last telegram ts
         self._active_alerts: Dict[str, WhaleSignal] = {}  # market → latest signal
-        self._notify_fn = None  # 텔레그램 알림 함수 (외부 주입)
+        self._notify_fn = None  # telegram notify function (injected externally)
 
     def set_notify(self, fn):
-        """텔레그램 알림 함수 주입. fn(message: str) → None"""
+        """Inject the telegram notify function. fn(message: str) → None"""
         self._notify_fn = fn
 
     def scan(self, market: str, klines_5m: list,
              zones: list | None = None) -> WhaleSignal | None:
-        """단일 마켓 스캔. 5M kline 데이터 필요 (100+ 캔들 권장).
+        """Scan a single market. Requires 5M kline data (100+ candles recommended).
 
         Returns: WhaleSignal if score >= 3, else None.
         """
         candles = _candles(klines_5m)
-        if len(candles) < 24:  # 최소 2시간 데이터
+        if len(candles) < 24:  # at least 2 hours of data
             return None
 
         # ── Layer 1: Precursor ──
@@ -604,11 +604,11 @@ class WhaleRadar:
         score = _calculate_score(precursors, pa, back_wick, zone_valid)
 
         if score < 3:
-            # 점수 낮으면 active alert에서도 제거
+            # low score → also remove from active alerts
             self._active_alerts.pop(market.upper(), None)
             return None
 
-        # ── Direction 결정 ──
+        # ── Determine Direction ──
         direction = pa.get("direction", "") or precursors.get("direction_hint", "NEUTRAL")
 
         # ── Classification ──
@@ -655,7 +655,7 @@ class WhaleRadar:
 
     def scan_multiple(self, markets_klines: Dict[str, list],
                       zones_map: Dict[str, list] | None = None) -> Dict[str, WhaleSignal]:
-        """여러 마켓 동시 스캔. Type D (Rotation) 감지 포함.
+        """Scan multiple markets at once. Includes Type D (Rotation) detection.
 
         Args:
             markets_klines: {market: klines_5m_list}
@@ -671,7 +671,7 @@ class WhaleRadar:
             if sig:
                 results[market] = sig
 
-        # ── Type D: Rotation 감지 (3+ 코인이 동시에 score >= 3) ──
+        # ── Type D: Rotation detection (3+ coins at score >= 3 simultaneously) ──
         if len(results) >= 3:
             for sig in results.values():
                 if sig.score < 7:  # D_ROTATION bonus
@@ -687,7 +687,7 @@ class WhaleRadar:
         return results
 
     def get_active_alerts(self) -> Dict[str, Dict]:
-        """현재 활성 알림 (대시보드용). 5분 이내 신호만."""
+        """Currently active alerts (for the dashboard). Signals within 5 minutes only."""
         now = time.time()
         active = {}
         for mk, sig in list(self._active_alerts.items()):
@@ -698,7 +698,7 @@ class WhaleRadar:
         return active
 
     def get_history(self, market: str | None = None, hours: float = 24) -> List[Dict]:
-        """히스토리 조회."""
+        """Query history."""
         cutoff = time.time() - hours * 3600
         result = []
         for sig in self._history:
@@ -710,7 +710,7 @@ class WhaleRadar:
         return result
 
     def _send_alert(self, signal: WhaleSignal):
-        """텔레그램 알림 (쿨다운 적용)."""
+        """Telegram alert (cooldown applied)."""
         if not self._notify_fn:
             return
         now = time.time()
@@ -730,17 +730,17 @@ class WhaleRadar:
         p = signal.precursors
         details = []
         if p.get("accumulation"):
-            details.append(f"매집 {p['accumulation_count']}/12")
+            details.append(f"Accumulation {p['accumulation_count']}/12")
         if p.get("test_pump"):
-            details.append(f"시험펌프 {p['test_pump_count']}회")
+            details.append(f"Test pump {p['test_pump_count']}x")
         if p.get("vol_buildup"):
-            details.append(f"거래량↑{p['vol_buildup_pct']:.0f}%")
+            details.append(f"Volume↑{p['vol_buildup_pct']:.0f}%")
         if p.get("squeeze"):
-            details.append(f"압축 {p['squeeze_pct']:.0f}%")
+            details.append(f"Squeeze {p['squeeze_pct']:.0f}%")
         if details:
             msg_lines.append(" | ".join(details))
         if signal.expected_move_pct > 0:
-            msg_lines.append(f"기대 이동: ±{signal.expected_move_pct:.1f}%")
+            msg_lines.append(f"Expected move: ±{signal.expected_move_pct:.1f}%")
         msg_lines.append(f"Conviction boost: +{signal.conviction_boost}")
 
         self._notify_fn("\n".join(msg_lines))

@@ -61,9 +61,9 @@ _candle_cache: Dict[str, Tuple[List[Dict[str, Any]], float, float]] = {}
 # Last prefetch target list — updated by build_reserved_candidates, consumed by prefetch loop
 _last_prefetch_markets: List[str] = []
 
-# Highlow 캐시 (300초 TTL - autopilot 5분 주기와 일치, 429 방지)
+# Highlow cache (300s TTL - aligned with autopilot 5-min cycle, prevents 429)
 _highlow_cache: Dict[str, Tuple[Dict[str, float], float]] = {}
-_HIGHLOW_CACHE_TTL = 300.0  # 300초
+_HIGHLOW_CACHE_TTL = 300.0  # 300s
 
 
 # ============================================================
@@ -181,13 +181,13 @@ def build_watchlist(
         getattr(system, "reserved_candidate_price_max_usdt", 0.0) or 0.0, 0.0
     )
 
-    # 공통 유동성 하드 필터: 전 전략 적용 (ENV 조정 가능)
+    # Common liquidity hard filter: applied to all strategies (ENV-adjustable)
     _vol_default = "200000" if Q.is_usdt else "500000000"
     _price_default = "0.5" if Q.is_usdt else "500"
     _global_min_vol24 = _sf(os.getenv("OMA_SELECTOR_GLOBAL_MIN_VOL24_USDT", _vol_default), float(_vol_default))
     _global_min_price = _sf(os.getenv("OMA_SELECTOR_GLOBAL_MIN_PRICE_USDT", _price_default), float(_price_default))
 
-    # 가격 하한: 설정값과 글로벌 최소값 중 큰 값 사용
+    # Price floor: use the larger of the config value and the global minimum
     if candidate_price_min < _global_min_price:
         candidate_price_min = _global_min_price
 
@@ -206,7 +206,7 @@ def build_watchlist(
         if candidate_price_max > 0 and px > candidate_price_max:
             _price_max_cnt += 1
             continue
-        # 거래량 하드 필터: 24h 거래대금 미달 시 후보에서 제외
+        # Volume hard filter: exclude from candidates if 24h turnover is below threshold
         if _global_min_vol24 > 0 and vol24 < _global_min_vol24:
             _vol_min_cnt += 1
             continue
@@ -387,7 +387,7 @@ def fetch_highlow_for_lookback(
             "unit_min": 0.0,
         }
 
-    # 캐시 체크 (lookback 비례 TTL: 짧은 구간은 300초, 긴 구간은 최대 1800초)
+    # Cache check (lookback-proportional TTL: short ranges 300s, long ranges up to 1800s)
     cache_key = f"{m}:{lookback_min}"
     now = time.time()
     _effective_ttl = min(1800.0, max(_HIGHLOW_CACHE_TTL, float(lookback_min) * 0.1))
@@ -396,8 +396,8 @@ def fetch_highlow_for_lookback(
         if now - cached_time < _effective_ttl:
             return cached_data
 
-    # Bybit 분봉 API는 1, 3, 5, 10, 15, 30, 60, 240분만 지원
-    # lookback 시간에 맞는 단위와 개수 선택
+    # Bybit minute-candle API only supports 1, 3, 5, 10, 15, 30, 60, 240 minutes
+    # Pick the unit and count matching the lookback duration
     if lookback_min <= 60:
         unit = 1
         count = lookback_min
@@ -463,7 +463,7 @@ def fetch_highlow_for_lookback(
 
         highs = [float(c.get("high_price") or 0) for c in candles if c.get("high_price")]
         lows = [float(c.get("low_price") or 0) for c in candles if c.get("low_price")]
-        current = float(candles[0].get("trade_price") or 0)  # 최신 캔들의 종가
+        current = float(candles[0].get("trade_price") or 0)  # close of the latest candle
 
         if not highs or not lows:
             return {
@@ -492,7 +492,7 @@ def fetch_highlow_for_lookback(
             "unit_min": float(unit),
         }
 
-        # 캐시에 저장
+        # Store in cache
         _highlow_cache[cache_key] = (result, now)
 
         return result

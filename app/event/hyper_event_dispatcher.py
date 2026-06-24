@@ -1,6 +1,6 @@
 # ============================================================
 # File: autocoin/hyper/event/hyper_event_dispatcher.py
-# 고급 Dispatcher – async/sync handler 자동 지원
+# Advanced Dispatcher – automatic async/sync handler support
 # ============================================================
 
 import asyncio
@@ -42,7 +42,7 @@ class HyperEventDispatcher:
                 if asyncio.iscoroutinefunction(handler):
                     await handler(event)
                 else:
-                    # sync handler 는 thread executor 로 실행
+                    # run sync handler in a thread executor
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(None, handler, event)
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as e:

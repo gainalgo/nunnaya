@@ -2,7 +2,7 @@
 # File: app/strategy/strategy_risk_auto_regulator.py
 # ------------------------------------------------------------
 # StrategyRiskAutoRegulator
-# - Judge가 만든 신호를 시장 리스크 상황에 따라 조정한다.
+# - Adjusts signals from the Judge according to market risk conditions.
 # ============================================================
 
 from __future__ import annotations
@@ -17,11 +17,11 @@ from .strategy_types import (
 
 class StrategyRiskAutoRegulator:
     """
-    Brain/Policy 데이터를 기반으로 Judge의 신호를 조절하는 레이어.
+    Layer that regulates the Judge's signal based on Brain/Policy data.
     """
 
     # --------------------------------------------------------
-    # 메인 리스크 조정 함수
+    # Main risk adjustment function
     # --------------------------------------------------------
     def adjust(
         self,
@@ -32,33 +32,33 @@ class StrategyRiskAutoRegulator:
         signal: StrategySignal
     ) -> StrategySignal:
         """
-        Judge 신호를 그대로 사용할지, 위험하면 hold로 변경할지 판단한다.
+        Decide whether to keep the Judge's signal as-is, or switch to hold when risky.
         """
 
         volatility = brain.volatility
         trend_val = brain.trend
 
         # --------------------------
-        # 시장 변동성이 너무 높으면 거래 중단
+        # Halt trading when market volatility is too high
         # --------------------------
         if volatility is not None and volatility > policy.get("max_volatility", 5.0):
             return StrategySignal("hold")
 
         # --------------------------
-        # 하락 추세가 매우 강한데 buy 신호가 나오면 무시
+        # Ignore a buy signal when the downtrend is very strong
         # --------------------------
         if signal.signal == "buy":
             if trend_val is not None and trend_val < policy.get("min_uptrend", -2.0):
                 return StrategySignal("hold")
 
         # --------------------------
-        # 상승 추세가 강한데 sell 신호는 약간 보류
+        # Hold off a sell signal when the uptrend is strong
         # --------------------------
         if signal.signal == "sell":
             if trend_val is not None and trend_val > policy.get("max_downtrend", 2.0):
                 return StrategySignal("hold")
 
         # --------------------------
-        # 기본: 신호 유지
+        # Default: keep the signal
         # --------------------------
         return signal

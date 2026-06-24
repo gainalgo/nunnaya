@@ -1,23 +1,23 @@
-"""Direction Memory — 같은 코인 + 같은 방향 최근 N회 결과 추적.
+"""Direction Memory — track the last N results for the same coin + same direction.
 
-관찰 (2026-04-18 저녁):
-- ETH SHORT 4회 연패 중 엔진은 계속 SHORT 진입
-- 코인별 방향이 "안 맞는 장" 이 있음 — 레짐 전환 직후에 자주 발생
-- 같은 코인이라도 반대 방향은 여전히 허용 (ETH LONG 은 OK)
+Observation (2026-04-18 evening):
+- ETH SHORT on a 4-loss streak, yet the engine kept entering SHORT
+- Each coin has directions that "don't fit the market" — often right after a regime flip
+- The opposite direction on the same coin is still allowed (ETH LONG is OK)
 
-규칙:
-- 최근 N회 (기본 4) 중 손실이 K회 (기본 3) 이상이면 → conviction 페널티
-- 손실이 streak (연속) K회 (기본 3) 이상이면 → hard block (기본 OFF)
-- direction_block 파일 기반의 기존 메커니즘과 독립 — 이건 softer penalty
+Rules:
+- If losses among the last N (default 4) are >= K (default 3) → conviction penalty
+- If the loss streak (consecutive) is >= K (default 3) → hard block (default OFF)
+- Independent of the existing direction_block file-based mechanism — this is a softer penalty
 
-데이터 소스: `runtime/focus_harpoon_journal.jsonl`
-레코드 포맷:
+Data source: `runtime/focus_harpoon_journal.jsonl`
+Record format:
     {"ts": 1775997261.6, "event": "EXIT", "market": "ETHUSDT",
      "direction": "LONG", "pnl_net": -0.91, ...}
 
-주의:
-- 사용자 원칙 "코인 실패 배제 금지" — 이건 코인 단위가 아니라 **코인+방향** 단위
-- 같은 코인 반대방향은 영향 없음 (ETH SHORT 4패여도 ETH LONG 은 자유)
+Note:
+- Owner principle "no coin blacklisting" — this is not per-coin but per **coin+direction**
+- The opposite direction on the same coin is unaffected (ETH SHORT 4 losses → ETH LONG still free)
 """
 from __future__ import annotations
 
@@ -35,16 +35,16 @@ class DirectionMemoryModule:
     def __init__(self, config: Any):
         self.config = config
         # Cache: {(MARKET, DIRECTION): (ts, result_dict)}
-        # Journal 9MB+ forward scan 비용 완화 — scanner N개 × tick 당 중복 스캔 방지
+        # Eases the cost of a 9MB+ journal forward scan — avoids redundant scans across N scanners per tick
         self._cache: Dict[tuple, tuple] = {}
 
     def _load_recent_exits(
         self, market: str, direction: str, lookback_days: float, now_ts: float
     ) -> List[Dict[str, Any]]:
-        """해당 코인+방향의 최근 EXIT 레코드 (오래된 순).
+        """Recent EXIT records for this coin+direction (oldest first).
 
-        lookback_days 내의 것만. 파일을 끝에서부터 역순 스캔하다가 cutoff 지나면 중단.
-        now_ts: 테스트 주입 가능 (실측 검증용)
+        Only those within lookback_days. Scans the file from the end backwards, stopping past cutoff.
+        now_ts: injectable for tests (for live verification)
         """
         out: List[Dict[str, Any]] = []
         if not os.path.exists(JOURNAL_PATH):
@@ -54,7 +54,7 @@ class DirectionMemoryModule:
         mkt_u = market.upper()
         dir_u = direction.upper()
 
-        # 단순 forward scan — 저널이 8MB 이하이므로 충분
+        # Simple forward scan — sufficient since the journal is under 8MB
         try:
             with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
                 for line in f:
@@ -72,24 +72,24 @@ class DirectionMemoryModule:
                     if (rec.get("direction") or "").upper() != dir_u:
                         continue
                     ts = rec.get("ts", 0)
-                    # lower bound: cutoff (lookback 경계)
-                    # upper bound: now_ts (테스트 과거 시뮬레이션 정확성)
+                    # lower bound: cutoff (lookback boundary)
+                    # upper bound: now_ts (accuracy of past-simulation tests)
                     if ts < cutoff or ts > now_ts:
                         continue
                     out.append(rec)
         except Exception as exc:
             logger.warning("[dm] journal read failed: %s", exc)
 
-        # 최신순 정렬 (ts desc)
+        # Sort newest first (ts desc)
         out.sort(key=lambda r: r.get("ts", 0), reverse=True)
         return out
 
     def evaluate(self, market: str, direction: str, now_ts: float) -> Dict[str, Any]:
-        """최근 N회 결과 → delta / block 결정.
+        """Last N results → decide delta / block.
 
-        ★ [2026-04-25 부모 "모지리 방지"] dm_streak_block_opposite 옵션:
-           True 면 해당 방향 연패 시 반대 방향도 block (양방향 쉬는 시간)
-           Default False → 현재 방향만 block, 반대 방향은 자유 (SHORT 전환 허용)
+        ★ [2026-04-25 owner "avoid being a sucker"] dm_streak_block_opposite option:
+           If True, on a loss streak in this direction, block the opposite direction too (both-side rest)
+           Default False → block only the current direction, opposite is free (allows flipping to SHORT)
 
         Returns:
             {
@@ -98,8 +98,8 @@ class DirectionMemoryModule:
               "reason": str,
               "recent_n": int,
               "loss_count": int,
-              "streak": int,  # 연속 손실 streak (최신부터)
-              "opposite_blocked": bool,  # True 면 반대 방향도 block
+              "streak": int,  # consecutive loss streak (from newest)
+              "opposite_blocked": bool,  # if True, the opposite direction is blocked too
             }
         """
         out: Dict[str, Any] = {
@@ -113,30 +113,30 @@ class DirectionMemoryModule:
 
         window_n = int(getattr(cfg, "dm_window_count", 4))
         lookback_days = float(getattr(cfg, "dm_lookback_days", 3.0))
-        loss_penalty_k = int(getattr(cfg, "dm_loss_count_penalty", 3))            # count 류, 그대로 int
-        loss_penalty_delta = float(getattr(cfg, "dm_loss_count_delta", -20.0))    # [2026-05-17 100점 ×10] -2→-20
+        loss_penalty_k = int(getattr(cfg, "dm_loss_count_penalty", 3))            # count-type, keep as int
+        loss_penalty_delta = float(getattr(cfg, "dm_loss_count_delta", -20.0))    # [2026-05-17 100-point scale ×10] -2→-20
         streak_block_k = int(getattr(cfg, "dm_streak_block", 4))
         block_enabled = bool(getattr(cfg, "dm_streak_block_enabled", False))
         ttl = float(getattr(cfg, "dm_cache_ttl_sec", 180.0))
 
-        # Cache check — coin+direction 별 독립 TTL
+        # Cache check — independent TTL per coin+direction
         key = (market.upper(), direction.upper())
         cached = self._cache.get(key)
         if cached and (now_ts - cached[0]) < ttl:
-            return dict(cached[1])  # copy (호출자 변경으로부터 캐시 보호)
+            return dict(cached[1])  # copy (protect cache from caller mutation)
 
         recent = self._load_recent_exits(market, direction, lookback_days, now_ts)
-        recent = recent[:window_n]  # 최신 N개만
+        recent = recent[:window_n]  # newest N only
         out["recent_n"] = len(recent)
         if not recent:
             self._cache[key] = (now_ts, dict(out))
             return out
 
-        # loss 판정: pnl_net < 0
+        # loss decision: pnl_net < 0
         losses = [r for r in recent if float(r.get("pnl_net", 0)) < 0]
         out["loss_count"] = len(losses)
 
-        # streak: 최신부터 연속 손실 수
+        # streak: consecutive losses from newest
         streak = 0
         for r in recent:
             if float(r.get("pnl_net", 0)) < 0:
@@ -146,38 +146,38 @@ class DirectionMemoryModule:
         out["streak"] = streak
 
         # hard block?
-        # ★ [2026-04-24] 부모님 비대칭 해결: 영구 차단 → 시간 기반 차단으로 변경
-        # 단위 = 시간 (Profit Exit Block UI 와 통일, 부모님 결정 2026-04-24)
-        # block_hours=0 이면 영구 (legacy), >0 이면 마지막 손실 ts 기준 N시간만 차단
+        # ★ [2026-04-24] owner's asymmetry fix: permanent block → time-based block
+        # unit = hours (unified with the Profit Exit Block UI, owner decision 2026-04-24)
+        # block_hours=0 means permanent (legacy); >0 blocks for only N hours from the last loss ts
         if block_enabled and streak >= streak_block_k:
             block_hours = float(getattr(cfg, "dm_streak_block_hours", 0.0))
             if block_hours > 0:
-                # 마지막 손실 시각 (recent[0].ts) 기준 시간 체크
+                # time check based on the last loss time (recent[0].ts)
                 last_loss_ts = float(recent[0].get("ts", 0) or 0)
                 block_sec = block_hours * 3600.0
                 elapsed = now_ts - last_loss_ts
                 if elapsed >= block_sec:
-                    # 시간 만료 → 차단 해제 (block 발동 안 함, 학습 효과는 이미 충분)
+                    # time expired → release block (no block fired, learning effect already sufficient)
                     logger.info("[dm] EXPIRED %s %s: streak=%d but %.1fh>=%.1fh → release",
                                 market, direction, streak, elapsed/3600.0, block_hours)
                     self._cache[key] = (now_ts, dict(out))
                     return out
-                # 차단 유지 — 남은 시간 reason 에 표시
+                # block stays — show remaining time in reason
                 remain_h = (block_sec - elapsed) / 3600.0
                 out["block"] = True
-                out["reason"] = f"direction_memory: {market} {direction} {streak} 연패 → {block_hours:.1f}h 정지 ({remain_h:.1f}h 남음)"
+                out["reason"] = f"direction_memory: {market} {direction} {streak} losses in a row → {block_hours:.1f}h pause ({remain_h:.1f}h left)"
                 logger.info("[dm] BLOCK %s %s: streak=%d, %.1fh remain", market, direction, streak, remain_h)
             else:
-                # 영구 차단 (legacy 동작)
+                # permanent block (legacy behavior)
                 out["block"] = True
-                out["reason"] = f"direction_memory: {market} {direction} {streak} 연패 (streak≥{streak_block_k}, 영구)"
+                out["reason"] = f"direction_memory: {market} {direction} {streak} losses in a row (streak≥{streak_block_k}, permanent)"
                 logger.info("[dm] BLOCK %s %s: streak=%d (PERMANENT)", market, direction, streak)
             self._cache[key] = (now_ts, dict(out))
             return out
 
-        # ★ [2026-04-25 부모 "모지리 방지"] 반대 방향 opposite 체크
-        # 현재 방향으로 block 안 됐지만, dm_streak_block_opposite=True 면
-        # 반대 방향이 block 발동 상태인지도 조회 → 양방향 차단
+        # ★ [2026-04-25 owner "avoid being a sucker"] opposite-direction check
+        # Not blocked in the current direction, but if dm_streak_block_opposite=True,
+        # also check whether the opposite direction is in a blocked state → block both sides
         if block_enabled and getattr(cfg, "dm_streak_block_opposite", False):
             opp_dir = "SHORT" if direction.upper() == "LONG" else "LONG"
             opp_recent = self._load_recent_exits(market, opp_dir, lookback_days, now_ts)
@@ -198,18 +198,18 @@ class DirectionMemoryModule:
                         remain_h = (block_sec - elapsed) / 3600.0
                         out["block"] = True
                         out["opposite_blocked"] = True
-                        out["reason"] = (f"direction_memory(opposite): {market} {opp_dir} {opp_streak}연패 → "
-                                         f"{direction} 도 {block_hours:.1f}h block ({remain_h:.1f}h 남음)")
-                        logger.info("[dm] BLOCK(opp) %s %s: %s streak=%d, %.1fh remain — 양방향 차단",
+                        out["reason"] = (f"direction_memory(opposite): {market} {opp_dir} {opp_streak} losses in a row → "
+                                         f"{direction} also blocked {block_hours:.1f}h ({remain_h:.1f}h left)")
+                        logger.info("[dm] BLOCK(opp) %s %s: %s streak=%d, %.1fh remain — both sides blocked",
                                     market, direction, opp_dir, opp_streak, remain_h)
                         self._cache[key] = (now_ts, dict(out))
                         return out
                 else:
-                    # 영구 opposite block (legacy 의 양방향 버전)
+                    # permanent opposite block (both-side version of legacy)
                     out["block"] = True
                     out["opposite_blocked"] = True
-                    out["reason"] = (f"direction_memory(opposite): {market} {opp_dir} {opp_streak}연패 → "
-                                     f"{direction} 도 영구 block")
+                    out["reason"] = (f"direction_memory(opposite): {market} {opp_dir} {opp_streak} losses in a row → "
+                                     f"{direction} also permanently blocked")
                     logger.info("[dm] BLOCK(opp) %s %s: %s streak=%d (PERMANENT)",
                                 market, direction, opp_dir, opp_streak)
                     self._cache[key] = (now_ts, dict(out))

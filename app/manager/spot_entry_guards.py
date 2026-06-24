@@ -1,13 +1,13 @@
 # ============================================================
-# Spot Entry Guards — 선물 FOCUS 진입 타이밍 게이트 *복사*-이식 (Phase 1)
+# Spot Entry Guards — *copy*-port of the futures FOCUS entry timing gates (Phase 1)
 # ------------------------------------------------------------
-# 원본: focus_manager.py 의 검증된 진입 게이트 (라이브 선물 무손상, 여기로 복사).
+# Source: the validated entry gates in focus_manager.py (live futures untouched, copied here).
 #   - check_gap            ← gap_check       (focus_manager.py:16694-16737)
 #   - check_micro_1m       ← _check_micro_1m (focus_manager.py:8013-8094)
 #   - check_momentum_reversal ← _compute_momentum_reversal_penalty (8096-8162)
-# 보존 규칙: long-only(SHORT 가지 보존되나 현물은 LONG만 전달) · ADX 면제 미적용(천장 누수 방지).
-# 순수 함수 — self 상태 0, (client, market, direction, cfg)만. 캔들은 client.get_kline(TTL 캐시).
-# 모두 default OFF (cfg.*_enabled=False) → paper 관측 후 ON.
+# Preservation rules: long-only (SHORT branch kept but spot only passes LONG) · ADX exemption not applied (prevents ceiling leakage).
+# Pure functions — zero self state, only (client, market, direction, cfg). Candles via client.get_kline (TTL cache).
+# All default OFF (cfg.*_enabled=False) → turn ON after paper observation.
 # ============================================================
 from __future__ import annotations
 
@@ -18,9 +18,9 @@ logger = logging.getLogger(__name__)
 
 
 def check_gap(client: Any, market: str, direction: str, price: float, atr: float, cfg: Any) -> Tuple[bool, str]:
-    """진입 전 갭 체크 — 선택 TF×N봉 고가(LONG)까지 거리 < 필요갭 → 차단(천장 바로 밑 진입 금지).
-    필요갭 = max(min_pct, ATR%×atr_mult) 상한 atr_cap_pct (등락폭 큰 코인은 더 아래에서만).
-    원본 focus_manager.py:16694-16737. fail-open(데이터 없으면 통과)."""
+    """Pre-entry gap check — if distance to the high (LONG) over the chosen TF×N bars < required gap → block (no entry right below the ceiling).
+    required gap = max(min_pct, ATR%×atr_mult) capped at atr_cap_pct (high-volatility coins only allowed further below).
+    Source focus_manager.py:16694-16737. fail-open (pass if no data)."""
     if not getattr(cfg, "gap_check_enabled", False):
         return True, ""
     min_pct = float(getattr(cfg, "gap_check_min_pct", 0.3) or 0.0)
@@ -34,7 +34,7 @@ def check_gap(client: Any, market: str, direction: str, price: float, atr: float
             return True, "gap_no_data"
         recent = raw[-bars:]
         if (direction or "").upper() == "LONG":
-            wall = max(float(r[2]) for r in recent if len(r) >= 5)   # 위 N봉 고가
+            wall = max(float(r[2]) for r in recent if len(r) >= 5)   # high over the upper N bars
             gap = (wall - price) / price * 100.0
         else:
             wall = min(float(r[3]) for r in recent if len(r) >= 5)
@@ -45,18 +45,18 @@ def check_gap(client: Any, market: str, direction: str, price: float, atr: float
             need = atrp * float(getattr(cfg, "gap_check_atr_mult", 0.7))
             cap = float(getattr(cfg, "gap_check_atr_cap_pct", 1.5))
             eff = max(min_pct, min(need, cap))
-        # ★ [2026-06-20] 돌파 면제 — 직전(마지막) 봉이 그 전 N-1봉 고가를 돌파(신고가)했으면 = 진짜 돌파지 천장추격 아님 → 통과.
-        #   돌파하는 코인은 늘 자기 고가 코앞이라 앵커만으론 못 푸는 케이스(예: KERNEL BOS_BULLISH·room10%인데 gap 0.25%<1.03% 차단).
-        #   펌프탑/끝물은 headroom·overextension·micro_1m 게이트가 별도로 막으므로 gap만 면제해도 안전.
+        # ★ [2026-06-20] Breakout exemption — if the prior (last) bar broke above the high of the preceding N-1 bars (new high) = a real breakout, not ceiling-chasing → pass.
+        #   A breaking-out coin is always right next to its own high, a case the anchor alone can't unblock (e.g. KERNEL BOS_BULLISH·room10% but gap 0.25%<1.03% blocked).
+        #   Pump-tops/blow-offs are separately blocked by the headroom·overextension·micro_1m gates, so exempting gap alone is safe.
         if (direction or "").upper() == "LONG" and getattr(cfg, "gap_check_breakout_exempt", True):
             prior = recent[:-1]
             if len(prior) >= 2:
                 prior_wall = max(float(r[2]) for r in prior if len(r) >= 5)
                 last_high = float(recent[-1][2]) if len(recent[-1]) >= 5 else 0.0
                 if prior_wall > 0 and last_high > prior_wall:
-                    return True, f"gap_breakout_exempt(신고가 {last_high:.4f}>직전 {prior_wall:.4f} 돌파)"
+                    return True, f"gap_breakout_exempt(new high {last_high:.4f}>prior {prior_wall:.4f} breakout)"
         if gap < eff:
-            return False, f"gap {gap:.2f}%<{eff:.2f}% ({tf}M×{bars}봉 wall={wall:.4f} 천장추격)"
+            return False, f"gap {gap:.2f}%<{eff:.2f}% ({tf}M×{bars}bars wall={wall:.4f} ceiling-chasing)"
         return True, "gap_ok"
     except Exception as exc:
         logger.debug("[SPOT_GUARD] gap_check fail-open: %s", exc)
@@ -64,8 +64,8 @@ def check_gap(client: Any, market: str, direction: str, price: float, atr: float
 
 
 def check_micro_1m(client: Any, market: str, direction: str, cfg: Any) -> Tuple[bool, str]:
-    """1M 마이크로 타이밍 — "지금 이 순간" 검증. 역봉/거래량소진/RSI과열이면 이번 tick 보류.
-    원본 focus_manager.py:8013-8094. ★ADX 면제 미적용(현물: 잔파동도 따짐). fail-open."""
+    """1M micro timing — validates "this very moment". Defer this tick on an opposing candle / volume exhaustion / RSI overheat.
+    Source focus_manager.py:8013-8094. ★ADX exemption not applied (spot: even small waves count). fail-open."""
     if not getattr(cfg, "micro_1m_check_enabled", False):
         return True, ""
     dir_up = (direction or "").upper()
@@ -73,10 +73,10 @@ def check_micro_1m(client: Any, market: str, direction: str, cfg: Any) -> Tuple[
         raw = client.get_kline(market, interval="1", limit=16)
         if not raw or len(raw) < 6:
             return True, "1m_no_data"
-        # ① 마지막 1M 봉 방향 — ★ [2026-06-20] body_min 노이즈 도지 면제(현물 전용 진입 0건 교정):
-        #   직전 1M 몸통이 body_min% 미만(=노이즈 도지)이면 색깔 무관 통과. 명확한 역봉(|body|≥body_min)만 차단.
-        #   기존엔 색깔(c<o)만 보고 -0.02% 도지도 LONG 차단 → 1m_candle_against 가 진입 0건의 한 축이었음.
-        #   body_min=0(미마이그레이션)이면 |body|≥0 항상 참 = 종전 동작 100% 불변(하위호환).
+        # ① Direction of the last 1M bar — ★ [2026-06-20] body_min noise-doji exemption (fix for spot-only zero entries):
+        #   if the prior 1M body is below body_min% (=noise doji), pass regardless of color. Only a clear opposing candle (|body|≥body_min) blocks.
+        #   Previously it looked only at color (c<o) and blocked LONG even on a -0.02% doji → 1m_candle_against was one axis of zero entries.
+        #   With body_min=0 (un-migrated), |body|≥0 is always true = prior behavior 100% unchanged (backward compatible).
         last = raw[-1]
         if len(last) >= 5:
             o, c = float(last[1]), float(last[4])
@@ -84,16 +84,16 @@ def check_micro_1m(client: Any, market: str, direction: str, cfg: Any) -> Tuple[
             body_pct = abs(c - o) / o * 100.0 if o > 0 else 0.0
             if body_pct >= body_min:
                 if dir_up == "LONG" and c < o:
-                    return False, f"1m_candle_against(LONG 1M 음봉 o={o:.4f} c={c:.4f} body={body_pct:.3f}%≥{body_min})"
+                    return False, f"1m_candle_against(LONG 1M down-candle o={o:.4f} c={c:.4f} body={body_pct:.3f}%≥{body_min})"
                 if dir_up == "SHORT" and c > o:
-                    return False, f"1m_candle_against(SHORT 1M 양봉 body={body_pct:.3f}%≥{body_min})"
-        # ② 거래량 연속 감소(추진력 소진)
+                    return False, f"1m_candle_against(SHORT 1M up-candle body={body_pct:.3f}%≥{body_min})"
+        # ② Volume declining in a row (momentum exhaustion)
         n = int(getattr(cfg, "micro_1m_vol_decline_bars", 3))
         if len(raw) >= n + 1:
             vols = [float(r[5]) if len(r) >= 6 else 0 for r in raw[-(n + 1):]]
             if all(v > 0 for v in vols) and all(vols[i] > vols[i + 1] for i in range(len(vols) - 1)):
-                return False, f"1m_vol_decline({n}봉 연속 감소)"
-        # ③ RSI 극단(과열)
+                return False, f"1m_vol_decline({n} bars declining in a row)"
+        # ③ RSI extreme (overheat)
         closes = [float(r[4]) for r in raw if len(r) >= 5]
         if len(closes) >= 15:
             gains = sum(max(0, closes[i] - closes[i - 1]) for i in range(1, len(closes)))
@@ -113,9 +113,9 @@ def check_micro_1m(client: Any, market: str, direction: str, cfg: Any) -> Tuple[
 
 
 def check_momentum_reversal(client: Any, market: str, direction: str, cfg: Any) -> Tuple[bool, str]:
-    """직전 5M 1~3봉 역행 차단 — "이미 다 움직인 후/떨어지는 칼" 진입 회피.
-    원본 _compute_momentum_reversal_penalty(8096-8162) 의 *강한 역행*만 BLOCK 으로 이식
-    (medium/누적 약역행 점수감점은 Phase 2 guard_score 로). fail-open."""
+    """Block on adverse movement over the last 5M 1~3 bars — avoid entering "after it has already moved / into a falling knife".
+    Ports only the *strong reversal* of _compute_momentum_reversal_penalty(8096-8162) as a BLOCK
+    (medium/cumulative weak-reversal score penalties go to Phase 2 guard_score). fail-open."""
     if not getattr(cfg, "momentum_reversal_enabled", False):
         return True, ""
     dir_up = (direction or "").upper()
@@ -131,7 +131,7 @@ def check_momentum_reversal(client: Any, market: str, direction: str, cfg: Any) 
         lookback = max(1, min(int(getattr(cfg, "momentum_reversal_lookback_bars", 3)), 5))
         if len(closes) < lookback + 2:
             return True, "no-data"
-        # ATR(true range, period 14) 인라인 — 선물 원본의 indicators.atr import 가 깨져 no-op 였음 → 견고하게 직접 계산.
+        # ATR (true range, period 14) inline — the futures source's indicators.atr import was broken (no-op) → compute robustly inline.
         trs, pc = [], None
         for h, l, c in zip(highs, lows, closes):
             tr = (h - l) if pc is None else max(h - l, abs(h - pc), abs(l - pc))
@@ -141,14 +141,14 @@ def check_momentum_reversal(client: Any, market: str, direction: str, cfg: Any) 
         if not atr_val or atr_val <= 0:
             return True, "no-atr"
         last_change = closes[-1] - closes[-2]
-        adverse_1bar = -last_change if dir_up == "LONG" else last_change   # 양수 = 역행
+        adverse_1bar = -last_change if dir_up == "LONG" else last_change   # positive = adverse
         strong_thr = float(getattr(cfg, "momentum_reversal_strong_atr", 1.0)) * atr_val
         if adverse_1bar >= strong_thr:
-            return False, f"strong_rev ({adverse_1bar / atr_val:+.1f}ATR 직전 역행)"
-        # ★ [2026-06-20] cum{N}_rev 하드블록 제거(현물 전용 진입 0건 교정):
-        #   선물은 momentum_reversal 을 *점수감점*(-20, _compute_momentum_reversal_penalty)으로만 쓰고
-        #   하드블록 안 함. 이 함수 docstring 의도("누적 약역행은 guard_score 로")와도 일치.
-        #   spot 포트가 누적역행까지 return False 차단해 눌림목 진입을 영영 막던 것 → 강한 1봉 역행만 BLOCK.
+            return False, f"strong_rev ({adverse_1bar / atr_val:+.1f}ATR prior-bar reversal)"
+        # ★ [2026-06-20] Removed the cum{N}_rev hard block (fix for spot-only zero entries):
+        #   Futures uses momentum_reversal only as a *score penalty* (-20, _compute_momentum_reversal_penalty)
+        #   and does not hard-block. This also matches this function's docstring intent ("cumulative weak reversal goes to guard_score").
+        #   The spot port hard-blocked even cumulative reversals (return False), permanently blocking pullback entries → only a strong 1-bar reversal BLOCKs.
         return True, "mom_ok"
     except Exception as exc:
         logger.debug("[SPOT_GUARD] momentum_reversal fail-open: %s", exc)
@@ -156,10 +156,10 @@ def check_momentum_reversal(client: Any, market: str, direction: str, cfg: Any) 
 
 
 def check_dca_stabilized(client: Any, market: str, cfg: Any) -> Tuple[bool, str]:
-    """DCA(물타기) 전용 떨어지는 칼 게이트 — 직전 5M봉이 강하게 하락 중이면 물타기 보류.
-    진입의 check_momentum_reversal 코어를 DCA 자체 플래그(dca_stabilize_gate_enabled)로 재사용.
-    현물=long_only → 하락만 본다. 반환 True=안정(물타기 OK) / False=칼낙하 중(보류). fail-open.
-    ★ 효자 눌림목 DCA(멈춘 칼)는 통과, freefall 칼받기만 차단해 손익비 역전 방지."""
+    """DCA-only falling-knife gate — if the prior 5M bar is dropping hard, defer the DCA add.
+    Reuses the check_momentum_reversal core for entry under DCA's own flag (dca_stabilize_gate_enabled).
+    Spot=long_only → only looks at drops. Returns True=stable (DCA OK) / False=knife falling (defer). fail-open.
+    ★ Lets the profitable pullback DCA (stalled knife) pass, blocking only freefall knife-catching to prevent a risk/reward flip."""
     if not getattr(cfg, "dca_stabilize_gate_enabled", False):
         return True, ""
     try:
@@ -179,10 +179,10 @@ def check_dca_stabilized(client: Any, market: str, cfg: Any) -> Tuple[bool, str]
         atr_val = sum(trs[-14:]) / min(len(trs), 14) if trs else 0.0
         if not atr_val or atr_val <= 0:
             return True, "no-atr"
-        drop_1bar = closes[-2] - closes[-1]   # 양수 = 직전봉 하락폭
+        drop_1bar = closes[-2] - closes[-1]   # positive = prior-bar drop magnitude
         strong_thr = float(getattr(cfg, "dca_stabilize_strong_atr", 1.0)) * atr_val
         if drop_1bar >= strong_thr:
-            return False, f"칼낙하 ({drop_1bar / atr_val:.1f}ATR 직전봉 급락) → 물타기 보류"
+            return False, f"falling_knife ({drop_1bar / atr_val:.1f}ATR prior-bar plunge) → DCA deferred"
         return True, "stable"
     except Exception as exc:
         logger.debug("[SPOT_GUARD] dca_stabilized fail-open: %s", exc)
@@ -190,9 +190,9 @@ def check_dca_stabilized(client: Any, market: str, cfg: Any) -> Tuple[bool, str]
 
 
 def check_raw_body(client: Any, market: str, direction: str, cfg: Any) -> Tuple[bool, str]:
-    """직전 5M N봉 시가→종가 net(raw 에너지)이 진입 반대면 차단 — RSI/MACD 가공값 통과해도
-    raw price action 이 반대인 자리 거름. 원본 focus_manager.py:11205-11246.
-    ★보수: min_net_pct>0 기본(노이즈 net 무시·명확한 역에너지만 차단=전멸 방지). fail-open."""
+    """Block when the last 5M N-bar open→close net (raw energy) opposes the entry — filters spots where
+    raw price action is opposing even if processed RSI/MACD pass. Source focus_manager.py:11205-11246.
+    ★Conservative: min_net_pct>0 by default (ignore noise net, block only clear opposing energy = avoids wipeout). fail-open."""
     if not getattr(cfg, "raw_body_enabled", False):
         return True, ""
     lookback = max(1, int(getattr(cfg, "raw_body_lookback", 3)))
@@ -201,7 +201,7 @@ def check_raw_body(client: Any, market: str, direction: str, cfg: Any) -> Tuple[
         raw = client.get_kline(market, interval="5", limit=lookback + 1)
         if not raw or len(raw) < lookback + 1:
             return True, "raw_no_data"
-        recent = raw[-(lookback + 1):-1]   # 마지막(진행중) 제외한 직전 N완성봉 (oldest-first)
+        recent = raw[-(lookback + 1):-1]   # last N completed bars excluding the last (in-progress) one (oldest-first)
         if not recent:
             return True, "raw_no_data"
         ref = float(recent[-1][4]) or 0.0
@@ -210,9 +210,9 @@ def check_raw_body(client: Any, market: str, direction: str, cfg: Any) -> Tuple[
         net_pct = sum(float(b[4]) - float(b[1]) for b in recent) / ref * 100.0
         du = (direction or "").upper()
         if du == "LONG" and net_pct < -abs(min_net):
-            return False, f"raw_body {lookback}봉 net={net_pct:+.2f}%(매도 에너지)→LONG 차단"
+            return False, f"raw_body {lookback}bars net={net_pct:+.2f}%(sell energy)→LONG blocked"
         if du == "SHORT" and net_pct > abs(min_net):
-            return False, f"raw_body net={net_pct:+.2f}%(매수)→SHORT 차단"
+            return False, f"raw_body net={net_pct:+.2f}%(buy)→SHORT blocked"
         return True, "raw_ok"
     except Exception as exc:
         logger.debug("[SPOT_GUARD] raw_body fail-open: %s", exc)
@@ -220,9 +220,9 @@ def check_raw_body(client: Any, market: str, direction: str, cfg: Any) -> Tuple[
 
 
 def check_momentum_deriv(client: Any, market: str, direction: str, cfg: Any) -> Tuple[bool, str]:
-    """5M RSI/MACD 변화율(최근 N평균 − 그전 N평균)이 진입 반대 가속이면 차단 — "같은 RSI=50 이라도
-    올라오는 중 vs 꺾이는 중" 구분. 원본 focus_manager.py:11264-11344.
-    ★보수: require_both 기본 True(RSI+MACD 둘 다 반대일 때만 차단=전멸 방지). fail-open."""
+    """Block when the 5M RSI/MACD rate of change (recent N avg − prior N avg) accelerates against the entry — distinguishes
+    "same RSI=50 but rising vs rolling over". Source focus_manager.py:11264-11344.
+    ★Conservative: require_both default True (block only when both RSI+MACD oppose = avoids wipeout). fail-open."""
     if not getattr(cfg, "momentum_deriv_enabled", False):
         return True, ""
     du = (direction or "").upper()
@@ -238,7 +238,7 @@ def check_momentum_deriv(client: Any, market: str, direction: str, cfg: Any) -> 
         raw = client.get_kline(market, interval="5", limit=need)
         if not raw or len(raw) < need:
             return True, "no-data"
-        closes = [float(r[4]) for r in raw if len(r) >= 5]   # oldest-first (현물 이미 정렬)
+        closes = [float(r[4]) for r in raw if len(r) >= 5]   # oldest-first (spot already sorted)
         rsi_vals = rsi_series(closes, 14)
         macd_hist = macd_hist_series(closes, 12, 26, 9)
         if not rsi_vals or len(rsi_vals) < lookback * 2:
@@ -255,7 +255,7 @@ def check_momentum_deriv(client: Any, market: str, direction: str, cfg: Any) -> 
             macd_against = macd_delta > abs(macd_thr)
         blocked = (rsi_against and macd_against) if require_both else (rsi_against or macd_against)
         if blocked:
-            return False, (f"momentum_deriv {du} 반대(RSIΔ={rsi_delta:+.1f} MACDΔ={macd_delta:+.4f} "
+            return False, (f"momentum_deriv {du} opposing(RSIΔ={rsi_delta:+.1f} MACDΔ={macd_delta:+.4f} "
                            f"{'AND' if require_both else 'OR'})")
         return True, "mderiv_ok"
     except Exception as exc:
@@ -264,10 +264,10 @@ def check_momentum_deriv(client: Any, market: str, direction: str, cfg: Any) -> 
 
 
 def check_mtf_align(client: Any, market: str, direction: str, cfg: Any) -> Tuple[bool, str]:
-    """MTF 최종 차단 — 상위/단기 TF 구조가 진입과 *명확히 반대*면 차단(현물엔 점수만 있고 차단 없었음).
-    원본 focus_manager.py:_final_d1_alignment_check(2791)+_regime_align_override(2696) 의 핵심:
-    "D1/30M/15M 하나라도 명확히 반대 = 거슬림 → 진입 차단"(SIDEWAYS 는 통과=단기 노이즈). long-only. fail-open.
-    ※ D1('D') 은 거래소별 interval 지원 달라 기본 제외(분봉 TF만). 지원 시 cfg.mtf_align_tfs 에 추가."""
+    """MTF final block — block when higher/short TF structure is *clearly opposed* to the entry (spot only had a score, no block).
+    Core of focus_manager.py:_final_d1_alignment_check(2791)+_regime_align_override(2696):
+    "if any of D1/30M/15M clearly opposes = conflicting → block entry" (SIDEWAYS passes = short-term noise). long-only. fail-open.
+    ※ D1('D') has different interval support per exchange so excluded by default (minute TFs only). Add to cfg.mtf_align_tfs where supported."""
     if not getattr(cfg, "mtf_align_enabled", False):
         return True, ""
     du = (direction or "").upper()
@@ -285,7 +285,7 @@ def check_mtf_align(client: Any, market: str, direction: str, cfg: Any) -> Tuple
                 continue
             trend = str(analyze_structure(candles).trend.value).upper()
             if du == "LONG" and trend.startswith("DOWN"):
-                return False, f"MTF {tf}=DOWNTREND vs LONG (상위TF 거슬림)"
+                return False, f"MTF {tf}=DOWNTREND vs LONG (higher TF conflict)"
             if du == "SHORT" and trend.startswith("UP"):
                 return False, f"MTF {tf}=UPTREND vs SHORT"
         return True, "mtf_ok"
@@ -295,9 +295,9 @@ def check_mtf_align(client: Any, market: str, direction: str, cfg: Any) -> Tuple
 
 
 def check_entry_expectation(client: Any, market: str, direction: str, price: float, atr: float, cfg: Any) -> Tuple[bool, str]:
-    """진입 기대치 게이트 — reward(도달잠재) 부족 or risk(손실폭) 과대면 차단.
-    ★ app/manager/entry_expectation.py:compute_entry_expectation *재사용*(exchange-neutral, 선물과 공유 유틸·본체 무손상).
-    원본 게이트 focus_manager.py:16653-16689. long-only. fail-open."""
+    """Entry expectation gate — block if reward (reachable potential) is insufficient or risk (loss span) is excessive.
+    ★ *Reuses* app/manager/entry_expectation.py:compute_entry_expectation (exchange-neutral, shared util with futures · core untouched).
+    Source gate focus_manager.py:16653-16689. long-only. fail-open."""
     if not getattr(cfg, "entry_expectation_enabled", False):
         return True, ""
     if price <= 0:
@@ -317,15 +317,15 @@ def check_entry_expectation(client: Any, market: str, direction: str, price: flo
         min_rr = float(getattr(cfg, "entry_expectation_min_rr", 1.0))
         min_reward = float(getattr(cfg, "entry_expectation_min_reward_pct", 0.8))
         max_risk = float(getattr(cfg, "entry_expectation_max_risk_pct", 6.0))
-        # ★ [2026-06-20] RR floor 이식(현물 전용 port 누락 교정): 선물 EE 게이트(focus_manager.py:16653~)는
-        #   rr_ratio<min_rr 차단을 하는데 spot 포트가 reward/risk 만 검사하고 RR floor 를 빠뜨렸음.
-        #   다른 게이트를 풀어 진입을 열 때 RR 나쁜 junk 가 새지 않게 품질 바닥을 지킴(명문대 모델).
+        # ★ [2026-06-20] RR floor port (fix for a spot-only port omission): the futures EE gate (focus_manager.py:16653~)
+        #   blocks on rr_ratio<min_rr, but the spot port checked only reward/risk and dropped the RR floor.
+        #   Keeps a quality floor so bad-RR junk doesn't leak when other gates are loosened to open entries (top-tier-university model).
         if exp.rr_ratio < min_rr:
-            return False, f"ee_rr {exp.rr_ratio:.2f}<{min_rr} (RR 부족)"
+            return False, f"ee_rr {exp.rr_ratio:.2f}<{min_rr} (RR insufficient)"
         if exp.reward_pct < min_reward:
-            return False, f"ee_reward {exp.reward_pct:.2f}%<{min_reward}% (도달 잠재 부족)"
+            return False, f"ee_reward {exp.reward_pct:.2f}%<{min_reward}% (reachable potential insufficient)"
         if exp.risk_pct > max_risk:
-            return False, f"ee_risk {exp.risk_pct:.2f}%>{max_risk}% (손실폭 과대)"
+            return False, f"ee_risk {exp.risk_pct:.2f}%>{max_risk}% (loss span excessive)"
         return True, f"ee_ok(rr={exp.rr_ratio:.2f})"
     except Exception as exc:
         logger.debug("[SPOT_GUARD] entry_expectation fail-open: %s", exc)
@@ -333,9 +333,9 @@ def check_entry_expectation(client: Any, market: str, direction: str, price: flo
 
 
 def check_microtiming_5m(client: Any, market: str, direction: str, cfg: Any) -> Tuple[bool, str]:
-    """5M 마이크로 타이밍 — RSI/MACD/BB *변곡* 3종 점수, 2/3 미만이면 이번 tick 보류(defer, 다음 재평가).
-    "conv 100 이어도 변곡 자리 아니면 기다림". 원본 focus_manager.py:7911-8007. long-only. fail-open.
-    ★ BLOCK 아닌 WAIT — 다음 스캔서 재평가(영구차단 아님)."""
+    """5M micro timing — scores 3 RSI/MACD/BB *inflection* signals; below 2/3 defer this tick (re-evaluate next scan).
+    "even at conv 100, wait if it's not an inflection spot". Source focus_manager.py:7911-8007. long-only. fail-open.
+    ★ WAIT not BLOCK — re-evaluated on the next scan (not a permanent block)."""
     if not getattr(cfg, "microtiming_5m_enabled", False):
         return True, ""
     du = (direction or "").upper()
@@ -345,7 +345,7 @@ def check_microtiming_5m(client: Any, market: str, direction: str, cfg: Any) -> 
         from app.strategy.indicators import rsi_with_prev, macd_hist_pair, bollinger_bands
         raw = client.get_kline(market, interval="5", limit=30)
         if not raw or len(raw) < 27:
-            return True, "mt5_short"   # fetch 부족 → 게이트 무효(안전 측)
+            return True, "mt5_short"   # insufficient fetch → gate void (fail-safe side)
         closes = [float(r[4]) for r in raw if len(r) >= 5]
         rsi_now, rsi_prev = rsi_with_prev(closes, length=14)
         hist_now, hist_prev = macd_hist_pair(closes)
@@ -363,7 +363,7 @@ def check_microtiming_5m(client: Any, market: str, direction: str, cfg: Any) -> 
         bb_low = float(getattr(cfg, "microtiming_5m_bb_low_pct", 20.0))
         bb_rec = float(getattr(cfg, "microtiming_5m_bb_recover_pct", 30.0))
         rsi_s = macd_s = bb_s = 0
-        # LONG(현물): RSI 과매도→상승변곡 / MACD hist 음수→양전(또는 축소) / BB 하단권→회복
+        # LONG (spot): RSI oversold→upturn inflection / MACD hist negative→positive (or shrinking) / BB lower band→recovery
         if rsi_prev is not None and rsi_now is not None and rsi_prev <= rsi_thr and rsi_now > rsi_prev:
             rsi_s = 1
         if hist_prev is not None and hist_now is not None and hist_prev < 0 and (hist_now > 0 or hist_now > hist_prev):
@@ -373,7 +373,7 @@ def check_microtiming_5m(client: Any, market: str, direction: str, cfg: Any) -> 
         total = rsi_s + macd_s + bb_s
         min_score = int(getattr(cfg, "microtiming_5m_min_score", 2))
         if total < min_score:
-            return False, f"microtiming_5m {total}/3<{min_score} (rsi{rsi_s}/macd{macd_s}/bb{bb_s} 변곡 부족)"
+            return False, f"microtiming_5m {total}/3<{min_score} (rsi{rsi_s}/macd{macd_s}/bb{bb_s} inflection insufficient)"
         return True, f"mt5_ok({total}/3)"
     except Exception as exc:
         logger.debug("[SPOT_GUARD] microtiming_5m fail-open: %s", exc)

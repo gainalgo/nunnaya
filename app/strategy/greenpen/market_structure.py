@@ -75,10 +75,11 @@ def analyze_structure(
         candles: OHLCV list (oldest first). Minimum 15 candles recommended.
         lookback: N candles on each side to confirm a swing point.
         eq_tolerance_pct: % tolerance for treating two swings as "equal" level.
-        recent_reality_drop_pct: ★ [2026-06-14 부모] Fix D. >0 활성. lookback이 최근 N봉을 swing
-            후보에서 제외(range(lookback, len-lookback))해 갓 터진 폭락/폭등이 구조에 안 잡혀
-            옛 추세 라벨이 잔존하는 것(예: -9% 폭락 코인이 UPTREND 100%)을 교정한다.
-        recent_reality_n: reality check 에 쓸 최근 봉 수 (기본 5).
+        recent_reality_drop_pct: ★ [2026-06-14 owner] Fix D. >0 enables it. lookback excludes the
+            most recent N candles from swing candidates (range(lookback, len-lookback)), so a
+            freshly broken crash/spike is not captured by the structure, leaving a stale trend
+            label (e.g. a coin that crashed -9% still tagged UPTREND 100%). This corrects that.
+        recent_reality_n: number of recent candles used for the reality check (default 5).
 
     Returns:
         MarketStructure with trend, swing points, BOS, and sideways range.
@@ -105,9 +106,9 @@ def analyze_structure(
     # 4. Detect Break of Structure
     bos = _detect_bos(swings, candles)
 
-    # 4.5 ★ [2026-06-14 부모] Fix D — 최근봉 reality check (default OFF: recent_reality_drop_pct=0).
-    #   방어적: UPTREND 인데 최근 N봉 급락 → SIDEWAYS 강등 + conf 컷 (추세정렬 LONG credit 제거).
-    #   비대칭: DOWNTREND 인데 최근 N봉 급등 → conf 만 컷 (UPTREND 로 뒤집지 않음 = dead-cat LONG credit 방지).
+    # 4.5 ★ [2026-06-14 owner] Fix D — recent-candle reality check (default OFF: recent_reality_drop_pct=0).
+    #   Defensive: UPTREND but recent N candles crashed → demote to SIDEWAYS + cut conf (remove trend-aligned LONG credit).
+    #   Asymmetric: DOWNTREND but recent N candles spiked → cut conf only (do NOT flip to UPTREND = prevent dead-cat LONG credit).
     if recent_reality_drop_pct > 0 and len(candles) >= recent_reality_n + 1:
         try:
             c_last = candles[-1].close
@@ -261,16 +262,16 @@ def _classify_trend(swings: List[SwingPoint]) -> Tuple[Trend, float]:
 
     if up_ratio >= 0.7:
         conf = min(1.0, up_ratio)
-        # ★ [2026-04-17] Recency weighting: 최근 swing high가 LH면 신뢰도 -0.3
-        # UPTREND인데 마지막 고점이 낮아졌다 = 꼭대기 신호
+        # ★ [2026-04-17] Recency weighting: if the latest swing high is LH, confidence -0.3
+        # UPTREND but the last high dropped = topping signal
         recent_highs = [s for s in recent if s.is_high and s.type != SwingType.EQ]
         if recent_highs and recent_highs[-1].type == SwingType.LH:
             conf = max(0.0, conf - 0.3)
         return Trend.UPTREND, conf
     elif down_ratio >= 0.7:
         conf = min(1.0, down_ratio)
-        # ★ [2026-04-17] Recency weighting: 최근 swing low가 HL이면 신뢰도 -0.3
-        # DOWNTREND인데 마지막 저점이 올라갔다 = 바닥 신호
+        # ★ [2026-04-17] Recency weighting: if the latest swing low is HL, confidence -0.3
+        # DOWNTREND but the last low rose = bottoming signal
         recent_lows = [s for s in recent if not s.is_high and s.type != SwingType.EQ]
         if recent_lows and recent_lows[-1].type == SwingType.HL:
             conf = max(0.0, conf - 0.3)
@@ -349,21 +350,21 @@ def is_below_resistance(price: float, structure: MarketStructure, margin_pct: fl
 
 
 # ── Reversal Patterns: M / W / Head&Shoulders ───────────────
-# [2026-06-02 부모님 레짐 컴퍼스 Phase 3] swing(HH/LH/HL/LL/EQ) + BOS 토대 조립.
-#   M(쌍봉)=고점2개 EQ/LH(못 넘음)→천장 / W(쌍바닥)=저점2개 EQ/HL(안 깸)→바닥
-#   H&S=고점3개 어깨-머리(최고)-어깨→천장 / 역H&S=저점3개 어깨-머리(최저)-어깨→바닥
-#   confirmed = BOS 방향 일치(넥라인 돌파 확정). 우선순위: H&S(3봉,강함) → M/W(2봉).
+# [2026-06-02 owner Regime Compass Phase 3] assembled on top of swing(HH/LH/HL/LL/EQ) + BOS.
+#   M (double top) = 2 highs, 2nd is EQ/LH (failed to exceed) → top / W (double bottom) = 2 lows, 2nd is EQ/HL (held) → bottom
+#   H&S = 3 highs, shoulder-head(highest)-shoulder → top / inverse H&S = 3 lows, shoulder-head(lowest)-shoulder → bottom
+#   confirmed = BOS direction matches (neckline break confirmed). Priority: H&S (3 swings, strong) → M/W (2 swings).
 
 @dataclass
 class ReversalPattern:
     pattern: str       # "M" / "W" / "HS_TOP" / "HS_BOTTOM" / "NONE"
     direction: str     # "BEARISH"(M/HS_TOP) / "BULLISH"(W/HS_BOTTOM) / "NONE"
-    confirmed: bool    # BOS(넥라인 돌파)로 확정됐는지
+    confirmed: bool    # whether confirmed by BOS (neckline break)
     detail: str
 
 
 def detect_reversal(structure: MarketStructure, shoulder_tol_pct: float = 1.0) -> ReversalPattern:
-    """M/W/H&S 반전 패턴 감지 — 이미 분류된 swing + BOS 를 조립만 (Phase 3 paper)."""
+    """Detect M/W/H&S reversal patterns — only assembles already-classified swings + BOS (Phase 3 paper)."""
     swings = structure.swings or []
     if len(swings) < 2:
         return ReversalPattern("NONE", "NONE", False, "no_swings")
@@ -375,25 +376,25 @@ def detect_reversal(structure: MarketStructure, shoulder_tol_pct: float = 1.0) -
     def _eq(a: float, b: float) -> bool:
         return abs(a - b) / max(abs(a), 1e-12) * 100 <= shoulder_tol_pct
 
-    # H&S 천장: 고점 3개 = 왼어깨-머리(최고)-오른어깨, 양 어깨 < 머리 + 어깨 유사
+    # H&S top: 3 highs = left shoulder-head(highest)-right shoulder, both shoulders < head + shoulders similar
     if len(highs) >= 3:
         l, h, r = highs[-3].price, highs[-2].price, highs[-1].price
         if h > l and h > r and _eq(l, r):
             return ReversalPattern("HS_TOP", "BEARISH", bos_dir == "BEARISH",
-                                   f"H&S천장 L{l:.4g}/H{h:.4g}/R{r:.4g}")
-    # 역H&S 바닥: 저점 3개 = 왼어깨-머리(최저)-오른어깨
+                                   f"H&S top L{l:.4g}/H{h:.4g}/R{r:.4g}")
+    # inverse H&S bottom: 3 lows = left shoulder-head(lowest)-right shoulder
     if len(lows) >= 3:
         l, h, r = lows[-3].price, lows[-2].price, lows[-1].price
         if h < l and h < r and _eq(l, r):
             return ReversalPattern("HS_BOTTOM", "BULLISH", bos_dir == "BULLISH",
-                                   f"역H&S바닥 L{l:.4g}/H{h:.4g}/R{r:.4g}")
-    # M 쌍봉: 최근 고점 2개, 2번째가 EQ/LH (못 넘음)
+                                   f"inverse H&S bottom L{l:.4g}/H{h:.4g}/R{r:.4g}")
+    # M double top: latest 2 highs, 2nd is EQ/LH (failed to exceed)
     if len(highs) >= 2 and highs[-1].type in (SwingType.EQ, SwingType.LH):
         return ReversalPattern("M", "BEARISH", bos_dir == "BEARISH",
-                               f"쌍봉 {highs[-2].price:.4g}/{highs[-1].price:.4g}({highs[-1].type.value})")
-    # W 쌍바닥: 최근 저점 2개, 2번째가 EQ/HL (안 깸)
+                               f"double top {highs[-2].price:.4g}/{highs[-1].price:.4g}({highs[-1].type.value})")
+    # W double bottom: latest 2 lows, 2nd is EQ/HL (held)
     if len(lows) >= 2 and lows[-1].type in (SwingType.EQ, SwingType.HL):
         return ReversalPattern("W", "BULLISH", bos_dir == "BULLISH",
-                               f"쌍바닥 {lows[-2].price:.4g}/{lows[-1].price:.4g}({lows[-1].type.value})")
+                               f"double bottom {lows[-2].price:.4g}/{lows[-1].price:.4g}({lows[-1].type.value})")
 
     return ReversalPattern("NONE", "NONE", False, "no_pattern")

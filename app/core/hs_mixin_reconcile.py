@@ -29,12 +29,12 @@ class ReconcileMixin:
     # Boot validation
     # ------------------------------------------------------------------
     def _boot_validate_positions(self) -> None:
-        """부팅 후 검증 훅.
+        """Post-boot validation hook.
 
-        reconcile + SNIPER restore 이후에도 position qty > 0인데
-        strategy.mode가 없거나 비어있는 마켓을 찾아 자동 정합화한다.
-        - sniper_store에 있으면 → SNIPER 적용
-        - 없으면 → GAZUA 적용
+        Even after reconcile + SNIPER restore, find markets with position qty > 0
+        whose strategy.mode is missing or empty and auto-reconcile them.
+        - if present in sniper_store -> apply SNIPER
+        - otherwise -> apply GAZUA
         """
         try:
             from app.manager.sniper_position_store import sniper_store
@@ -47,9 +47,9 @@ class ReconcileMixin:
                     if v.get("market")
                 }
             except (KeyError, AttributeError, TypeError, ValueError):
-                logger.warning("[Boot] SNIPER 포지션 목록 조회 실패 — SNIPER 포지션이 GAZUA로 강제 지정될 수 있음", exc_info=True)
+                logger.warning("[Boot] failed to fetch SNIPER position list — SNIPER positions may be force-assigned to GAZUA", exc_info=True)
 
-            # ★ FOCUS 포지션 마켓 수집 — GAZUA 강탈 방지
+            # ★ Collect FOCUS position markets — prevent GAZUA from hijacking them
             focus_markets: set = set()
             try:
                 fm = getattr(self, "focus_manager", None)
@@ -60,7 +60,7 @@ class ReconcileMixin:
             except Exception:
                 pass
 
-            # ★ Cross-strategy overlap 감지: 부팅 시 양쪽 다 보유 중인 마켓 정리
+            # ★ Cross-strategy overlap detection: clean up markets held by both sides at boot
             fixed = 0
             contexts = getattr(self.coordinator, "contexts", {}) or {}
             try:
@@ -87,15 +87,15 @@ class ReconcileMixin:
                     qty = float(pos.get("qty", 0) or 0)
                     if qty <= 0:
                         continue
-                    # ★ FOCUS 소유 마켓은 건드리지 않음
+                    # ★ Never touch FOCUS-owned markets
                     if market.upper() in focus_markets:
                         logger.info("[Boot] %s belongs to FOCUS — skipping validation", market)
                         continue
                     ctrls = getattr(ctx, "controls", {}) or {}
                     s_mode = str((ctrls.get("strategy") or {}).get("mode") or "").strip().upper()
                     if s_mode:
-                        continue  # 전략 모드 정상 — 건드리지 않음
-                    # 모드 없음 → 정합화
+                        continue  # strategy mode is fine — leave it alone
+                    # no mode -> reconcile
                     if market in sniper_markets:
                         apply_engine_controls(self, market, "SNIPER")
                         self.ledger.append("BOOT_VALIDATE_FIX", market=market, assigned="SNIPER")
@@ -115,10 +115,10 @@ class ReconcileMixin:
     # Equity estimation
     # ------------------------------------------------------------------
     def _estimate_equity_from_accounts(self, accounts: List[Dict[str, Any]]) -> Tuple[float, float, float]:
-        """accounts() 기반으로 USDT cash / deployed / equity를 추정한다.
+        """Estimate USDT cash / deployed / equity based on accounts().
 
         - cash_usdt: USDT balance+locked
-        - deployed_usdt: 비USDT 보유(locked 포함) * (현재가 또는 avg_buy_price)
+        - deployed_usdt: non-USDT holdings (incl. locked) * (current price or avg_buy_price)
         - equity_usdt: cash_usdt + deployed_usdt
         """
         cash_usdt = 0.0
@@ -151,7 +151,7 @@ class ReconcileMixin:
 
                 if price and float(price) > 0:
                     val = float(qty) * float(price)
-                    if val < 1.0:          # dust coin < $1 → 무시
+                    if val < 1.0:          # dust coin < $1 -> ignore
                         continue
                     deployed_usdt += val
 
@@ -166,14 +166,14 @@ class ReconcileMixin:
     # Reconcile  (~946 lines)
     # ------------------------------------------------------------------
     def reconcile(self, *, reason: str = "manual") -> Dict[str, Any]:
-        """Bybit 계정 상태를 기반으로 orphan/대기주문/포지션을 점검."""
+        """Inspect orphans / wait orders / positions based on Bybit account state."""
         # NOTE: reconcile is a global operation, so we lock to prevent race with oma_set_market/purge
         if not self.trade_client:
             return {"ok": True, "mode": self.trading_mode, "reason": reason,
             "position_sync_mode": "OFF",
             "position_sync": {"synced": 0, "cleared": 0}, "skipped": True}
 
-        # cancel wait orders on boot 옵션
+        # cancel wait orders on boot (option)
         if reason == "boot" and self.cancel_wait_orders_on_boot:
             try:
                 waits = self.trade_client.list_wait_orders(max_pages=3)
@@ -276,8 +276,8 @@ class ReconcileMixin:
                     )
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
             logger.error("[EQUITY_SNAPSHOT] equity safeguard check FAILED — using raw values: %s", exc, exc_info=True)
-            # 에러 발생 시 raw equity 값(line 182)은 이미 계산됨 → 그대로 사용
-            # stale 값으로 덮어쓰면 예산 붕괴 위험이 더 큼
+            # on error, the raw equity value (line 182) is already computed -> use it as-is
+            # overwriting with stale values carries a larger risk of budget collapse
 
         self._accounts_snapshot = list(accounts or [])
         self._last_cash_usdt = cash_usdt
@@ -314,8 +314,8 @@ class ReconcileMixin:
             # -----------------------------
             # Drawdown guard (optional safety)
             # -----------------------------
-            # - 계정 전체 손실이 임계치를 넘으면 자동으로 BUY를 차단(쿨다운)하거나
-            #   RECOVERY/EMERGENCY_STOP으로 전환한다.
+            # - When account-wide loss exceeds the threshold, automatically block BUY (cooldown)
+            #   or switch to RECOVERY/EMERGENCY_STOP.
             try:
                 self._check_drawdown_guard(equity_usdt=float(equity_usdt), reason=f"reconcile:{reason}")
             except (TypeError, ValueError) as exc:
@@ -376,7 +376,7 @@ class ReconcileMixin:
                         avg_buy = 0.0
                     market = Q.market(cur)
 
-                    # 🧹 Dust filter: min_order 미만 잔액은 무시
+                    # 🧹 Dust filter: ignore balances below min_order
                     # Try price_store first, then Bybit REST API as fallback
                     price = price_store.get_price(market)
                     if price is None or price <= 0:
@@ -432,9 +432,9 @@ class ReconcileMixin:
                             prev_entry=float(prev_entry),
                             source=source,
                         )
-                        # [FIX 2026-03-23] 수동 매도/외부 청산 시 longhold config 자동 정리
-                        # 포지션이 사라졌는데 longhold_config에 남아있으면
-                        # 슬롯 차감 + LONGHOLD_SELL_BLOCKED 유령 이벤트 발생
+                        # [FIX 2026-03-23] Auto-clean longhold config on manual sell / external close
+                        # If the position is gone but still remains in longhold_config,
+                        # it causes slot deduction + a ghost LONGHOLD_SELL_BLOCKED event
                         try:
                             _lm = getattr(self, "ladder_manager", None)
                             if _lm:
@@ -444,7 +444,7 @@ class ReconcileMixin:
                                     logger.info("[reconcile] LongHold config auto-removed: %s (position cleared)", market)
                         except (KeyError, AttributeError, TypeError):
                             logger.debug("[reconcile] longhold cleanup skip: %s", market, exc_info=True)
-                        # [FIX 2026-03-23] Ladder grid config 자동 비활성화
+                        # [FIX 2026-03-23] Auto-disable Ladder grid config
                         try:
                             _lm2 = getattr(self, "ladder_manager", None)
                             if _lm2:
@@ -455,7 +455,7 @@ class ReconcileMixin:
                                     logger.info("[reconcile] Ladder config auto-disabled: %s (position cleared)", market)
                         except (KeyError, AttributeError, TypeError):
                             logger.debug("[reconcile] ladder cleanup skip: %s", market, exc_info=True)
-                    # [FIX 2026-03-24] 포지션 없어도 ACTIVE면 registry budget으로 예산 복구
+                    # [FIX 2026-03-24] Even with no position, if ACTIVE restore budget from registry budget
                     if ctx.allocated_capital <= 0:
                         try:
                             _reg_b = self.oma_registry.get_budget_usdt(market)
@@ -486,14 +486,14 @@ class ReconcileMixin:
                     if entry and abs(prev_entry - entry) > entry_tol:
                         changed = True
 
-                # [FIX] allocated_capital 동기화는 position 변경 여부와 관계없이 항상 체크
-                # 외부 구매로 포지션 가치가 allocated보다 클 때 동기화
+                # [FIX] Always check allocated_capital sync regardless of whether position changed
+                # Sync when external buys make position value larger than allocated
                 pos_value = (float(entry) * float(qty)) if entry else 0.0
                 if pos_value > 0 or ctx.allocated_capital <= 0:
                     old_alloc = ctx.allocated_capital
 
-                    # [PROTECTED] GAZUA 전략은 사용자 설정 예산 우선 - 포지션 가치로 덮어쓰지 않음
-                    # DO NOT MODIFY: 이 로직은 사용자 지시로 보호됨 (2026-01-23)
+                    # [PROTECTED] GAZUA strategy prioritizes user-set budget - never overwrite with position value
+                    # DO NOT MODIFY: this logic is protected by user instruction (2026-01-23)
                     is_gazua = False
                     try:
                         s_mode = str(((ctx.controls or {}).get("strategy") or {}).get("mode") or "").upper()
@@ -501,40 +501,40 @@ class ReconcileMixin:
                     except (AttributeError, TypeError, ValueError) as exc:
                         logger.error("[capital_sync] GAZUA capital sync failed: %s", exc, exc_info=True)
 
-                    # GAZUA: OMA Registry에 budget_usdt가 있으면 그 값 유지
+                    # GAZUA: if OMA Registry has budget_usdt, keep that value
                     if is_gazua:
                         reg_budget = self.oma_registry.get_budget_usdt(market)
                         if reg_budget and float(reg_budget) > 0:
-                            # 사용자 설정 예산이 있으면 덮어쓰지 않음
+                            # if a user-set budget exists, do not overwrite
                             if old_alloc <= 0:
                                 ctx.allocated_capital = float(reg_budget)
                                 self.ledger.append("ALLOCATED_SYNC", market=market, old=old_alloc, new=float(reg_budget), source="gazua_budget_restore")
-                            # 이미 allocated가 있으면 유지
+                            # if allocated already exists, keep it
                         else:
-                            # registry에 예산 없으면 포지션 가치로 설정 (신규 등록 케이스)
+                            # no budget in registry -> set from position value (new registration case)
                             if old_alloc < pos_value - 100:
                                 ctx.allocated_capital = pos_value
                                 self.ledger.append("ALLOCATED_SYNC", market=market, old=old_alloc, new=pos_value, source=source)
                     else:
-                        # GAZUA 외 전략: 사용자 설정 예산 우선
-                        # [FIX 2026-01-25] registry에 예산이 있으면 사용자 설정으로 간주하고 유지
+                        # non-GAZUA strategy: prioritize user-set budget
+                        # [FIX 2026-01-25] if registry has a budget, treat it as user-set and keep it
                         reg_budget_other = self.oma_registry.get_budget_usdt(market)
                         if reg_budget_other and float(reg_budget_other) > 0:
-                            # 사용자가 수동으로 예산을 설정한 경우 → 유지
+                            # user manually set a budget -> keep it
                             if old_alloc <= 0:
                                 ctx.allocated_capital = float(reg_budget_other)
                                 self.ledger.append("ALLOCATED_SYNC", market=market, old=old_alloc, new=float(reg_budget_other), source="user_budget")
-                            # 이미 allocated가 있으면 유지 (덮어쓰지 않음)
+                            # if allocated already exists, keep it (do not overwrite)
                         elif old_alloc <= 0 and pos_value > 0:
-                            # 예산 설정 없고 포지션만 있으면 포지션 가치로 복구
+                            # no budget set and only a position exists -> restore from position value
                             ctx.allocated_capital = pos_value
                             self.ledger.append("ALLOCATED_SYNC", market=market, old=old_alloc, new=pos_value, source="pos_fallback")
 
                 if not changed:
                     return
 
-                # [FIX 2026-02-19] 기존 position 필드 보존 (entry_ts, cost/fee 등)
-                # reconcile은 qty/entry만 동기화하고 fill-tracking 필드는 유지
+                # [FIX 2026-02-19] Preserve existing position fields (entry_ts, cost/fee, etc.)
+                # reconcile syncs only qty/entry and keeps the fill-tracking fields
                 if ctx.position is not None:
                     ctx.position["entry"] = float(entry) if entry else 0.0
                     ctx.position["qty"] = float(qty)
@@ -577,7 +577,7 @@ class ReconcileMixin:
                     # Manual mode: never promote to RECOVERY; always sync position for UI/monitoring
                     if manual_enabled:
                         _sync_ctx_position(market, ctx, qty, avg_buy, source="manual")
-                        # [FIX] manual 코인도 allocated 동기화 필요
+                        # [FIX] manual coins also need allocated sync
                         if qty > 0 and avg_buy > 0:
                             pos_value = float(qty) * float(avg_buy)
                             if pos_value > 0 and abs(ctx.allocated_capital - pos_value) > 100:
@@ -591,8 +591,8 @@ class ReconcileMixin:
                         _sync_ctx_position(market, ctx, qty, avg_buy, source="reconcile:all")
                     elif sync_mode == "ACTIVE" and self.oma_registry.get_state(market) == MarketState.ACTIVE:
                         # [PATCH] Force sync for GAZUA strategy (Manual Buy mode) even if manual_enabled is False
-                        # Gazua는 사용자가 앱에서 직접 매수하는 것이 기본이므로,
-                        # 외부 잔고 변동을 항상 즉시 반영해야 합니다.
+                        # Gazua's default is the user buying directly in the app,
+                        # so external balance changes must always be reflected immediately.
                         controls = getattr(ctx, "controls", None) or {}
                         strategy = controls.get("strategy") if isinstance(controls, dict) else {}
                         s_mode = str((strategy or {}).get("mode") or "").upper() if isinstance(strategy, dict) else ""
@@ -600,7 +600,7 @@ class ReconcileMixin:
 
                         if is_gazua:
                             _sync_ctx_position(market, ctx, qty, avg_buy, source="reconcile:gazua")
-                            # [FIX] GAZUA 코인도 allocated 동기화 필요
+                            # [FIX] GAZUA coins also need allocated sync
                             if qty > 0 and avg_buy > 0:
                                 pos_value = float(qty) * float(avg_buy)
                                 if pos_value > 0 and abs(ctx.allocated_capital - pos_value) > 100:
@@ -611,7 +611,7 @@ class ReconcileMixin:
 
                         _sync_ctx_position(market, ctx, qty, avg_buy, source="reconcile:active")
                     elif sync_mode == "ACTIVE" and self.oma_registry.get_state(market) == MarketState.RECOVERY:
-                        # [FIX] RECOVERY 마켓도 position 동기화 (추가 구매 반영)
+                        # [FIX] RECOVERY markets also get position sync (reflect additional buys)
                         _sync_ctx_position(market, ctx, qty, avg_buy, source="reconcile:recovery")
                     else:
                         # Legacy behaviour: only recover missing position into context
@@ -622,15 +622,15 @@ class ReconcileMixin:
                     # Orphan detection: holding exists but market not ACTIVE
                     current_state = self.oma_registry.get_state(market)
                     if current_state not in (MarketState.ACTIVE, MarketState.RECOVERY):
-                        # [2026-03-08] 쿨다운 중인 코인은 orphan 승격 스킵
-                        # 매도 직후 잔고가 남아있어도 RECOVERY로 잡아넣지 않음
+                        # [2026-03-08] Skip orphan promotion for coins under cooldown
+                        # Even if balance remains right after a sell, do not put it into RECOVERY
                         try:
                             _cd_map = getattr(self, "autopilot_cooldown", {}) or {}
                             _cd_entry = _cd_map.get(market)
                             if _cd_entry:
                                 _cd_until = float(_cd_entry.get("until_ts") or 0.0) if isinstance(_cd_entry, dict) else float(_cd_entry or 0.0)
                                 if _cd_until > time.time():
-                                    continue  # 쿨다운 중 — 매도 직후이므로 skip
+                                    continue  # under cooldown — just sold, so skip
                         except (AttributeError, TypeError, ValueError) as exc:
                             logger.error("[cooldown_check] sell cooldown check failed: %s", exc, exc_info=True)
 
@@ -648,12 +648,12 @@ class ReconcileMixin:
                         if est_val > 0 and est_val < self.min_order_usdt:
                             continue
 
-                        # [FIX] 수동 구매 코인: 실제 구매 금액을 budget_usdt로 설정
-                        # 이렇게 해야 예산 분배 시 이 금액을 제외하고 나머지를 분배함
+                        # [FIX] Manually-bought coin: set budget_usdt to the actual purchase amount
+                        # This way, budget allocation excludes this amount and distributes the rest
                         purchase_usdt = float(avg_buy) * float(qty) if avg_buy > 0 else est_val
 
-                        # [PROTECTED] GAZUA 전략이 이미 설정되어 있으면 ACTIVE로 승격
-                        # DO NOT MODIFY: 이 로직은 사용자 지시로 보호됨 (2026-01-23)
+                        # [PROTECTED] If GAZUA strategy is already set, promote to ACTIVE
+                        # DO NOT MODIFY: this logic is protected by user instruction (2026-01-23)
                         is_gazua_already = False
                         try:
                             s_mode = str(((ctx.controls or {}).get("strategy") or {}).get("mode") or "").upper()
@@ -661,18 +661,18 @@ class ReconcileMixin:
                         except (AttributeError, TypeError, ValueError) as exc:
                             logger.error("[orphan_detect] GAZUA check during orphan detect failed: %s", exc, exc_info=True)
 
-                        # 기존 budget_usdt가 있으면 유지 (앱에서 설정한 예산)
+                        # Keep existing budget_usdt if present (budget set in the app)
                         existing_budget = self.oma_registry.get_budget_usdt(market)
                         final_budget = float(existing_budget) if existing_budget and float(existing_budget) > 0 else purchase_usdt
 
-                        # GAZUA 설정됨 → ACTIVE, 아니면 → RECOVERY
+                        # GAZUA set -> ACTIVE, otherwise -> RECOVERY
                         target_state = MarketState.ACTIVE if is_gazua_already else MarketState.RECOVERY
 
                         self.oma_registry.set_state(
                             market=market,
                             state=target_state,
                             reason=["orphan_detected", "manual_purchase"],
-                            budget_usdt=final_budget  # 기존 예산 유지 또는 구매 금액
+                            budget_usdt=final_budget  # keep existing budget or use purchase amount
                         )
                         ctx.market_state = target_state.value
                         ctx.recovery = (target_state == MarketState.RECOVERY)
@@ -683,11 +683,11 @@ class ReconcileMixin:
                             except (AttributeError, TypeError, ValueError) as exc:
                                 logger.error("[orphan_strategy] GAZUA strategy assignment failed: %s", exc, exc_info=True)
 
-                        # allocated_capital도 실제 구매 금액으로 설정
+                        # set allocated_capital to the actual purchase amount as well
                         ctx.allocated_capital = purchase_usdt
                         self.ledger.append("ORPHAN_BUDGET_SET", market=market, budget_usdt=purchase_usdt)
 
-                        # [PATCH] 수동 구매 코인: 기존 전략이 LADDER/SNIPER면 유지, 아니면 GAZUA로 덮어씀
+                        # [PATCH] Manually-bought coin: keep existing strategy if LADDER/SNIPER, otherwise overwrite with GAZUA
                         try:
                             from app.manager.market_controls import apply_engine_controls
                             s_mode_existing = str(((ctx.controls or {}).get("strategy") or {}).get("mode") or "").upper()
@@ -708,8 +708,8 @@ class ReconcileMixin:
 
                     # Already RECOVERY - check if dust → auto-purge
                     elif current_state == MarketState.RECOVERY:
-                        # [2026-03-08] RECOVERY 먼지 자동 정리:
-                        # min_order_usdt 미만 잔고는 매도 불가 → DISABLED로 전환
+                        # [2026-03-08] RECOVERY dust auto-cleanup:
+                        # balances below min_order_usdt cannot be sold -> switch to DISABLED
                         _rec_price = float(info.get("price") or 0.0)
                         if _rec_price <= 0:
                             _rec_price = price_store.get_price(market) or 0.0
@@ -723,7 +723,7 @@ class ReconcileMixin:
                                 )
                                 ctx.market_state = MarketState.DISABLED.value
                                 ctx.recovery = False
-                                ctx._dust_disabled = True  # reconcile 재승격 차단 플래그
+                                ctx._dust_disabled = True  # flag to block reconcile re-promotion
                                 self.ledger.append("RECOVERY_DUST_PURGE", market=market, val_usdt=_rec_val)
                             except (KeyError, AttributeError, TypeError, ValueError) as exc:
                                 logger.error("[dust_purge] dust position purge failed: %s", exc, exc_info=True)
@@ -731,7 +731,7 @@ class ReconcileMixin:
 
                         orphans.append({"market": market, "currency": cur, "qty": float(qty), "avg_buy_price": float(avg_buy)})
 
-                        # [FIX] 기존 RECOVERY 코인도 budget_usdt 없으면 설정
+                        # [FIX] Existing RECOVERY coins: set budget_usdt if missing
                         existing_budget = self.oma_registry.get_budget_usdt(market)
                         if not existing_budget or existing_budget <= 0:
                             purchase_usdt = float(avg_buy) * float(qty) if avg_buy > 0 else 0.0
@@ -745,7 +745,7 @@ class ReconcileMixin:
                                 ctx.allocated_capital = purchase_usdt
                                 self.ledger.append("RECOVERY_BUDGET_SET", market=market, budget_usdt=purchase_usdt)
 
-                        # [FIX] RECOVERY 코인이 GAZUA가 아니면 GAZUA로 설정
+                        # [FIX] If a RECOVERY coin is not GAZUA, set it to GAZUA
                         existing_strategy = ""
                         try:
                             existing_strategy = str(((ctx.controls or {}).get("strategy") or {}).get("mode") or "").upper()
@@ -759,13 +759,13 @@ class ReconcileMixin:
                             except (AttributeError, TypeError) as exc:
                                 logger.error("[recovery_strategy] GAZUA strategy apply failed: %s", exc, exc_info=True)
 
-                    # [FIX] 모든 holding: allocated를 실제 구매금액으로 동기화 + OMA budget_usdt도 동기화
-                    # [PROTECTED] GAZUA 전략은 사용자 설정 예산 우선 - 포지션 가치로 덮어쓰지 않음
-                    # DO NOT MODIFY: 이 로직은 사용자 지시로 보호됨 (2026-01-23)
+                    # [FIX] All holdings: sync allocated to the actual purchase amount + sync OMA budget_usdt too
+                    # [PROTECTED] GAZUA strategy prioritizes user-set budget - never overwrite with position value
+                    # DO NOT MODIFY: this logic is protected by user instruction (2026-01-23)
                     if qty > 0 and avg_buy > 0:
                         pos_value = float(qty) * float(avg_buy)
 
-                        # GAZUA 체크
+                        # GAZUA check
                         is_gazua = False
                         try:
                             s_mode = str(((ctx.controls or {}).get("strategy") or {}).get("mode") or "").upper()
@@ -775,27 +775,27 @@ class ReconcileMixin:
 
                         existing_budget = self.oma_registry.get_budget_usdt(market)
 
-                        # GAZUA: 기존 예산이 있으면 유지, 없으면 포지션 가치 사용
+                        # GAZUA: keep existing budget if present, otherwise use position value
                         if is_gazua and existing_budget and float(existing_budget) > 0:
-                            # GAZUA는 사용자 설정 예산 유지 (덮어쓰지 않음)
+                            # GAZUA keeps the user-set budget (do not overwrite)
                             if ctx.allocated_capital <= 0:
                                 ctx.allocated_capital = float(existing_budget)
                                 self.ledger.append("ALLOCATED_SYNC", market=market, old=0, new=float(existing_budget), source="gazua_budget_preserve")
                         else:
-                            # GAZUA가 아닌 전략: 사용자 설정 예산 우선
-                            # [FIX 2026-01-25] registry에 예산이 있으면 사용자 설정으로 간주하고 유지
+                            # non-GAZUA strategy: prioritize user-set budget
+                            # [FIX 2026-01-25] if registry has a budget, treat it as user-set and keep it
                             if existing_budget and float(existing_budget) > 0:
-                                # 사용자가 수동으로 예산을 설정한 경우 → 유지
+                                # user manually set a budget -> keep it
                                 if ctx.allocated_capital <= 0:
                                     ctx.allocated_capital = float(existing_budget)
                                     self.ledger.append("ALLOCATED_SYNC", market=market, old=0, new=float(existing_budget), source="user_budget_preserve")
-                                # 이미 allocated가 있으면 유지 (덮어쓰지 않음)
+                                # if allocated already exists, keep it (do not overwrite)
                             elif pos_value > 0 and ctx.allocated_capital <= 0:
-                                # 예산 설정 없고 포지션만 있으면 포지션 가치로 복구
+                                # no budget set and only a position exists -> restore from position value
                                 ctx.allocated_capital = pos_value
                                 self.ledger.append("ALLOCATED_SYNC", market=market, old=0, new=pos_value, source="pos_fallback")
 
-                                # OMA budget_usdt도 동기화 (신규 발견 코인만)
+                                # sync OMA budget_usdt too (newly discovered coins only)
                                 self.oma_registry.set_state(
                                     market=market,
                                     state=current_state,
@@ -871,7 +871,7 @@ class ReconcileMixin:
                     logger.error("[RECONCILE] position sync FAILED for %s: %s — position may be stale",
                                  market, exc, exc_info=True)
                     continue
-        # 새로 RECOVERY가 생겼으면 pricefeed 재구독
+        # If new RECOVERY markets appeared, resubscribe the price feed
         if promoted:
             for mk in sorted(set(promoted)):
                 try:
@@ -883,7 +883,7 @@ class ReconcileMixin:
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
                 logger.error("[RECONCILE] price_feed resubscribe FAILED after orphan promotion: %s", exc, exc_info=True)
 
-        # RECOVERY 자동 청산(정책 AUTO)
+        # RECOVERY auto-liquidation (policy AUTO)
         if self.order_fsm and self.recovery_policy == "AUTO":
             for o in orphans:
                 mk = o["market"]
@@ -894,15 +894,15 @@ class ReconcileMixin:
                 if qty <= 0:
                     continue
                 expected = price_store.get_price(mk)
-                # 최소 가치 가드
+                # minimum value guard
                 if expected and (qty * float(expected)) < float(self.recovery_min_value_usdt):
                     self.ledger.append("RECOVERY_SKIP_MIN_VALUE", market=mk, qty=qty, expected_price=expected)
                     continue
                 self.order_fsm.submit_market_sell(ctx=ctx, market=mk, qty=qty, expected_price=expected, reason="recovery:auto")
 
         # [PATCH] Auto-retire completed markets (all strategies)
-        # 포지션이 청산되면(잔고 0) 자동으로 DISABLED 상태로 퇴장시킵니다.
-        # 환경변수로 비활성화 가능: OMA_AUTO_RETIRE_EMPTY=false
+        # When a position is closed (balance 0), automatically retire it to DISABLED state.
+        # Can be disabled via env var: OMA_AUTO_RETIRE_EMPTY=false
         auto_retire_enabled = _env_bool("OMA_AUTO_RETIRE_EMPTY", True)
 
         if auto_retire_enabled:
@@ -917,17 +917,17 @@ class ReconcileMixin:
                     if ctx_qty > 0:
                         continue
 
-                    # Double-check: Bybit 실잔고도 확인 (안전장치)
-                    # holdings는 reconcile 시작 시 조회한 Bybit 잔고
+                    # Double-check: also verify the real Bybit balance (safety net)
+                    # holdings is the Bybit balance fetched at the start of reconcile
                     real_qty = 0.0
                     if market in holdings:
                         real_qty = float(holdings[market].get("qty") or 0.0)
                     if real_qty > 0:
-                        # 실제 잔고가 있으면 퇴장하지 않음
+                        # if real balance exists, do not retire
                         continue
 
-                    # Triple-check: Bybit accounts API로 직접 한 번 더 확인
-                    # 단, min_order 미만 먼지(dust) 잔액은 퇴장 허용
+                    # Triple-check: verify once more directly via Bybit accounts API
+                    # but allow retiring dust balances below min_order
                     dust_threshold_usdt = float(getattr(self, 'min_order_usdt', Q.min_order) or Q.min_order)
                     try:
                         base_cur = Q.extract_base(market)
@@ -935,11 +935,11 @@ class ReconcileMixin:
                             if str(a.get("currency") or "").upper() == base_cur:
                                 acct_qty = float(a.get("balance") or 0.0) + float(a.get("locked") or 0.0)
                                 if acct_qty > 0:
-                                    # 가치 계산
+                                    # value calculation
                                     price = price_store.get_price(market) or float(a.get("avg_buy_price") or 0)
                                     value_usdt = acct_qty * price if price else 0
                                     if value_usdt > dust_threshold_usdt:
-                                        # 의미있는 잔액 - 퇴장하지 않음
+                                        # meaningful balance - do not retire
                                         real_qty = acct_qty
                                     break
                     except (KeyError, AttributeError, TypeError, ValueError) as exc:
@@ -959,7 +959,7 @@ class ReconcileMixin:
                     if is_cleared or is_auto_exited:
                         strategy = str(((ctx.controls or {}).get("strategy") or {}).get("mode") or "unknown").upper()
 
-                        # 원장에 퇴장 기록
+                        # record retirement in the ledger
                         self.ledger.append(
                             "MARKET_RETIRED",
                             market=market,
@@ -967,32 +967,32 @@ class ReconcileMixin:
                             reason="position_cleared",
                         )
 
-                        # DISABLED로 설정 (리스트에서 완전 제거)
+                        # set to DISABLED (fully remove from the list)
                         self.oma_set_market(
                             market=market,
                             state=MarketState.DISABLED,
                             reason=[f"{strategy.lower()}_completed"]
                         )
 
-                        # 컨텍스트에서도 제거
+                        # remove from the context as well
                         self.coordinator.remove_market(market)
                 except (KeyError, AttributeError, TypeError, ValueError) as exc:
                     logger.error("[retirement] context removal during retirement failed: %s", exc, exc_info=True)
 
-        # [2026-03-08] RECOVERY 좀비 자동 정리:
-        # 잔고가 없는 RECOVERY 코인은 DISABLED로 전환 (먼지청소기가 Bybit만 정리하고 OMA는 안 건드려서 좀비가 됨)
+        # [2026-03-08] RECOVERY zombie auto-cleanup:
+        # RECOVERY coins with no balance are switched to DISABLED (the dust vacuum cleans only Bybit and leaves OMA untouched, creating zombies)
         if auto_retire_enabled:
             try:
                 for market in list(self.oma_registry.list_recovery()):
                     try:
-                        # Bybit 잔고 확인
+                        # check Bybit balance
                         if market in holdings:
                             _hq = float(holdings[market].get("qty") or 0.0)
                             if _hq > 0:
-                                continue  # 실제 잔고 있음 — 유지
+                                continue  # real balance exists — keep it
 
-                        # holdings에 없음 = 잔고 0 (또는 먼지)
-                        # accounts 원본에서도 재확인
+                        # not in holdings = balance 0 (or dust)
+                        # re-verify against the raw accounts too
                         _has_real_balance = False
                         try:
                             _base_cur = Q.extract_base(market)
@@ -1009,7 +1009,7 @@ class ReconcileMixin:
                         if _has_real_balance:
                             continue
 
-                        # 잔고 없거나 먼지 → DISABLED
+                        # no balance or dust -> DISABLED
                         self.oma_set_market(
                             market=market,
                             state=MarketState.DISABLED,
@@ -1027,7 +1027,7 @@ class ReconcileMixin:
 
         self._save_context_state()
 
-        # 활성 마켓 중 거래지원 종료 예정 체크
+        # Check active markets for upcoming delisting
         delisting_alerts = []
         try:
             from app.manager.market_status_monitor import get_active_delisting_markets
@@ -1036,10 +1036,10 @@ class ReconcileMixin:
 
             for alert in delisting_alerts:
                 mkt = alert["market"]
-                ddate = alert.get("delisting_date") or "미정"
+                ddate = alert.get("delisting_date") or "TBD"
                 kname = alert.get("korean_name") or mkt
 
-                # 원장 기록
+                # ledger record
                 self.ledger.append(
                     "DELISTING_WARNING",
                     level="WARN",
@@ -1048,17 +1048,17 @@ class ReconcileMixin:
                     delisting_date=ddate,
                 )
 
-                # 텔레그램 알림 (1회만)
+                # Telegram notification (once only)
                 try:
                     from app.notify.telegram import send_telegram
                     cache_key = f"_delisting_notified_{mkt}"
                     if not getattr(self, cache_key, False):
-                        send_telegram(f"⚠️ 거래지원 종료 예정\n\n{kname} ({mkt})\n종료일: {ddate}\n\n보유 중인 코인입니다. 확인해주세요.")
+                        send_telegram(f"⚠️ Delisting scheduled\n\n{kname} ({mkt})\nEnd date: {ddate}\n\nYou are holding this coin. Please check.")
                         setattr(self, cache_key, True)
                 except (KeyError, AttributeError, TypeError, ValueError) as exc:
                     logger.warning("[telegram] delisting notification failed: %s", exc, exc_info=True)
 
-            # 종료 예정 마켓 자동 청산 (옵션)
+            # Auto-liquidate markets scheduled for delisting (option)
             from app.core.constants import env_bool
             auto_liquidate = env_bool("OMA_AUTO_LIQUIDATE_DELISTING", default=False)
 
@@ -1091,7 +1091,7 @@ class ReconcileMixin:
                                     )
 
                                     from app.notify.telegram import send_telegram
-                                    send_telegram(f"🚨 종료 예정 자동 청산\n\n{kname} ({mkt})\n수량: {qty}\n\n거래지원 종료 예정으로 자동 매도되었습니다.")
+                                    send_telegram(f"🚨 Auto-liquidation for delisting\n\n{kname} ({mkt})\nQty: {qty}\n\nAuto-sold due to scheduled delisting.")
 
                                     setattr(self, liq_key, True)
                                 break
@@ -1100,7 +1100,7 @@ class ReconcileMixin:
         except (KeyError, IndexError, AttributeError, TypeError, ValueError) as exc:
             logger.error("[delisting] delisting check fallback failed: %s", exc, exc_info=True)
 
-        # 신규 상장 체크 및 알림
+        # Check for new listings and notify
         try:
             from app.manager.market_status_monitor import check_market_status_changes
             changes = check_market_status_changes(active_markets=set(self.oma_registry.list_active()))
@@ -1120,14 +1120,14 @@ class ReconcileMixin:
                     from app.notify.telegram import send_telegram
                     cache_key = f"_listing_notified_{mkt}"
                     if not getattr(self, cache_key, False):
-                        send_telegram(f"🆕 신규 상장!\n\n{kname} ({mkt})\n\nBybit에 새로 상장되었습니다.")
+                        send_telegram(f"🆕 New listing!\n\n{kname} ({mkt})\n\nNewly listed on Bybit.")
                         setattr(self, cache_key, True)
                 except (KeyError, AttributeError, TypeError, ValueError) as exc:
                     logger.warning("[new_listing] per-market new listing check failed: %s", exc, exc_info=True)
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
             logger.warning("[new_listing] new listing check failed: %s", exc, exc_info=True)
 
-        # ★ FOCUS 포지션 Bybit 실잔고 검증 (reconcile마다)
+        # ★ Verify FOCUS positions against the real Bybit balance (every reconcile)
         try:
             fm = getattr(self, "focus_manager", None)
             if fm and getattr(fm, "enabled", False) and fm.positions:
@@ -1150,7 +1150,7 @@ class ReconcileMixin:
                 "ts": self._last_equity_ts,
             },
         }
-        # [2026-03-09] 변화 있을 때만 원장 기록 (orphan/sync/clear 발생 시)
+        # [2026-03-09] Record to ledger only when something changed (orphan/sync/clear occurred)
         _has_reconcile_change = (len(orphans) > 0 or len(synced) > 0 or len(cleared) > 0)
         _reconcile_elapsed = time.time() - getattr(self, '_last_reconcile_log_ts', 0.0)
         if _has_reconcile_change or _reconcile_elapsed >= 300.0:
@@ -1169,10 +1169,10 @@ class ReconcileMixin:
     # Recovery manual hook
     # --------------------------------------------------------
     def request_recovery_liquidate(self, *, market: str, reason: str = "manual") -> Dict[str, Any]:
-        """RECOVERY(회수 모드) 시장을 수동으로 전량 청산 요청.
+        """Manually request full liquidation of a RECOVERY (recovery mode) market.
 
-        - LIVE에서만 의미가 있고, order_fsm이 필요하다.
-        - 진입은 금지, 청산만 허용.
+        - Only meaningful in LIVE, and requires order_fsm.
+        - Entry is forbidden; only liquidation is allowed.
         """
         if not self.order_fsm:
             return {"ok": False, "error": "order_fsm_not_ready", "mode": self.trading_mode}
@@ -1182,7 +1182,7 @@ class ReconcileMixin:
         ctx.market_state = self.oma_registry.get_state(mk).value
         ctx.trading_mode = self.trading_mode
 
-        # 보유 없으면 reconcile을 한번 유도할 수 있지만, 여기서는 즉시 실패
+        # If there's no holding we could trigger a reconcile, but here we fail immediately
         if not ctx.position:
             return {"ok": False, "error": "no_position", "market": mk}
 
@@ -1214,7 +1214,7 @@ class ReconcileMixin:
         if qty <= 0:
             return
 
-        # 최소 가치 가드
+        # minimum value guard
         try:
             if float(price) * float(qty) < float(self.recovery_min_value_usdt):
                 return
@@ -1276,7 +1276,7 @@ class ReconcileMixin:
     # Dust Cleanup
     # --------------------------------------------------------
     async def _check_auto_dust_vacuum(self) -> None:
-        """[2026-02-01] 자동 먼지 청소 체크 및 실행."""
+        """[2026-02-01] Check and run automatic dust cleanup."""
         try:
             if not bool(getattr(self, "dust_vacuum_enabled", False)):
                 return
@@ -1284,17 +1284,17 @@ class ReconcileMixin:
             import datetime
             today = datetime.date.today().isoformat()  # YYYY-MM-DD
 
-            # 날짜가 바뀌면 카운터 리셋
+            # reset the counter when the date changes
             if getattr(self, "dust_vacuum_last_run_date", "") != today:
                 self.dust_vacuum_last_run_date = today
                 self.dust_vacuum_today_count = 0
 
             daily_limit = int(getattr(self, "dust_vacuum_daily_count", 1) or 1)
             if self.dust_vacuum_today_count >= daily_limit:
-                return  # 오늘 할당량 소진
+                return  # today's quota exhausted
 
-            # 실행 (하루에 N회, 간격을 두고)
-            # 예: 하루 2회면 12시간 간격, 1회면 24시간 중 아무때나
+            # run (N times per day, spaced out)
+            # e.g. 2x/day = 12h interval, 1x/day = anytime within 24h
             threshold_usdt = float(getattr(self, "dust_vacuum_threshold_usdt", 5.0) or 5.0)
 
             result = await self._run_dust_vacuum(threshold_usdt=threshold_usdt)
@@ -1306,18 +1306,18 @@ class ReconcileMixin:
                     date=today,
                     count=self.dust_vacuum_today_count,
                     vacuumed=result.get("vacuumed_count", 0),
-                    results=result.get("results", [])[:5]  # 로그 크기 제한
+                    results=result.get("results", [])[:5]  # limit log size
                 )
 
-                # 텔레그램 알림
+                # Telegram notification
                 try:
                     import asyncio
                     from app.notify.telegram import send_telegram
                     await asyncio.to_thread(send_telegram,
-                        f"🧹 *자동 먼지 청소 완료*\n\n"
+                        f"🧹 *Auto dust cleanup complete*\n\n"
                         f"📅 {today}\n"
-                        f"🪙 {result.get('vacuumed_count', 0)}개 코인 청소\n"
-                        f"📊 오늘 {self.dust_vacuum_today_count}/{daily_limit}회"
+                        f"🪙 Cleaned {result.get('vacuumed_count', 0)} coins\n"
+                        f"📊 Today {self.dust_vacuum_today_count}/{daily_limit} runs"
                     )
                 except (KeyError, AttributeError, TypeError, ValueError) as exc2:
                     logger.warning("[telegram] dust vacuum notification failed: %s", exc2, exc_info=True)
@@ -1329,7 +1329,7 @@ class ReconcileMixin:
                 logger.warning("[ledger] dust vacuum error ledger append failed: %s", exc2, exc_info=True)
 
     async def _run_dust_vacuum(self, threshold_usdt: float = 5.0) -> Dict[str, Any]:
-        """실제 먼지 청소 실행."""
+        """Run the actual dust cleanup."""
         import asyncio
         from app.core.currency import Q
         from app.core.hyper_price_store import price_store
@@ -1365,25 +1365,25 @@ class ReconcileMixin:
 
                 value_usdt = balance * price
                 if value_usdt >= threshold_usdt:
-                    continue  # 먼지 아님
+                    continue  # not dust
 
-                # 먼지 청소 실행
+                # run dust cleanup
                 need_buy = value_usdt < min_order_usdt
                 buy_result = None
                 sell_result = None
 
                 if need_buy:
-                    # 최소 금액 매수
+                    # buy the minimum amount
                     try:
                         buy_result = self.trade_client.market_buy(market, min_order_usdt)
-                        await asyncio.sleep(3)  # 체결 대기
+                        await asyncio.sleep(3)  # wait for fill
                         balance = self.trade_client.get_balance(cur, include_locked=False)
                     except Exception as e:
                         logger.error("[dust_vacuum] %s BUY_FAILED: %s", market, e, exc_info=True)
                         results.append({"market": market, "error": f"BUY_FAILED: {e}"})
                         continue
 
-                # 전량 매도
+                # sell everything
                 if balance > 0:
                     try:
                         sell_result = self.trade_client.market_sell(market, balance)
@@ -1410,14 +1410,14 @@ class ReconcileMixin:
 
     def cleanup_dust_markets(self, threshold_usdt: float = 0.0, purge: bool = False) -> Dict[str, Any]:
         """
-        평가금액이 threshold_usdt(기본값: min_order_usdt) 미만인 ACTIVE/RECOVERY 마켓을 정리한다.
-        purge=True이면 아예 시스템에서 삭제(Purge)하여 대시보드에서 안 보이게 한다.
+        Clean up ACTIVE/RECOVERY markets whose valuation is below threshold_usdt (default: min_order_usdt).
+        If purge=True, delete (Purge) them entirely from the system so they disappear from the dashboard.
         """
         if threshold_usdt <= 0:
             threshold_usdt = self.min_order_usdt
 
         cleaned = []
-        # ACTIVE + RECOVERY 대상
+        # targets: ACTIVE + RECOVERY
         active = self.oma_registry.list_active()
         recovery = []
         try:
@@ -1469,13 +1469,13 @@ class ReconcileMixin:
     # --------------------------------------------------------
     async def _run_dust_cleanup(self, ctx, market: str, current_price: float) -> None:
         """
-        먼지(소액) 잔고 청산 시퀀스:
-        1. 최소주문금액(min_order_usdt)만큼 시장가 매수
-        2. 체결 대기 (최대 30초)
-        3. 합산된 전량 시장가 매도
+        Dust (small-balance) liquidation sequence:
+        1. Market-buy the minimum order amount (min_order_usdt)
+        2. Wait for the fill (up to 30s)
+        3. Market-sell the combined total in full
         """
         # 1. Buy (minimum amount)
-        # 사용자가 "최소금액"을 요청했으므로 min_order_usdt를 그대로 사용합니다.
+        # The user requested the "minimum amount", so use min_order_usdt directly.
         buy_usdt = self.min_order_usdt
 
         # Wallet check

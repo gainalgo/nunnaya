@@ -1,11 +1,11 @@
 # ============================================================
 # File: app/api/peer_brief_router.py
-# Autocoin OS — Peer Brief Router (옆 서버 공유 endpoint)
+# Autocoin OS — Peer Brief Router (peer server shared endpoint)
 # ------------------------------------------------------------
-# GET  /peer/brief     — 옆 서버가 polling 하는 자기 brief
-# GET  /peer/cache     — 현재 캐시 상태 (디버그/대시보드)
-# GET  /peer/settings  — UI 가 표시할 현재 설정 (runtime + env)
-# POST /peer/settings  — UI 가 저장. runtime store + polling 즉시 재시작.
+# GET  /peer/brief     — this server's own brief, polled by peer servers
+# GET  /peer/cache     — current cache state (debug/dashboard)
+# GET  /peer/settings  — current settings for the UI to display (runtime + env)
+# POST /peer/settings  — saved by the UI. runtime store + immediate polling restart.
 # ============================================================
 from __future__ import annotations
 
@@ -22,10 +22,10 @@ router = APIRouter(prefix="/peer", tags=["PEER"])
 
 @router.get("/brief")
 async def get_brief(request: Request):
-    """자기 서버의 brief — 최근 손실/보유/health."""
+    """This server's own brief — recent losses/holdings/health."""
     from app.core.peer_brief import build_my_brief, get_peer_token
 
-    # 옵션 token 인증 (양쪽 서버에 같은 PEER_BRIEF_TOKEN 설정 시)
+    # optional token auth (when both servers share the same PEER_BRIEF_TOKEN)
     tok = get_peer_token()
     if tok:
         provided = (request.headers.get("x-peer-token") or "").strip()
@@ -38,15 +38,15 @@ async def get_brief(request: Request):
 
 
 @router.get("/cache")
-async def get_cache(request: Request):  # noqa: ARG001 — request unused, FastAPI 의존
-    """현재 peer 캐시 상태 (디버그)."""
+async def get_cache(request: Request):  # noqa: ARG001 — request unused, FastAPI dependency
+    """current peer cache state (debug)."""
     from app.core.peer_brief import get_cache_snapshot
     return get_cache_snapshot()
 
 
 @router.get("/settings")
 async def get_settings(request: Request):  # noqa: ARG001
-    """UI 표시용 — runtime override 값 + env defaults."""
+    """For UI display — runtime override values + env defaults."""
     from app.core.peer_brief import (
         is_enabled, is_paper, get_peer_urls, get_server_id,
         get_sl_window_min, get_poll_interval_sec, get_timeout_sec,
@@ -79,26 +79,26 @@ async def get_settings(request: Request):  # noqa: ARG001
         "peer_struggle_age_min": get_peer_struggle_age_min(),
         "peer_struggle_peak_pct": get_peer_struggle_peak_pct(),
         "peer_conflict_penalty": get_peer_conflict_penalty(),
-        # 🌊 함대 몰림(crowding) — 옆 같은 코인+같은 방향 보유 수 × 감점 — 2026-06-15
+        # 🌊 fleet crowding — number of peers holding same coin + same direction × penalty — 2026-06-15
         "peer_crowding_penalty": get_peer_crowding_penalty(),
         "peer_crowding_cap": get_peer_crowding_cap(),
-        # 🛡️ 함대 dir_fail (같은 코인·방향 누적 차단) — 2026-06-11
+        # 🛡️ fleet dir_fail (cumulative block on same coin·direction) — 2026-06-11
         "fleet_dirfail_enabled": get_peer_fleet_dirfail_enabled(),
         "fleet_dirfail_max": get_peer_fleet_dirfail_max(),
         "fleet_dirfail_window_min": get_peer_fleet_dirfail_window_min(),
         "token_set": bool(get_peer_token()),
-        # 정보용 — UI 가 "runtime override 적용 중" vs "env 사용 중" 구분 위해
+        # informational — lets the UI distinguish "runtime override active" vs "using env"
         "state_keys": sorted(get_state().keys()),
         "env_urls_raw": (os.getenv("PEER_SERVER_URLS", "") or ""),
         "env_server_id": (os.getenv("PEER_SERVER_ID", "") or ""),
-        # 현재 polling 상태 (한 호출로 같이 받기)
+        # current polling state (returned together in one call)
         "cache": get_cache_snapshot(),
     }
 
 
 @router.post("/settings")
 async def post_settings(request: Request):
-    """UI 저장 → runtime/peer_brief_state.json + polling 즉시 재시작."""
+    """UI save → runtime/peer_brief_state.json + immediate polling restart."""
     from app.core.peer_brief import (
         update_state, start_poll_loop, stop_poll_loop, get_cache_snapshot,
     )
@@ -186,7 +186,7 @@ async def post_settings(request: Request):
                 patch["peer_struggle_peak_pct"] = v
         except (TypeError, ValueError):
             pass
-    # 🌊 함대 몰림(crowding) — 2026-06-15
+    # 🌊 fleet crowding — 2026-06-15
     if "peer_crowding_penalty" in body:
         try:
             v = float(body.get("peer_crowding_penalty"))
@@ -201,7 +201,7 @@ async def post_settings(request: Request):
                 patch["peer_crowding_cap"] = v
         except (TypeError, ValueError):
             pass
-    # 🛡️ 함대 dir_fail (같은 코인·방향 누적 차단) — 2026-06-11
+    # 🛡️ fleet dir_fail (cumulative block on same coin·direction) — 2026-06-11
     if "fleet_dirfail_enabled" in body:
         patch["fleet_dirfail_enabled"] = bool(body.get("fleet_dirfail_enabled"))
     if "fleet_dirfail_max" in body:
@@ -224,7 +224,7 @@ async def post_settings(request: Request):
 
     new_state = update_state(patch)
 
-    # polling 즉시 재시작 (새 URLs / enabled 즉시 반영)
+    # immediate polling restart (apply new URLs / enabled right away)
     try:
         stop_poll_loop()
         start_poll_loop()

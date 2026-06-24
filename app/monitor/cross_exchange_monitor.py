@@ -1,6 +1,6 @@
 """
 Cross Exchange Monitor
-거래소 간 가격 차이 및 선행지표 모니터링
+Monitors price differences and leading indicators across exchanges
 """
 
 import asyncio
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ArbitrageOpportunity:
-    """차익거래 기회"""
+    """Arbitrage opportunity"""
     coin: str
     buy_exchange: str
     sell_exchange: str
@@ -33,7 +33,7 @@ class ArbitrageOpportunity:
 
 @dataclass
 class LeadingIndicatorSignal:
-    """선행지표 시그널"""
+    """Leading indicator signal"""
     coin: str
     leader_exchange: str
     follower_exchange: str
@@ -46,7 +46,7 @@ class LeadingIndicatorSignal:
 
 @dataclass
 class KimchiPremium:
-    """김치 프리미엄 정보"""
+    """Kimchi premium info"""
     coin: str
     bybit_price_usdt: Decimal
     binance_price_usdt: Decimal
@@ -57,42 +57,42 @@ class KimchiPremium:
 
 
 class CrossExchangeMonitor:
-    """거래소 간 가격 모니터링"""
-    
+    """Cross-exchange price monitoring"""
+
     def __init__(self, use_mock: bool = True):
         """
         Args:
-            use_mock: True면 Binance/Bithumb Mock 사용
+            use_mock: If True, use Binance/Bithumb Mock
         """
         self.use_mock = use_mock
-        
-        # 거래소 어댑터
+
+        # Exchange adapters
         self.exchanges: Dict[str, ExchangeAdapter] = {}
-        
-        # 가격 히스토리 (5분치, 1초마다)
+
+        # Price history (5 minutes, one entry per second)
         self.price_history: Dict[str, Dict[str, deque]] = {
             'BYBIT': {},
             'BINANCE': {},
             'BITHUMB': {}
         }
         
-        # 발견된 기회들
+        # Discovered opportunities
         self.opportunities: List[Any] = []
-        
-        # 공통 코인 (3개 거래소 모두 거래 가능한 코인)
+
+        # Common coins (tradable on all 3 exchanges)
         self.common_coins = [
-            'BTC', 'ETH', 'XRP', 'ADA', 'DOT', 
+            'BTC', 'ETH', 'XRP', 'ADA', 'DOT',
             'SOL', 'DOGE', 'AVAX'
         ]
-        
-        # 모니터링 중 여부
+
+        # Whether monitoring is active
         self.is_running = False
-        
-        # 김치 프리미엄 경고 throttle (코인별 마지막 경고 시각)
+
+        # Kimchi premium warning throttle (last warning time per coin)
         self._kimchi_warn_ts: Dict[str, float] = {}
-        self._kimchi_warn_cooldown = 300  # 5분
-        
-        # 통계
+        self._kimchi_warn_cooldown = 300  # 5 minutes
+
+        # Statistics
         self.stats = {
             'total_opportunities': 0,
             'arbitrage_count': 0,
@@ -101,17 +101,17 @@ class CrossExchangeMonitor:
         }
     
     async def initialize(self):
-        """초기화"""
+        """Initialize"""
         try:
             logger.info("Initializing Cross Exchange Monitor...")
             
             # Bybit is the primary exchange; cross-exchange comparison reserved for future Bithumb integration
             logger.info("✅ Cross Exchange Monitor initialized (Bithumb integration pending)")
             
-            # 가격 히스토리 초기화
+            # Initialize price history
             for exchange in self.exchanges.keys():
                 for coin in self.common_coins:
-                    self.price_history[exchange][coin] = deque(maxlen=300)  # 5분
+                    self.price_history[exchange][coin] = deque(maxlen=300)  # 5 minutes
             
             logger.info("✅ Cross Exchange Monitor initialized")
             return True
@@ -121,7 +121,7 @@ class CrossExchangeMonitor:
             return False
     
     async def start_monitoring(self):
-        """모니터링 시작"""
+        """Start monitoring"""
         if self.is_running:
             logger.warning("Monitor is already running")
             return
@@ -132,7 +132,7 @@ class CrossExchangeMonitor:
         try:
             while self.is_running:
                 await self._monitor_cycle()
-                await asyncio.sleep(60)  # 60초마다 (보조 지표: 김프/선행신호, 잦은 호출 불필요)
+                await asyncio.sleep(60)  # every 60s (auxiliary indicators: kimchi premium/leading signal, frequent calls unnecessary)
                 
         except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as e:
             logger.error(f"Monitoring error: {e}")
@@ -140,55 +140,55 @@ class CrossExchangeMonitor:
             self.is_running = False
     
     def stop_monitoring(self):
-        """모니터링 중지"""
+        """Stop monitoring"""
         logger.info("Stopping monitoring...")
         self.is_running = False
     
     async def _monitor_cycle(self):
-        """1회 모니터링 사이클"""
+        """One monitoring cycle"""
         try:
-            # 1. 모든 거래소 가격 동시 조회
+            # 1. Fetch prices from all exchanges concurrently
             prices = await self._fetch_all_prices()
-            
-            # 2. 가격 히스토리 저장
+
+            # 2. Save price history
             self._update_price_history(prices)
-            
-            # 3. 차익거래 기회 분석
+
+            # 3. Analyze arbitrage opportunities
             arb_opportunities = self._analyze_arbitrage(prices)
-            
-            # 4. 선행지표 기회 분석
+
+            # 4. Analyze leading indicator opportunities
             leading_opportunities = self._analyze_leading_indicator(prices)
-            
-            # 5. 김치 프리미엄 분석 (get_exchange_rate 동기 HTTP → 스레드 오프로드)
+
+            # 5. Analyze kimchi premium (get_exchange_rate is sync HTTP -> offload to thread)
             kimchi_data = await asyncio.to_thread(self._analyze_kimchi_premium, prices)
-            
-            # 6. 기회 저장
+
+            # 6. Store opportunities
             if arb_opportunities or leading_opportunities:
                 self.opportunities.extend(arb_opportunities)
                 self.opportunities.extend(leading_opportunities)
-                
-                # 최근 100개만 유지
+
+                # Keep only the most recent 100
                 self.opportunities = self.opportunities[-100:]
-                
-                # 통계 업데이트
+
+                # Update statistics
                 self.stats['total_opportunities'] = len(self.opportunities)
                 self.stats['arbitrage_count'] += len(arb_opportunities)
                 self.stats['leading_indicator_count'] += len(leading_opportunities)
-            
+
             self.stats['last_update'] = time.time()
-            
-            # 7. 중요한 기회 로깅
+
+            # 7. Log notable opportunities
             for opp in arb_opportunities:
                 if opp.diff_pct > 0.5:
                     logger.info(f"💰 ARBITRAGE: {opp.coin} {opp.buy_exchange}→{opp.sell_exchange} "
-                              f"+{opp.diff_pct:.2f}% (Est. {opp.profit_estimate:,.0f}원)")
+                              f"+{opp.diff_pct:.2f}% (Est. {opp.profit_estimate:,.0f} KRW)")
             
             for opp in leading_opportunities:
                 if abs(opp.leader_change_pct) > 2.0:
                     logger.info(f"🔮 LEADING: {opp.coin} {opp.leader_exchange} {opp.direction} "
                               f"{opp.leader_change_pct:+.2f}% (Conf: {opp.confidence:.0%})")
             
-            # 김치 프리미엄 경고 (5분 쿨다운으로 로그 폭주 방지)
+            # Kimchi premium warning (5-minute cooldown to prevent log flooding)
             _now = time.time()
             for k in kimchi_data:
                 if k.signal == 'OVERHEATED':
@@ -202,12 +202,12 @@ class CrossExchangeMonitor:
                         logger.info(f"💎 KIMCHI DISCOUNT: {k.coin} {k.premium_pct:.2f}%")
                         self._kimchi_warn_ts[k.coin] = _now
             
-            # 8. Signal Provider 업데이트 (Reserved Selector에서 사용)
+            # 8. Update Signal Provider (used by the Reserved Selector)
             try:
                 from app.manager.cross_exchange_signal import get_cross_exchange_signal_provider
                 signal_provider = get_cross_exchange_signal_provider()
-                
-                # 유동성 스코어 계산 (거래량 + 호가 깊이 기반)
+
+                # Compute liquidity score (based on volume + order book depth)
                 liquidity_scores = {}
                 for coin in self.common_coins:
                     bybit_ticker = prices.get('BYBIT', {}).get(coin)
@@ -215,9 +215,9 @@ class CrossExchangeMonitor:
                         vol_score = min(1.0, float(bybit_ticker.volume_24h * bybit_ticker.current_price) / 20_000_000.0)
                         liquidity_scores[coin] = vol_score
                 
-                # 각 코인별 시그널 저장
+                # Store signal per coin
                 for coin in self.common_coins:
-                    # 차익거래 시그널
+                    # Arbitrage signal
                     arb_signal = None
                     arb_pct = 0.0
                     for opp in arb_opportunities:
@@ -225,8 +225,8 @@ class CrossExchangeMonitor:
                             arb_signal = f"{opp.buy_exchange}→{opp.sell_exchange}"
                             arb_pct = opp.diff_pct
                             break
-                    
-                    # 선행지표 시그널
+
+                    # Leading indicator signal
                     leading_signal = None
                     leading_conf = 0.0
                     leading_change = 0.0
@@ -236,15 +236,15 @@ class CrossExchangeMonitor:
                             leading_conf = opp.confidence
                             leading_change = opp.leader_change_pct
                             break
-                    
-                    # 김치 프리미엄
+
+                    # Kimchi premium
                     kimchi_pct = 0.0
                     for k in kimchi_data:
                         if k.coin == coin:
                             kimchi_pct = k.premium_pct
                             break
-                    
-                    # Signal Provider 업데이트
+
+                    # Update Signal Provider
                     signal_provider.update_signal(
                         coin=coin,
                         liquidity_score=liquidity_scores.get(coin, 0.5),
@@ -262,21 +262,21 @@ class CrossExchangeMonitor:
             logger.error(f"Monitor cycle error: {e}", exc_info=True)
     
     async def _fetch_all_prices(self) -> Dict[str, Dict[str, TickerInfo]]:
-        """모든 거래소 가격 동시 조회 (배치 최적화)"""
+        """Fetch prices from all exchanges concurrently (batch-optimized)"""
         prices = {
             'BYBIT': {},
             'BINANCE': {},
             'BITHUMB': {}
         }
         
-        # Bybit: 모든 코인 한 번에 조회
+        # Bybit: fetch all coins at once
         normalized_markets = [f"{coin}USDT" for coin in self.common_coins]
         bybit_batch_result = await self.__fetch_batch(normalized_markets)
         if bybit_batch_result:
             for coin, ticker in bybit_batch_result.items():
                 prices['BYBIT'][coin] = ticker
 
-        # Mock 어댑터에 Bybit 참조 가격 주입
+        # Inject Bybit reference price into Mock adapters
         binance_adapter = self.exchanges.get('BINANCE')
         bithumb_adapter = self.exchanges.get('BITHUMB')
         for coin, ticker in bybit_batch_result.items():
@@ -285,7 +285,7 @@ class CrossExchangeMonitor:
             if bithumb_adapter and hasattr(bithumb_adapter, 'set_bybit_reference'):
                 bithumb_adapter.set_bybit_reference(coin, ticker.current_price)
 
-        # Binance & Bithumb Mock: 개별 조회 (Bybit 가격 기반)
+        # Binance & Bithumb Mock: individual fetch (based on Bybit price)
         tasks = []
         for coin in self.common_coins:
             # Binance Mock
@@ -295,11 +295,11 @@ class CrossExchangeMonitor:
             # Bithumb Mock
             market_code = f"{coin}USDT"
             tasks.append(self._fetch_ticker('BITHUMB', market_code, coin))
-        
-        # 동시 실행
+
+        # Run concurrently
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # 결과 정리
+
+        # Collect results
         for result in results:
             if isinstance(result, Exception):
                 continue
@@ -310,13 +310,13 @@ class CrossExchangeMonitor:
         return prices
     
     async def __fetch_batch(self, markets: list) -> Dict[str, TickerInfo]:
-        """Bybit 배치 조회 (한 번에 모든 마켓)"""
+        """Bybit batch fetch (all markets at once)"""
         try:
             adapter = self.exchanges.get('BYBIT')
             if not adapter:
                 return {}
 
-            # 배치 API 호출: "BTCUSDT,ETHUSDT,XRPUSDT..."
+            # Batch API call: "BTCUSDT,ETHUSDT,XRPUSDT..."
             markets_str = ",".join(markets)
             loop = asyncio.get_event_loop()
             tickers = await loop.run_in_executor(None, adapter.get_ticker, markets_str)
@@ -324,7 +324,7 @@ class CrossExchangeMonitor:
             if not tickers:
                 return {}
 
-            # 리스트로 반환되므로 파싱
+            # Returned as a list, so parse it
             result = {}
             if isinstance(tickers, list):
                 for ticker in tickers:
@@ -332,7 +332,7 @@ class CrossExchangeMonitor:
                     coin = ticker.market_code.replace("USDT", "")
                     result[coin] = ticker
             else:
-                # 단일 티커인 경우
+                # Single ticker case
                 coin = tickers.market_code.replace("USDT", "")
                 result[coin] = tickers
 
@@ -343,13 +343,13 @@ class CrossExchangeMonitor:
             return {}
     
     async def _fetch_ticker(self, exchange: str, market_code: str, coin: str):
-        """개별 티커 조회"""
+        """Fetch a single ticker"""
         try:
             adapter = self.exchanges.get(exchange)
             if not adapter:
                 return None
-            
-            # Blocking call을 async executor에서 실행
+
+            # Run the blocking call in an async executor
             loop = asyncio.get_event_loop()
             ticker = await loop.run_in_executor(None, adapter.get_ticker, market_code)
             return (exchange, coin, ticker) if ticker else None
@@ -359,7 +359,7 @@ class CrossExchangeMonitor:
             return None
     
     def _update_price_history(self, prices: Dict[str, Dict[str, TickerInfo]]):
-        """가격 히스토리 업데이트"""
+        """Update price history"""
         timestamp = time.time()
         
         for exchange, coins in prices.items():
@@ -371,17 +371,17 @@ class CrossExchangeMonitor:
                     })
     
     def _analyze_arbitrage(self, prices: Dict[str, Dict[str, TickerInfo]]) -> List[ArbitrageOpportunity]:
-        """차익거래 기회 분석"""
+        """Analyze arbitrage opportunities"""
         opportunities = []
-        
+
         for coin in self.common_coins:
-            # Bybit vs Bithumb (둘 다 USDT)
+            # Bybit vs Bithumb (both USDT)
             bybit_ticker = prices.get('BYBIT', {}).get(coin)
             bithumb_ticker = prices.get('BITHUMB', {}).get(coin)
-            
+
             if bybit_ticker and bithumb_ticker:
                 opp = self._check_arbitrage_pair(
-                    coin, 
+                    coin,
                     'BYBIT', bybit_ticker.current_price,
                     'BITHUMB', bithumb_ticker.current_price,
                     fee_pct=0.003  # 0.05% + 0.25%
@@ -400,16 +400,16 @@ class CrossExchangeMonitor:
         price_b: Decimal,
         fee_pct: float
     ) -> Optional[ArbitrageOpportunity]:
-        """두 거래소 간 차익 체크"""
-        
-        # 가격 차이 (%)
+        """Check arbitrage between two exchanges"""
+
+        # Price difference (%)
         diff_pct_ab = float((price_b - price_a) / price_a * 100)
         diff_pct_ba = float((price_a - price_b) / price_b * 100)
-        
-        # 수수료 고려한 최소 차익
+
+        # Minimum spread accounting for fees
         min_diff = fee_pct * 100
-        
-        # A에서 사서 B에서 팔기
+
+        # Buy on A, sell on B
         if diff_pct_ab > min_diff:
             profit = self._estimate_arbitrage_profit(price_a, price_b, fee_pct)
             
@@ -424,7 +424,7 @@ class CrossExchangeMonitor:
                 timestamp=time.time()
             )
         
-        # B에서 사서 A에서 팔기
+        # Buy on B, sell on A
         elif diff_pct_ba > min_diff:
             profit = self._estimate_arbitrage_profit(price_b, price_a, fee_pct)
             
@@ -442,28 +442,28 @@ class CrossExchangeMonitor:
         return None
     
     def _estimate_arbitrage_profit(self, buy_price: Decimal, sell_price: Decimal, fee_pct: float) -> Decimal:
-        """차익거래 예상 수익 계산 (100만 USDT 투자 기준)"""
+        """Estimate arbitrage profit (assuming 1,000,000 USDT investment)"""
         investment = Decimal('1000000')
         fee_decimal = Decimal(str(fee_pct))
-        
-        # 수수료 차감 후 수익 계산
-        # 1. 매수: 100만 USDT 투자, 수수료 차감
+
+        # Compute profit after fees
+        # 1. Buy: invest 1,000,000 USDT, deduct fee
         buy_fee = investment * fee_decimal
-        actual_investment = investment - buy_fee  # 수수료 차감 후 실제 매수 금액
-        qty = actual_investment / buy_price       # 매수 수량
-        
-        # 2. 매도: 매도 금액에서 수수료 차감
-        gross_revenue = qty * sell_price          # 매도 총액
-        sell_fee = gross_revenue * fee_decimal    # 매도 수수료
-        net_revenue = gross_revenue - sell_fee    # 수수료 차감 후 순 수익
-        
-        # 3. 최종 수익 = 순수익 - 원금
+        actual_investment = investment - buy_fee  # actual buy amount after fee
+        qty = actual_investment / buy_price       # quantity bought
+
+        # 2. Sell: deduct fee from sale proceeds
+        gross_revenue = qty * sell_price          # gross sale amount
+        sell_fee = gross_revenue * fee_decimal    # sell fee
+        net_revenue = gross_revenue - sell_fee    # net revenue after fee
+
+        # 3. Final profit = net revenue - principal
         profit = net_revenue - investment
-        
+
         return profit
     
     def _analyze_leading_indicator(self, prices: Dict[str, Dict[str, TickerInfo]]) -> List[LeadingIndicatorSignal]:
-        """선행지표 분석"""
+        """Analyze leading indicators"""
         opportunities = []
         
         for coin in self.common_coins:
@@ -486,26 +486,26 @@ class CrossExchangeMonitor:
         follower_ex: str,
         prices: Dict[str, Dict[str, TickerInfo]]
     ) -> Optional[LeadingIndicatorSignal]:
-        """선행지표 체크"""
-        
-        # 최근 1분 변화율 계산
+        """Check leading indicator"""
+
+        # Compute change over the last 1 minute
         leader_change = self._calculate_change_1min(leader_ex, coin)
         follower_change = self._calculate_change_1min(follower_ex, coin)
-        
+
         if leader_change is None or follower_change is None:
             return None
-        
-        # 리더가 크게 움직였는데 팔로워는 아직 반응 안함
+
+        # Leader moved sharply but follower hasn't reacted yet
         if abs(leader_change) > 2.0 and abs(follower_change) < 1.0:
-            
-            # 방향 일치 여부 확인
+
+            # Check whether directions match
             if leader_change * follower_change < 0:
-                # 반대 방향이면 무시
+                # Opposite direction -> ignore
                 return None
-            
+
             direction = 'UP' if leader_change > 0 else 'DOWN'
-            
-            # 신뢰도 계산 (변화율 크기와 팔로워 반응 지연 기반)
+
+            # Compute confidence (based on change magnitude and follower lag)
             confidence = min(abs(leader_change) / 5.0, 1.0) * 0.7
             if abs(follower_change) < 0.5:
                 confidence += 0.2
@@ -524,44 +524,44 @@ class CrossExchangeMonitor:
         return None
     
     def _calculate_change_1min(self, exchange: str, coin: str) -> Optional[float]:
-        """최근 1분 가격 변화율 계산"""
+        """Compute price change over the last 1 minute"""
         history = self.price_history.get(exchange, {}).get(coin, deque())
-        
+
         if len(history) < 60:
             return None
-        
-        # 60초 전 가격
+
+        # Price 60 seconds ago
         price_60s_ago = history[-60]['price']
-        
-        # 현재 가격
+
+        # Current price
         price_now = history[-1]['price']
-        
-        # 변화율 (%)
+
+        # Change (%)
         change_pct = float((price_now - price_60s_ago) / price_60s_ago * 100)
         
         return change_pct
     
     def _analyze_kimchi_premium(self, prices: Dict[str, Dict[str, TickerInfo]]) -> List[KimchiPremium]:
-        """김치 프리미엄 분석"""
+        """Analyze kimchi premium"""
         result = []
-        
+
         for coin in self.common_coins:
             bybit_ticker = prices.get('BYBIT', {}).get(coin)
             binance_ticker = prices.get('BINANCE', {}).get(coin)
-            
+
             if not bybit_ticker or not binance_ticker:
                 continue
-            
-            # Bybit 가격 (USDT)
+
+            # Bybit price (USDT)
             bybit_price_usdt = bybit_ticker.current_price
 
-            # Binance 가격 (USDT)
+            # Binance price (USDT)
             binance_price_usdt = binance_ticker.current_price
-            
-            # 프리미엄 계산
+
+            # Compute premium
             premium_pct = float((bybit_price_usdt / binance_price_usdt - 1) * 100)
-            
-            # 시그널
+
+            # Signal
             if premium_pct > 5.0:
                 signal = 'OVERHEATED'
             elif premium_pct < -1.0:
@@ -581,9 +581,9 @@ class CrossExchangeMonitor:
         return result
     
     def get_latest_opportunities(self, limit: int = 10) -> List[Any]:
-        """최근 발견된 기회 조회"""
+        """Get recently discovered opportunities"""
         return self.opportunities[-limit:]
-    
+
     def get_stats(self) -> Dict[str, Any]:
-        """통계 조회"""
+        """Get statistics"""
         return self.stats.copy()

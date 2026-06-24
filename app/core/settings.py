@@ -1,8 +1,8 @@
 """
 Settings Module
-- 환경변수를 구조화하여 관리
-- 유효성 검증 포함
-- 출처(env/default) 추적
+- Structured management of environment variables
+- Includes validation
+- Tracks source (env/default)
 
 [MIGRATED 2026-01-23] CoinStock → Autocoin
 [MIGRATED 2026-03-31] Bybit USDT → Bybit USDT
@@ -21,7 +21,7 @@ from app.core.constants import env_bool, env_float, env_int
 
 @dataclass
 class TradingSettings:
-    """거래 관련 설정"""
+    """Trading-related settings"""
     min_order_usdt: float = 5.0
     max_order_usdt: float = 1000.0
     deploy_ratio: float = 0.8
@@ -39,7 +39,7 @@ class TradingSettings:
 
 @dataclass
 class SmartAllocSettings:
-    """Smart Allocation 설정"""
+    """Smart Allocation settings"""
     enabled: bool = False
     w_profit: float = 0.5
     w_ai: float = 0.3
@@ -65,7 +65,7 @@ class SmartAllocSettings:
 
 @dataclass
 class RegimeSettings:
-    """Market Regime 설정"""
+    """Market Regime settings"""
     enabled: bool = False
     cache_sec: float = 30.0
     min_hold_sec: float = 300.0
@@ -95,7 +95,7 @@ class RegimeSettings:
 
 @dataclass
 class FearGreedSettings:
-    """Fear & Greed 설정"""
+    """Fear & Greed settings"""
     enabled: bool = False
     cache_sec: float = 3600.0
     max_stale_sec: float = 21600.0
@@ -121,7 +121,7 @@ class FearGreedSettings:
 
 @dataclass
 class AutoRetireSettings:
-    """Auto-Retire 설정"""
+    """Auto-Retire settings"""
     enabled: bool = True
     threshold_usdt: float = 1.0
 
@@ -135,7 +135,7 @@ class AutoRetireSettings:
 
 @dataclass
 class SystemSettings:
-    """전체 시스템 설정"""
+    """Overall system settings"""
     trading: TradingSettings = field(default_factory=TradingSettings)
     smart_alloc: SmartAllocSettings = field(default_factory=SmartAllocSettings)
     regime: RegimeSettings = field(default_factory=RegimeSettings)
@@ -155,19 +155,19 @@ class SystemSettings:
         )
     
     def to_dict(self) -> Dict[str, Any]:
-        """설정을 딕셔너리로 변환 (API/로깅용)"""
+        """Convert settings to a dictionary (for API/logging)"""
         from dataclasses import asdict
         return asdict(self)
     
     def validate(self) -> List[str]:
-        """설정 유효성 검증. 오류 목록 반환."""
+        """Validate settings. Returns a list of errors."""
         errors = []
 
-        # --- 거래 설정 ---
+        # --- Trading settings ---
         if self.trading.min_order_usdt < 0:
             errors.append("min_order_usdt must be >= 0")
         if self.trading.min_order_usdt > 0 and self.trading.min_order_usdt < 1.0:
-            errors.append("min_order_usdt < 1 USDT — Bybit 최소 주문 금액(1 USDT) 미달")
+            errors.append("min_order_usdt < 1 USDT — below Bybit minimum order amount (1 USDT)")
         if self.trading.max_order_usdt <= 0:
             errors.append("max_order_usdt must be > 0")
         if self.trading.min_order_usdt > self.trading.max_order_usdt:
@@ -193,7 +193,7 @@ class SystemSettings:
         if self.fear_greed.extreme_fear_mult < self.fear_greed.extreme_greed_mult:
             errors.append(
                 "fear_greed: extreme_fear_mult should be >= extreme_greed_mult "
-                "(공포 시 더 공격적이어야 함)"
+                "(should be more aggressive during fear)"
             )
 
         # --- Auto Retire ---
@@ -214,7 +214,7 @@ class SystemSettings:
 _settings: Optional[SystemSettings] = None
 
 def get_settings(reload: bool = False) -> SystemSettings:
-    """시스템 설정 싱글톤 반환"""
+    """Return the system settings singleton"""
     global _settings
     if _settings is None or reload:
         _settings = SystemSettings.from_env()

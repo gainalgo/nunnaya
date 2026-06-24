@@ -76,10 +76,10 @@ class ApproveMixin:
                 active_reason_map.update(active_reason_map2)
                 active_markets = active_markets2
 
-                # "한 코인 = 한 전략" 보장용 소유 맵
-                # ACTIVE/RECOVERY 중 strategy 태그가 있는 마켓만 소유 잠금.
-                # 2026-03-10: WATCH 제외 — 매도 후 WATCH로 내려간 코인은
-                # 다른 전략에서도 선택할 수 있도록 소유권 해제.
+                # Ownership map enforcing "one coin = one strategy"
+                # Only lock ownership for markets in ACTIVE/RECOVERY that carry a strategy tag.
+                # 2026-03-10: Exclude WATCH — coins demoted to WATCH after a sell
+                # release ownership so other strategies can pick them up.
                 strategy_owner_map: Dict[str, str] = {}
                 for bucket in ("active", "recovery"):
                     for row in (snap2.get(bucket) or []):
@@ -99,7 +99,7 @@ class ApproveMixin:
                 active_gz = 0
                 active_ct = 0
                 for mkt in active_markets:
-                    # [2026-03-14] LongHold 전환된 코인은 슬롯 차지 안 함
+                    # [2026-03-14] Coins converted to LongHold do not occupy a slot
                     if mkt in longhold_markets:
                         continue
                     st = strategy_owner_map.get(mkt) or self._infer_strategy(mkt, active_reason_map)
@@ -110,7 +110,7 @@ class ApproveMixin:
                     elif st == "GAZUA": active_gz += 1
                     elif st == "CONTRARIAN": active_ct += 1
 
-                # [2026-03-23] LongHold된 슬롯도 전략 할당량에 포함 (무한 팽창 방지)
+                # [2026-03-23] LongHold slots also count toward strategy quota (prevent unbounded growth)
                 lh_pp = 0; lh_al = 0; lh_ld = 0; lh_lt = 0; lh_gz = 0; lh_ct = 0
                 for mkt in longhold_markets:
                     st = strategy_owner_map.get(mkt) or self._infer_strategy(mkt, active_reason_map)
@@ -128,8 +128,8 @@ class ApproveMixin:
                 need_gz = max(0, gz_target - active_gz - lh_gz)
                 need_ct = max(0, ct_target - active_ct - lh_ct)
 
-                # [2026-02-02] SNIPER need 계산 추가
-                # [FIX 2026-03-23 P1] LongHold된 SNIPER/WHALE도 할당량에 포함
+                # [2026-02-02] Add SNIPER need calculation
+                # [FIX 2026-03-23 P1] LongHold SNIPER/WHALE also count toward quota
                 sniper_target = max(0, int(getattr(self.system, "reserved_sniper_n", 0) or 0))
                 active_sn = 0
                 for mkt in active_markets:
@@ -142,7 +142,7 @@ class ApproveMixin:
                             if (strategy_owner_map.get(mkt) or self._infer_strategy(mkt, active_reason_map)) == "SNIPER")
                 need_sn = max(0, sniper_target - active_sn - lh_sn)
 
-                # WHALE need 계산
+                # WHALE need calculation
                 whale_target = max(0, int(getattr(self.system, "reserved_whale_n", 0) or 0))
                 active_wh = 0
                 for mkt in active_markets:
@@ -160,25 +160,25 @@ class ApproveMixin:
                 result_needs = {"PINGPONG": need_pp, "AUTOLOOP": need_al, "LADDER": need_ld, "LIGHTNING": need_lt, "GAZUA": need_gz, "CONTRARIAN": need_ct, "SNIPER": need_sn, "WHALE": need_wh}
 
                 if need_pp > 0 or need_al > 0 or need_ld > 0 or need_lt > 0 or need_gz > 0 or need_ct > 0 or need_sn > 0 or need_wh > 0:
-                    # [2026-01-31] 전략별 추천 API에서 후보 가져오기 (멀티타임프레임 분석)
-                    # 기존: reserved_queue.snapshot() → 통합 5분 캔들 분석
-                    # 개선: 전략별 추천 API → 전략에 맞는 타임프레임 분석
+                    # [2026-01-31] Fetch candidates from per-strategy recommendation API (multi-timeframe analysis)
+                    # Before: reserved_queue.snapshot() → unified 5-minute candle analysis
+                    # Improved: per-strategy recommendation API → timeframe analysis matched to the strategy
 
-                    # [2026-05-30] 부모님 발견: 후보 등록 시점에 ACTIVE 박지 않음 (가짜 Active 마켓 표시 사고)
-                    # 진짜 진입 (Bybit qty > 0) 후 reconcile loop (hs_mixin_reconcile.py:622-688) 가 자동 ACTIVE 승격.
-                    # 부모님 룰: Active 마켓 = 실제 거래 + 실시간 손익. 진입 X 코인이 Active 마켓에 표시되면 안 됨.
-                    # promote_to_active flag UI 호환성 유지 — 의미만 변경 ("진입 후 자동 promote 활성" 의미로 해석)
+                    # [2026-05-30] Owner found: do not set ACTIVE at candidate-registration time (fake Active market display incident)
+                    # After a real entry (Bybit qty > 0), the reconcile loop (hs_mixin_reconcile.py:622-688) auto-promotes to ACTIVE.
+                    # Owner rule: Active market = real trade + live PnL. A coin with no entry must not show in the Active market list.
+                    # Keep promote_to_active flag for UI compatibility — only the meaning changes ("auto-promote after entry is active")
                     to_state = MarketState.WATCH
 
-                    # [2026-02-03] 모든 전략 자동 승인 활성화 (완전 자동 순환)
-                    # PINGPONG/AUTOLOOP: 초기부터 자동화 (기본 True 유지)
-                    # LADDER/LIGHTNING/CONTRARIAN/SNIPER: 검증 완료로 자동화 (False → True)
-                    # GAZUA: demote 자체가 안 되므로 의미 없음 (False 유지)
+                    # [2026-02-03] Enable auto-approve for all strategies (fully automatic rotation)
+                    # PINGPONG/AUTOLOOP: automated from the start (default stays True)
+                    # LADDER/LIGHTNING/CONTRARIAN/SNIPER: automated after validation (False → True)
+                    # GAZUA: demote never happens, so it is meaningless (stays False)
                     aa_pp = bool(getattr(self.system, "autopilot_auto_approve_pingpong", True))
                     aa_al = bool(getattr(self.system, "autopilot_auto_approve_autoloop", True))
                     aa_ld = bool(getattr(self.system, "autopilot_auto_approve_ladder", True))
                     aa_lt = bool(getattr(self.system, "autopilot_auto_approve_lightning", True))
-                    aa_gz = bool(getattr(self.system, "autopilot_auto_approve_gazua", False))  # GAZUA는 demote 안 됨
+                    aa_gz = bool(getattr(self.system, "autopilot_auto_approve_gazua", False))  # GAZUA is never demoted
                     aa_ct = bool(getattr(self.system, "autopilot_auto_approve_contrarian", True))
                     aa_sn = bool(getattr(self.system, "autopilot_auto_approve_sniper", True))
                     aa_wh = bool(getattr(self.system, "autopilot_auto_approve_whale", True))
@@ -186,7 +186,7 @@ class ApproveMixin:
                     ai_gate_en = bool(getattr(self.system, "autopilot_ai_gate_enabled", False))
                     ai_gate_thr = float(getattr(self.system, "autopilot_ai_gate_threshold", 0.55) or 0.55)
 
-                    # 전략별 최소 신뢰도 % 로드
+                    # Load per-strategy minimum confidence %
                     _min_conf_map: Dict[str, float] = {
                         "PINGPONG": float(getattr(self.system, "autopilot_min_confidence_pingpong", 60.0) or 60.0),
                         "AUTOLOOP": float(getattr(self.system, "autopilot_min_confidence_autoloop", 60.0) or 60.0),
@@ -198,7 +198,7 @@ class ApproveMixin:
                         "WHALE": float(getattr(self.system, "autopilot_min_confidence_whale", 65.0) or 65.0),
                     }
 
-                    # [2026-03-10] Night Mode: 진입 점수 문턱 상향
+                    # [2026-03-10] Night Mode: raise the entry score threshold
                     _night_active = False
                     try:
                         _night_active = bool(getattr(self.system, 'is_night_mode_active', lambda: False)())
@@ -210,7 +210,7 @@ class ApproveMixin:
                         logger.warning("[APPROVE] Night Mode entry score boost: %s", exc, exc_info=True)
 
                     def _confidence_gate_pass(it: Dict[str, Any], strategy: str) -> bool:
-                        """전략별 최소 신뢰도 % 이상인지 확인."""
+                        """Check whether confidence meets the per-strategy minimum %."""
                         min_conf = _min_conf_map.get(strategy.upper(), 0.0)
                         if min_conf <= 0:
                             return True
@@ -296,7 +296,7 @@ class ApproveMixin:
                         return "ok"
 
                     def _get_from_queue(strategy: str, n: int, allowed: bool) -> List[Dict[str, Any]]:
-                        """reserved_queue에서 전략별 후보 가져오기 + AI Gate + 전략 소유권 필터."""
+                        """Fetch per-strategy candidates from reserved_queue + AI Gate + strategy ownership filter."""
                         strategy = str(strategy or "").strip().upper()
                         if n <= 0 or not allowed or not strategy:
                             logger.debug("[Autopilot] _get_from_queue(%s) skipped: n=%s, allowed=%s", strategy, n, allowed)
@@ -350,7 +350,7 @@ class ApproveMixin:
                             return []
 
                     def _get_from_fallback(strategy: str, n: int, allowed: bool) -> List[Dict[str, Any]]:
-                        """queue 부족 시 전략 추천 API를 보조로 사용 (강제 매수 아님)."""
+                        """When the queue is short, use the strategy recommendation API as a fallback (not a forced buy)."""
                         strategy = str(strategy or "").strip().upper()
                         if n <= 0 or not allowed or not strategy:
                             return []
@@ -409,11 +409,11 @@ class ApproveMixin:
                     for st in strategy_order:
                         picks.extend(_get_from_queue(st, int(need_by_strategy.get(st, 0) or 0), bool(allow_by_strategy.get(st, False))))
 
-                    # queue 부족 시 전략별 보조 후보 조회 (WHALE은 실시간 스캐너 블록에서 처리)
-                    # [2026-03-30] to_thread + timeout 30초 — 이벤트 루프 블로킹 + 스레드 고갈 방지
+                    # When the queue is short, query per-strategy fallback candidates (WHALE handled in the live scanner block)
+                    # [2026-03-30] to_thread + 30s timeout — prevent event-loop blocking and thread exhaustion
                     for st in strategy_order:
                         if st == "WHALE":
-                            continue  # WHALE fallback은 아래 스캐너 블록에서 처리
+                            continue  # WHALE fallback handled in the scanner block below
                         remain = int(need_by_strategy.get(st, 0) or 0) - int(picked_counts.get(st, 0) or 0)
                         if remain <= 0:
                             continue
@@ -427,9 +427,9 @@ class ApproveMixin:
                         except asyncio.TimeoutError:
                             logger.warning("[Autopilot] _get_from_fallback(%s) timeout 30s — skipped", st)
 
-                    # ── WHALE 전용 스캐너 ──────────────────────────────────────────────
-                    # WHALE은 reserved_queue 미사용: 전체 USDT 마켓을 3분봉으로 실시간 스캔
-                    # queue에서 못 채운 나머지 WHALE 슬롯만 실시간 스캔으로 보충
+                    # ── WHALE-only scanner ──────────────────────────────────────────────
+                    # WHALE does not use reserved_queue: live-scan all USDT markets on the 3-minute timeframe
+                    # Fill only the remaining WHALE slots the queue could not fill via live scan
                     _wh_remaining = max(0, need_wh - int(picked_counts.get("WHALE", 0) or 0))
                     if _wh_remaining > 0 and aa_wh:
                         try:
@@ -448,8 +448,8 @@ class ApproveMixin:
                                 _whale_excluded,
                             )
                             logger.info(
-                                f"[WHALE/Scanner] 스캔 완료 — {len(_all_markets)}개 마켓, "
-                                f"신호 {len(_whale_hits)}개, remaining={_wh_remaining}"
+                                f"[WHALE/Scanner] scan complete — {len(_all_markets)} markets, "
+                                f"{len(_whale_hits)} signals, remaining={_wh_remaining}"
                             )
                             for _wh in _whale_hits[:_wh_remaining]:
                                 _wm = str(_wh.get("market") or "").strip().upper()
@@ -474,10 +474,10 @@ class ApproveMixin:
                                         continue
                                 except (KeyError, AttributeError, TypeError) as exc:
                                     logger.warning("[APPROVE] BTC Guard: %s", exc, exc_info=True)
-                                # [FIX 2026-03-23] WHALE은 AI confidence gate 면제
-                                # WHALE 진입 조건(RSI≤30 + 구름두께≥1.5% + 2캔들 cloud_top 돌파
-                                # + StochRSI %K>%D + 거래량 2배 이상) 자체가 엄격한 필터.
-                                # confidence 0.0~1.0 스케일이라 AI 65% 기준과 호환 불가.
+                                # [FIX 2026-03-23] WHALE is exempt from the AI confidence gate
+                                # WHALE entry conditions (RSI≤30 + cloud thickness≥1.5% + 2-candle cloud_top breakout
+                                # + StochRSI %K>%D + volume ≥2x) are themselves a strict filter.
+                                # confidence is on a 0.0~1.0 scale, incompatible with the AI 65% threshold.
                                 try:
                                     self.system.oma_set_market(
                                         market=_wm,
@@ -515,24 +515,24 @@ class ApproveMixin:
                                         })
                                     except (KeyError, AttributeError, TypeError) as exc:
                                         logger.warning("[APPROVE] WHALE add_history: %s", exc, exc_info=True)
-                                    logger.info(f"[WHALE/Scanner] 🐋 승인: {_wm} → {to_state.value} | {_wh.get('reason')}")
+                                    logger.info(f"[WHALE/Scanner] 🐋 approved: {_wm} → {to_state.value} | {_wh.get('reason')}")
                                 except (KeyError, AttributeError, TypeError, ValueError) as _wexc:
-                                    logger.warning("[WHALE/Scanner] 승인 실패: %s: %s", _wm, _wexc)
+                                    logger.warning("[WHALE/Scanner] approve failed: %s: %s", _wm, _wexc)
                         except (KeyError, AttributeError, TypeError, ValueError) as _wexc:
-                            logger.warning("[WHALE/Scanner] 스캐너 오류: %s", _wexc, exc_info=True)
+                            logger.warning("[WHALE/Scanner] scanner error: %s", _wexc, exc_info=True)
                     # ─────────────────────────────────────────────────────────────────
 
                     for it in picks:
-                        # 전략별 추천 API 결과는 rid가 없으므로 market으로 처리
+                        # Per-strategy recommendation API results have no rid, so key on market
                         market = str(it.get("market") or "").strip().upper()
                         if not market:
                             continue
                         strategy = str(it.get("recommended_strategy") or it.get("strategy") or "").strip().upper()
                         if not strategy:
-                            # API 응답에서 strategy_match가 True인 경우 해당 전략 사용
-                            strategy = "AUTOLOOP"  # 기본값
+                            # Use this strategy when the API response has strategy_match True
+                            strategy = "AUTOLOOP"  # default
 
-                        # "한 코인 = 한 전략": 이미 다른 전략 소유면 자동 승인 스킵
+                        # "one coin = one strategy": skip auto-approve if already owned by another strategy
                         owner = str(strategy_owner_map.get(market) or "").strip().upper()
                         if owner and owner != strategy:
                             approve_debug["skip_owner_mismatch"] = int(approve_debug.get("skip_owner_mismatch", 0) + 1)
@@ -542,9 +542,9 @@ class ApproveMixin:
                             approve_debug["skip_active"] = int(approve_debug.get("skip_active", 0) + 1)
                             continue
 
-                        # [FIX 2026-03-23] Path B에도 confidence + AI gate 적용
-                        # 이전: Path A(_get_from_queue)에서만 체크 → Path B는 무조건 approve
-                        # 수정: 동일한 _confidence_gate_pass / _ai_gate_pass 적용
+                        # [FIX 2026-03-23] Apply confidence + AI gate to Path B as well
+                        # Before: checked only in Path A (_get_from_queue) → Path B always approved
+                        # Fix: apply the same _confidence_gate_pass / _ai_gate_pass
                         if not _ai_gate_pass(it):
                             approve_debug["pathB_ai_gate_blocked"] = int(approve_debug.get("pathB_ai_gate_blocked", 0) + 1)
                             continue
@@ -555,7 +555,7 @@ class ApproveMixin:
                         # ── Phase 3-B: Risk Overlay Gate ──
                         _risk_blocked = False
 
-                        # 1) Risk Budget: DEFENSE 모드면 신규 진입 차단
+                        # 1) Risk Budget: block new entries in DEFENSE mode
                         try:
                             _rb_state = getattr(self.risk_budget_manager, "_state", None)
                             if _rb_state and not _rb_state.new_entry_allowed:
@@ -564,13 +564,13 @@ class ApproveMixin:
                         except (KeyError, AttributeError, TypeError, ValueError) as exc:
                             logger.warning("[APPROVE] Risk Budget DEFENSE gate: %s", exc, exc_info=True)
 
-                        # 2) [제거 2026-06-02] Correlation Guard 호출 청산.
-                        #    correlation_guard 는 FOCUS/HARPOON 전용 "섹터 분산 conviction 페널티" 가드인데(allowed 항상 True),
-                        #    autopilot 이 차단용으로 오용 + 존재하지 않는 check_entry_allowed() 호출 → 처음부터 항상 AttributeError 로 죽어있었음.
-                        #    역할 분담: 섹터 분산 = FOCUS pair_block / autopilot 슬롯확장 시 portfolio_risk_manager.check_correlation_limit,
-                        #             코인 충돌 = owner_blocked·dup_blocked 가 이미 담당. → 잘못 빌린 죽은 호출 제거.
+                        # 2) [Removed 2026-06-02] Cleared the Correlation Guard call.
+                        #    correlation_guard is a FOCUS/HARPOON-only "sector-diversification conviction penalty" guard (allowed always True),
+                        #    which autopilot misused as a block + called a nonexistent check_entry_allowed() → it was dead from the start, always raising AttributeError.
+                        #    Division of roles: sector diversification = FOCUS pair_block / portfolio_risk_manager.check_correlation_limit on autopilot slot expansion,
+                        #             coin conflict = already handled by owner_blocked / dup_blocked. → Removed the wrongly borrowed dead call.
 
-                        # 3) Strategy Loss Cooldown: 3연패 시 30분 쿨다운
+                        # 3) Strategy Loss Cooldown: 30-minute cooldown after 3 consecutive losses
                         if not _risk_blocked:
                             try:
                                 _cd_until = self._strategy_loss_cooldown_until.get(strategy, 0.0)
@@ -580,7 +580,7 @@ class ApproveMixin:
                             except (KeyError, AttributeError, TypeError, ValueError) as exc:
                                 logger.warning("[APPROVE] Strategy Loss Cooldown: %s", exc, exc_info=True)
 
-                        # 4) BTC Guard: BTC 급락 시 CONTRARIAN 외 차단
+                        # 4) BTC Guard: on a BTC plunge, block everything except CONTRARIAN
                         if not _risk_blocked and strategy != "CONTRARIAN":
                             try:
                                 _btc_guard_on = bool(getattr(self.system, "btc_guard_enabled", False))
@@ -602,7 +602,7 @@ class ApproveMixin:
                             logger.info("[Autopilot] Skip stale item %s (age=%.0fs > %.0fs)", market, _item_age_sec, _max_age_sec)
                             continue
 
-                        # ── 예산 재계산 (승인 시점 equity 기반) ──
+                        # ── Budget recalculation (based on equity at approval time) ──
                         budget_usdt = None
                         if apply_budget:
                             try:
@@ -613,15 +613,15 @@ class ApproveMixin:
                                     _eq = float(getattr(self.system, "equity_usdt", 0) or 0)
                                 _dr = float(getattr(self.system, "deploy_ratio", 1.0) or 1.0)
                                 _total_cap = _eq * _dr
-                                # [2026-05-30] Per-strategy explicit budget — plugin 자체 풀 격리
-                                # 부모님 결단: "각 전략별 예산을 정해주면 그 안에서 자동배분"
-                                # budget > 0 → plugin 자체 풀 (다른 전략과 충돌 X)
-                                # budget = 0 → 옛 자동 배분 (호환성 fallback)
+                                # [2026-05-30] Per-strategy explicit budget — isolate the plugin's own pool
+                                # Owner's decision: "Set a budget per strategy and auto-allocate within it"
+                                # budget > 0 → plugin's own pool (no conflict with other strategies)
+                                # budget = 0 → legacy auto-allocation (compatibility fallback)
                                 _strat_budget_attr = f"reserved_{str(strategy or '').lower()}_budget_usdt"
                                 _strat_budget = float(getattr(self.system, _strat_budget_attr, 0.0) or 0.0)
                                 if _strat_budget > 0:
                                     _total_cap = min(_strat_budget, _total_cap)
-                                    logger.info("[Autopilot] %s 자체 예산 적용: $%.0f (전체 자본 $%.0f 중)",
+                                    logger.info("[Autopilot] %s own budget applied: $%.0f (of total capital $%.0f)",
                                                  strategy, _strat_budget, _eq * _dr)
                                 _active_n = len(self.system.oma_registry.list_active())
 
@@ -660,10 +660,10 @@ class ApproveMixin:
                                     b = float(it.get("suggested_budget_usdt") or it.get("budget") or 0.0)
                                     if b > 0: budget_usdt = b
                                 except (TypeError, ValueError):
-                                    logger.warning("[Autopilot] Step4 예산 추출 실패: %s → budget=None", market)
+                                    logger.warning("[Autopilot] Step4 budget extraction failed: %s → budget=None", market)
                                     budget_usdt = None
 
-                        # ── 2026-03-10: 승인 직전 최신 전략 소유 재확인 (중복 배정 방지) ──
+                        # ── 2026-03-10: Re-verify latest strategy ownership just before approval (prevent duplicate assignment) ──
                         try:
                             _fresh_snap = self.system.oma_registry.snapshot()
                             for _fb in ("active", "watch", "recovery"):
@@ -684,7 +684,7 @@ class ApproveMixin:
                             logger.warning("[Autopilot] StopIteration during duplicate assignment check for %s", market, exc_info=True)
                             continue
                         except (KeyError, AttributeError, TypeError, ValueError):
-                            logger.warning("[Autopilot] 중복 배정 방지 체크 실패: %s — 이중 배정 위험", market, exc_info=True)
+                            logger.warning("[Autopilot] duplicate-assignment guard check failed: %s — double assignment risk", market, exc_info=True)
 
                         try:
                             self.system.oma_set_market(
@@ -698,7 +698,7 @@ class ApproveMixin:
                                 autopilot_tracker.record_decision(market, "WATCH", str(to_state.value), strategy, "reserved_approve autopilot_autoapprove")
                             except (AttributeError, TypeError, ValueError) as exc:
                                 logger.warning("[APPROVE] tracker record_decision: %s", exc, exc_info=True)
-                            # 추천 파라미터 추출 및 적용 (전략별 추천 API에서 제공)
+                            # Extract and apply recommended parameters (provided by the per-strategy recommendation API)
                             recommended_params = None
                             try:
                                 rp = it.get("recommended_params")
@@ -755,7 +755,7 @@ class ApproveMixin:
                 try:
                     self.system.ledger.append("AUTOPILOT_STEP_ERROR", error=str(exc))
 
-                    # [2026-02-03] Autopilot 에러 시 Telegram 알림
+                    # [2026-02-03] Telegram notification on Autopilot error
                     try:
                         from app.notify.telegram import send_telegram
                         send_telegram(

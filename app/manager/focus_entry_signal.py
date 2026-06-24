@@ -39,8 +39,8 @@ def check_primary_sig(
     # Zone prices for PA location validation
     zone_prices = _extract_zone_prices(zones)
 
-    # Detect PA patterns — ★ C1 FIX: 마지막 2개 캔들 제외하고 PA 검출
-    # (마지막 2개는 post-PA 검증용으로 validate_sig에 전달)
+    # Detect PA patterns — ★ C1 FIX: detect PA excluding the last 2 candles
+    # (the last 2 are passed to validate_sig for post-PA verification)
     if len(candles) < 4:
         return None
     pa_signals = detect_pa_patterns(candles[:-2], zone_prices=zone_prices)
@@ -70,7 +70,7 @@ def check_primary_sig(
                 break
 
     # Validate SIG (wick integrity)
-    # ★ C1 FIX: candles[-2:]를 전달하여 실제 wick 파괴 여부 검증
+    # ★ C1 FIX: pass candles[-2:] to verify actual wick destruction
     if len(candles) >= 4:
         sig_result = validate_sig(best_pa, candles[-2:])
         if sig_result.valid:
@@ -96,17 +96,17 @@ def check_m5_entry(
     btc_price: float = 0.0,
     zones: Optional[List[Dict]] = None,
 ) -> Optional[Dict]:
-    """M5 정밀 진입 — 4단계 멀티 타임프레임 정렬 확인 후 진입.
+    """M5 precision entry — enter after confirming 4-stage multi-timeframe alignment.
 
-    멀티 타임프레임 계층:
-      H4: 방향 + 존 (이미 WATCHING 진입 조건으로 확인됨)
-      H1: 중간 추세 정렬 — API 1회
-      30M/15M: 단기 모멘텀 — M5 캔들에서 파생 (추가 API 0)
-      M5: 정밀 진입 타이밍
+    Multi-timeframe hierarchy:
+      H4: direction + zone (already confirmed by WATCHING entry condition)
+      H1: mid-term trend alignment — 1 API call
+      30M/15M: short-term momentum — derived from M5 candles (0 extra API)
+      M5: precision entry timing
 
-    H4+H1 일치 → 첫 반전 캔들에 즉시 진입 (확신)
-    H4만, H1 횡보 → PA 패턴 필요 (신중)
-    H4↔H1 충돌 → 진입 안 함 (위험)
+    H4+H1 match → enter immediately on first reversal candle (high conviction)
+    H4 only, H1 sideways → PA pattern required (cautious)
+    H4↔H1 conflict → no entry (risky)
 
     Returns {"enter": True, "direction": ..., "price": ..., "atr": ...} or None.
     """
@@ -128,10 +128,10 @@ def check_m5_entry(
     if atr <= 0:
         return None
 
-    # ── H1 추세 정렬 체크 ──
-    h1_aligned = False    # H1이 진입 방향과 같은가
-    h1_neutral = False    # H1이 횡보인가
-    h1_opposed = False    # H1이 반대 방향인가
+    # ── H1 trend alignment check ──
+    h1_aligned = False    # is H1 in the same direction as entry
+    h1_neutral = False    # is H1 sideways
+    h1_opposed = False    # is H1 in the opposite direction
     try:
         h1_raw = client.get_kline(market, interval="60", limit=20)
         h1_candles = _raw_to_ohlcv(h1_raw)
@@ -148,27 +148,27 @@ def check_m5_entry(
             logger.debug("[FOCUS_ENTRY] H1 trend=%s, dir=%s → aligned=%s", h1_trend, direction, h1_aligned)
     except Exception as exc:
         logger.debug("[FOCUS_ENTRY] H1 check failed: %s — skip entry (no H1 data)", exc)
-        return None  # H1 데이터 없으면 진입 차단 (neutral 기본값 금지)
+        return None  # block entry if no H1 data (no defaulting to neutral)
 
-    # ── H1 반대 방향이면 진입 안 함 ──
+    # ── if H1 is opposite direction, no entry ──
     if h1_opposed:
         logger.debug("[FOCUS_ENTRY] H1 opposed to %s — skip", direction)
         return None
 
-    # ── 30M/15M 모멘텀 체크 (M5 캔들에서 파생, 추가 API 0) ──
-    # 30M = M5 6개, 15M = M5 3개의 방향성 확인
-    m15_ok = True   # 15M 모멘텀이 진입 방향인가
-    m30_ok = True   # 30M 모멘텀이 진입 방향인가
+    # ── 30M/15M momentum check (derived from M5 candles, 0 extra API) ──
+    # 30M = 6 M5 candles, 15M = direction of 3 M5 candles
+    m15_ok = True   # is 15M momentum in entry direction
+    m30_ok = True   # is 30M momentum in entry direction
     if len(candles) >= 6:
-        # 15M: 최근 M5 3개의 close 방향
+        # 15M: close direction of recent 3 M5 candles
         c3 = candles[-3:]
         m15_move = c3[-1].close - c3[0].open
         if direction == "LONG" and m15_move < -atr * 0.1:
-            m15_ok = False  # 15M이 하락 중 — LONG 위험
+            m15_ok = False  # 15M falling — LONG risky
         elif direction == "SHORT" and m15_move > atr * 0.1:
-            m15_ok = False  # 15M이 상승 중 — SHORT 위험
+            m15_ok = False  # 15M rising — SHORT risky
 
-        # 30M: 최근 M5 6개의 close 방향
+        # 30M: close direction of recent 6 M5 candles
         c6 = candles[-6:]
         m30_move = c6[-1].close - c6[0].open
         if direction == "LONG" and m30_move < -atr * 0.15:
@@ -176,7 +176,7 @@ def check_m5_entry(
         elif direction == "SHORT" and m30_move > atr * 0.15:
             m30_ok = False
 
-    # 30M이 반대 방향이면 진입 차단 (15M은 반전 초기일 수 있으므로 허용)
+    # block entry if 30M is opposite direction (15M allowed since it may be early reversal)
     if not m30_ok:
         logger.debug("[FOCUS_ENTRY] 30M momentum opposed to %s — skip", direction)
         return None
@@ -193,11 +193,11 @@ def check_m5_entry(
         except Exception:
             pass
 
-    # ── 직전 급변동 필터: 꼭대기/바닥 추격 방지 ──
-    # 최근 M5 2개 캔들이 ATR×2 이상 한 방향으로 급등/급락했으면
-    # 그 방향 진입 차단 (이미 늦었다 — 되돌림 위험)
+    # ── recent spike filter: prevent chasing tops/bottoms ──
+    # if the recent 2 M5 candles surged/dropped ATR×2+ in one direction,
+    # block entry in that direction (already too late — pullback risk)
     if len(candles) >= 3 and atr > 0:
-        recent_move = candles[-1].close - candles[-3].open  # 최근 10분 변화
+        recent_move = candles[-1].close - candles[-3].open  # change over recent 10 minutes
         spike_threshold = atr * 2.0
         if direction == "LONG" and recent_move > spike_threshold:
             logger.info("[FOCUS_ENTRY] SPIKE GUARD: %s LONG blocked — recent 2-candle surge %.4f > ATR×2 (%.4f). Chasing top.",
@@ -212,7 +212,7 @@ def check_m5_entry(
     prev = candles[-2]
     avg_body = sum(c.body_len for c in candles[-6:]) / 6 if len(candles) >= 6 else last.body_len
 
-    # ── 경로 1: H4+H1+15M 정렬 → 첫 반전 캔들에 즉시 진입 ──
+    # ── Path 1: H4+H1+15M aligned → enter immediately on first reversal candle ──
     if h1_aligned and m15_ok:
         reversal = False
         if direction == "LONG":
@@ -236,7 +236,7 @@ def check_m5_entry(
                 "candle_score": _candle_read_5step(candles[-10:], direction),
             }
 
-    # ── M5 구조 분석 (경로 2 필터용) ──
+    # ── M5 structure analysis (for Path 2 filter) ──
     m5_trend_opposed = False
     try:
         m5_struct = analyze_structure(candles, lookback=3)
@@ -247,10 +247,10 @@ def check_m5_entry(
             m5_trend_opposed = True
         logger.debug("[FOCUS_ENTRY] M5 trend=%s, dir=%s → opposed=%s", m5_trend, direction, m5_trend_opposed)
     except Exception:
-        pass  # M5 분석 실패 시 필터 비활성 (보수적)
+        pass  # disable filter on M5 analysis failure (conservative)
 
-    # ── 경로 2: H1 횡보 → PA 패턴 필요 (신중한 진입) ──
-    # ★ M5 추세가 반대이면 PA 패턴만으로 역추세 진입 차단
+    # ── Path 2: H1 sideways → PA pattern required (cautious entry) ──
+    # ★ if M5 trend is opposed, block counter-trend entry on PA pattern alone
     if h1_neutral or h1_aligned:
         if m5_trend_opposed and not h1_aligned:
             logger.debug("[FOCUS_ENTRY] Path2 blocked: M5 trend opposed + H1 neutral — skip %s", direction)
@@ -269,7 +269,7 @@ def check_m5_entry(
                             "candle_score": _candle_read_5step(candles[-10:], direction),
                         }
 
-    # ── 경로 3: H1 정렬 + SW Break ──
+    # ── Path 3: H1 aligned + SW Break ──
     if h1_aligned:
         break_detected = _detect_m5_break(candles, direction)
         if break_detected:
@@ -301,11 +301,11 @@ def _detect_m5_break(candles: List, direction: str) -> Optional[str]:
 
     recent = candles[-10:]
 
-    # 최소 움직임 기준: 5봉 전체 이동폭이 최근 평균 캔들 크기의 2배 이상
+    # minimum move threshold: total 5-bar range >= 2x recent avg candle size
     avg_body = sum(c.body_len for c in recent) / len(recent) if recent else 0
     if avg_body <= 0:
-        return None  # 캔들 움직임 없음 — 분석 불가
-    min_move = avg_body * 2.0  # 노이즈가 아닌 실질적 움직임
+        return None  # no candle movement — cannot analyze
+    min_move = avg_body * 2.0  # substantive move, not noise
 
     if direction == "LONG":
         # Pattern 1: flat bottom + breakout above
@@ -317,14 +317,14 @@ def _detect_m5_break(candles: List, direction: str) -> Optional[str]:
             if breakout > 0 and breakout >= avg_body * 0.5:
                 return "sw_break"
 
-        # Pattern 2: HH + HL sequence — 실질적 상승폭 검증
+        # Pattern 2: HH + HL sequence — verify substantive upward move
         highs = [c.high for c in recent[-5:]]
         lows_r = [c.low for c in recent[-5:]]
         if all(highs[i] <= highs[i+1] for i in range(len(highs)-1)):
             if all(lows_r[i] <= lows_r[i+1] for i in range(len(lows_r)-1)):
                 total_move = highs[-1] - lows_r[0]
                 if total_move >= min_move:
-                    # 추가: 마지막 캔들이 양봉이어야 함 (확인봉)
+                    # also: the last candle must be bullish (confirmation candle)
                     if recent[-1].is_bullish and recent[-1].body_len >= avg_body * 0.8:
                         return "trend_hh_hl"
 
@@ -338,7 +338,7 @@ def _detect_m5_break(candles: List, direction: str) -> Optional[str]:
             if breakdown > 0 and breakdown >= avg_body * 0.5:
                 return "sw_break"
 
-        # Pattern 2: LH + LL — 실질적 하락폭 검증
+        # Pattern 2: LH + LL — verify substantive downward move
         highs_r = [c.high for c in recent[-5:]]
         lows = [c.low for c in recent[-5:]]
         if all(highs_r[i] >= highs_r[i+1] for i in range(len(highs_r)-1)):
@@ -390,7 +390,7 @@ def _candle_read_5step(candles: List, direction: str) -> int:
     if len(candles) >= 5:
         mid_price = (candles[-5].high + candles[-5].low) / 2
         current = candles[-1].close
-        # ★ M20 FIX: LONG은 "아래서 올라옴", SHORT는 "위에서 내려옴" 구분
+        # ★ M20 FIX: distinguish LONG "coming up from below" vs SHORT "coming down from above"
         if direction == "LONG" and current > mid_price and abs(current - mid_price) / mid_price < 0.003:
             score += 1
         elif direction == "SHORT" and current < mid_price and abs(current - mid_price) / mid_price < 0.003:

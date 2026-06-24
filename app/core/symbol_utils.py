@@ -1,11 +1,11 @@
 # ============================================================
 # File: app/core/symbol_utils.py
-# Autocoin OS v3-H — 심볼 변환 유틸리티 (Bybit 전용)
+# Autocoin OS v3-H — Symbol conversion utilities (Bybit only)
 # ============================================================
 """
-거래소별 심볼 형식 변환 유틸리티.
+Per-exchange symbol format conversion utilities.
 
-Bybit USDT 마켓: BTCUSDT, ETHUSDT
+Bybit USDT market: BTCUSDT, ETHUSDT
 """
 
 from __future__ import annotations
@@ -16,24 +16,24 @@ from app.core.currency import Q
 
 
 def normalize_symbol(symbol: str, target: str = "ccxt") -> str:
-    """어떤 형식이든 목표 형식으로 정규화.
+    """Normalize any format into the target format.
 
     Args:
-        symbol: 입력 심볼 (어떤 형식이든)
+        symbol: input symbol (any format)
         target:
-            - "ccxt": "BTC/USDT" (ccxt 표준)
+            - "ccxt": "BTC/USDT" (ccxt standard)
             - "bybit": "BTCUSDT"
-            - "ws": "btcusdt" (WS용)
+            - "ws": "btcusdt" (for WS)
 
     Returns:
-        정규화된 심볼
+        normalized symbol
     """
     symbol = str(symbol).upper().strip()
 
-    # Q를 사용하여 base 추출
+    # Extract base using Q
     base = Q.extract_base(symbol)
 
-    # 목표 형식으로 변환
+    # Convert to target format
     if target == "ccxt":
         return Q.market_ccxt(base)
     elif target == "bybit":
@@ -45,7 +45,7 @@ def normalize_symbol(symbol: str, target: str = "ccxt") -> str:
 
 
 def extract_base_currency(symbol: str) -> str:
-    """심볼에서 기본 통화(베이스) 추출.
+    """Extract the base currency from a symbol.
 
     Examples:
         >>> extract_base_currency("BTCUSDT")
@@ -57,7 +57,7 @@ def extract_base_currency(symbol: str) -> str:
 
 
 def get_quote_currency(symbol: str) -> str:
-    """심볼에서 기축 통화(쿼트) 추출.
+    """Extract the quote currency from a symbol.
 
     Examples:
         >>> get_quote_currency("BTCUSDT")

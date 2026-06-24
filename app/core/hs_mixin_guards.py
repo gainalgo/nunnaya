@@ -1,9 +1,9 @@
 """Phase 5D mixin -- guard / safety / throttle methods.
 
 ── ASYNC SAFETY RULES ──
-이 파일의 함수는 async context(이벤트 루프)에서 호출됨.
-- requests.get/post 직접 호출 금지 → asyncio.to_thread() 필수
-- 고점/캔들 조회는 candle_cache 또는 price_store에서만 (HTTP 금지)
+Functions in this file are called from an async context (event loop).
+- Do not call requests.get/post directly → asyncio.to_thread() is required
+- High/candle lookups must come only from candle_cache or price_store (no HTTP)
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ class GuardsMixin:
     # TP helper
     # ------------------------------------------------------------------
     def _get_effective_tp_for_market(self, ctx) -> float:
-        """컨텍스트에서 현재 전략의 effective TP%를 가져온다."""
+        """Get the current strategy's effective TP% from the context."""
         try:
             engine = getattr(self, "engine", None)
             if engine is None:
@@ -50,17 +50,18 @@ class GuardsMixin:
     # Market regime inference
     # ------------------------------------------------------------------
     def _infer_market_regime(self, *, ctx: HyperEngineContext, price: float) -> Tuple[str, Optional[float]]:
-        """최근 가격 변화율로 단순 상승/하락 레짐을 분류한다.
+        """Classify a simple up/down regime from the recent price change rate.
 
-        반환:
+        Returns:
             (regime, change_pct)
 
         - regime: "BULL" | "BEAR" | "NEUTRAL" | "UNKNOWN"
-        - change_pct: lookback 구간 기준 변화율(%). 계산 불가 시 None.
+        - change_pct: change rate (%) over the lookback window. None if not computable.
 
         NOTE:
-        - 이 값은 '진입/재진입 가드'를 위한 보조 정보다.
-        - 신호 생성(전략)과 분리되어 있어, 전략이 무엇이든 동일한 안전 레이어를 적용할 수 있다.
+        - This value is auxiliary info for the 'entry/re-entry guard'.
+        - It is decoupled from signal generation (strategy), so the same safety
+          layer applies regardless of which strategy is active.
         """
         try:
             last = float(price)
@@ -89,7 +90,7 @@ class GuardsMixin:
         if n < 5:
             return "UNKNOWN", None
 
-        # lookback 정규화
+        # normalize lookback
         if lookback <= 0:
             lookback = min(300, n - 1)
         lookback = min(int(lookback), n - 1)
@@ -102,7 +103,7 @@ class GuardsMixin:
             try:
                 self.ledger.append("SYSTEM_HELPER_ERROR", where="infer_market_regime:base", error=str(exc))
             except (AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[GUARD] lookback 정규화: %s", exc, exc_info=True)
+                logger.warning("[GUARD] normalize lookback: %s", exc, exc_info=True)
             return "UNKNOWN", None
 
         if base <= 0.0:
@@ -110,7 +111,7 @@ class GuardsMixin:
 
         change_pct = (last - base) / base * 100.0
 
-        # 모멘텀(직전 tick 대비)
+        # momentum (vs. previous tick)
         mom = None
         try:
             if n >= 2:
@@ -146,16 +147,16 @@ class GuardsMixin:
         candle_unit_min: int,
         cache_sec: float,
     ) -> Tuple[Optional[float], str]:
-        """최근 N시간 고점을 계산한다 (api + local fallback).
+        """Compute the recent N-hour high (api + local fallback).
 
-        반환:
+        Returns:
             (recent_high, source)
             source: "api", "local", "api+local", "none"
 
-        설계:
-        - Bybit 모드에서는 public candles(분봉)에서 고점을 우선 계산한다.
-        - API 실패/제한 시 ctx.price_history의 local high로 fail-open한다.
-        - 과도한 API 호출을 막기 위해 짧은 TTL 캐시를 사용한다.
+        Design:
+        - In Bybit mode, the high is computed primarily from public candles (minute bars).
+        - On API failure/limit, fail-open to the local high from ctx.price_history.
+        - A short TTL cache is used to avoid excessive API calls.
         """
         local_high: Optional[float] = None
         try:
@@ -203,8 +204,8 @@ class GuardsMixin:
                     logger.warning("[Guards] cached high parse error for %s", market, exc_info=True)
                     api_high = None
 
-            # [2026-03-30] requests.get 제거 — 이벤트 루프 블로킹 원인.
-            # candle_loader 캐시에서 고점 조회 (HTTP 호출 없음, 메모리만)
+            # [2026-03-30] removed requests.get — it was blocking the event loop.
+            # Look up the high from the candle_loader cache (no HTTP call, memory only)
             if api_high is None:
                 try:
                     from app.backtest.candle_loader import CandleLoader
@@ -245,10 +246,10 @@ class GuardsMixin:
         last_exit_price: float,
         overrides: Optional[Dict[str, Any]] = None,
     ) -> Optional[float]:
-        """직전 EXIT 가격을 기준으로 재진입 한계가격(ceiling)을 계산한다.
+        """Compute the re-entry ceiling price based on the last EXIT price.
 
-        - fee_rate는 round-trip(매도+매수) 2회분을 보수적으로 반영한다.
-        - slippage/spread/extra bps는 price 기준 추가 버퍼로 사용한다.
+        - fee_rate conservatively reflects a round-trip (sell + buy), i.e. 2x.
+        - slippage/spread/extra bps are used as an additional price-based buffer.
         """
         try:
             lep = float(last_exit_price)
@@ -285,7 +286,7 @@ class GuardsMixin:
         bps_total = max(0.0, slip_bps + sprd_bps + extra_bps)
         cost_pct = max(0.0, float(fee_rate) * 2.0 + (bps_total / 10000.0))
 
-        # misconfig 방지: 20% 이상은 비정상으로 보고 캡
+        # guard against misconfig: treat >= 20% as abnormal and cap it
         cost_pct = min(cost_pct, 0.20)
 
         ceiling = lep * (1.0 - cost_pct)
@@ -302,10 +303,10 @@ class GuardsMixin:
         reason: str,
         action: str = "cooldown",
     ) -> None:
-        """전역 BUY 쿨다운을 설정한다. (SELL은 계속 허용)
+        """Set a global BUY cooldown. (SELL remains allowed)
 
-        - _handle_intent(BUY)에서 이 값을 참조하여 신규 진입을 차단한다.
-        - 시장별(entry_block_until_ts)에도 전파하여 UI/관측이 가능하도록 한다.
+        - _handle_intent(BUY) references this value to block new entries.
+        - It is also propagated per-market (entry_block_until_ts) for UI/observability.
         """
         try:
             until = float(until_ts)
@@ -327,7 +328,7 @@ class GuardsMixin:
         if reason:
             self._global_entry_block_reason = str(reason)
 
-        # ACTIVE 컨텍스트에 전파(관측/일관성 목적)
+        # propagate to ACTIVE contexts (for observability/consistency)
         try:
             ctx_map = self.coordinator.get_contexts()
             for mk, ctx in ctx_map.items():
@@ -344,7 +345,7 @@ class GuardsMixin:
         except (AttributeError, TypeError) as exc:
             logger.warning("[GUARD] ACTIVE context propagation: %s", exc, exc_info=True)
 
-        # 로그(짧은 주기 스팸 방지)
+        # log (throttle to avoid short-interval spam)
         try:
             last = float(getattr(self, "_global_entry_block_last_log_ts", 0.0) or 0.0)
         except (TypeError, ValueError):
@@ -368,13 +369,13 @@ class GuardsMixin:
     # Safety: Global drawdown guard
     # --------------------------------------------------------
     def _check_drawdown_guard(self, *, equity_usdt: float, reason: str = "") -> None:
-        """계정 equity 기반 최대 손실(Drawdown) 가드.
+        """Max-loss (drawdown) guard based on account equity.
 
-        - OMA_DRAWDOWN_GUARD=1일 때 동작.
-        - base_equity 대비 (base - equity)/base 가 threshold를 넘으면:
-            * COOLDOWN     : 일정 시간 BUY 차단(자동 해제)
-            * RECOVERY     : BUY 차단 + ACTIVE → RECOVERY 승격(운영자 확인 필요)
-            * EMERGENCY_STOP : BUY 차단 + ACTIVE → RECOVERY 승격(동일 동작; 명시적 이름)
+        - Active when OMA_DRAWDOWN_GUARD=1.
+        - When (base - equity)/base relative to base_equity exceeds the threshold:
+            * COOLDOWN     : block BUY for a period (auto-released)
+            * RECOVERY     : block BUY + promote ACTIVE → RECOVERY (operator confirmation needed)
+            * EMERGENCY_STOP : block BUY + promote ACTIVE → RECOVERY (same behavior; explicit name)
         """
         if not bool(getattr(self, "drawdown_guard", False)):
             return
@@ -391,7 +392,7 @@ class GuardsMixin:
         if eq <= 0.0:
             return
 
-        # base 설정: fixed_principal 모드면 principal_base_equity를 우선 사용
+        # set base: in fixed_principal mode, prefer principal_base_equity
         base: Optional[float] = None
         try:
             b = getattr(self, "_principal_base_equity_usdt", None)
@@ -411,7 +412,7 @@ class GuardsMixin:
                 base = None
 
         if base is None:
-            # 최초 1회 base를 설정하고 종료
+            # set base once on first run, then return
             try:
                 self._drawdown_base_equity_usdt = float(eq)
             except (TypeError, ValueError) as exc:
@@ -449,7 +450,7 @@ class GuardsMixin:
             f"(base={float(base):.0f} equity={float(eq):.0f})"
         )
 
-        # 너무 자주 반복 트리거 방지(단, COOLDOWN은 연장 가능)
+        # avoid triggering too frequently (though COOLDOWN can be extended)
         if min_interval > 0 and (now - last) < min_interval:
             if action == "COOLDOWN":
                 cd = float(getattr(self, "drawdown_cooldown_sec", 0.0) or 0.0)
@@ -477,7 +478,7 @@ class GuardsMixin:
             message=msg,
         )
 
-        # 1) COOLDOWN: 자동 해제형(일시 정지)
+        # 1) COOLDOWN: auto-released (temporary pause)
         if action == "COOLDOWN":
             cd = float(getattr(self, "drawdown_cooldown_sec", 0.0) or 0.0)
             if cd > 0.0:
@@ -490,7 +491,7 @@ class GuardsMixin:
                 self._send_telegram_safe("[AUTOCOIN] DRAWDOWN COOLDOWN\n" + msg)
             return
 
-        # 2) RECOVERY / EMERGENCY_STOP: 운영자 개입형(한 번 걸리면 latch)
+        # 2) RECOVERY / EMERGENCY_STOP: operator-intervention type (latches once tripped)
         if bool(getattr(self, "_drawdown_latched", False)):
             return
         try:
@@ -498,7 +499,7 @@ class GuardsMixin:
         except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
             logger.warning("[GUARD] drawdown latch set: %s", exc, exc_info=True)
 
-        # BUY 차단(SELL은 계속 허용)
+        # block BUY (SELL remains allowed)
         if not bool(getattr(self, "emergency_stop", False)):
             try:
                 self.set_emergency_stop(True, reason=msg)
@@ -507,7 +508,7 @@ class GuardsMixin:
                 self.emergency_stop = True
                 self.ledger.append("EMERGENCY_STOP_SET", enabled=True, reason=msg)
 
-        # ACTIVE → RECOVERY 승격
+        # promote ACTIVE → RECOVERY
         promoted: List[str] = []
         try:
             active = list(self.oma_registry.list_active())
@@ -553,7 +554,7 @@ class GuardsMixin:
         min_interval_sec: Optional[float] = None,
         **extra: Any,
     ) -> None:
-        """ENTRY_BLOCKED/EXIT_BLOCKED 로그를 스팸 방지(주기 제한)로 기록."""
+        """Record ENTRY_BLOCKED/EXIT_BLOCKED logs with spam prevention (rate limiting)."""
         interval = float(min_interval_sec) if min_interval_sec is not None else float(self._block_log_interval_sec or 0.0)
         if interval <= 0:
             # no throttle
@@ -572,7 +573,7 @@ class GuardsMixin:
     # Telegram helpers
     # ------------------------------------------------------------------
     def _send_telegram_safe(self, text: str) -> None:
-        """텔레그램 알림(실패해도 시스템 동작은 계속). daemon 스레드로 fire-and-forget."""
+        """Telegram notification (system keeps running even on failure). Fire-and-forget via a daemon thread."""
         import threading
         def _fire():
             try:
@@ -590,7 +591,7 @@ class GuardsMixin:
             return
 
     def _notify_soft_once(self, *, market: str, intent: str, msg: str) -> None:
-        """SOFT/WARN 메시지를 텔레그램으로 1회(주기 제한)만 알림."""
+        """Notify a SOFT/WARN message via Telegram once (rate-limited)."""
         if not isinstance(msg, str) or not msg:
             return
 
@@ -622,10 +623,10 @@ class GuardsMixin:
     # Orderbook block cooldown
     # ------------------------------------------------------------------
     def _apply_ob_block_cooldown(self, ctx: Any, market: str, cause: str) -> None:
-        """Orderbook guard(spread/stale) 차단 시 점진적 쿨다운 적용.
+        """Apply a progressive cooldown when the orderbook guard (spread/stale) blocks.
 
-        연속 차단이 누적될수록 쿨다운이 길어짐 (30s → 60s → 120s → ... max 300s).
-        10분간 차단이 없으면 streak이 리셋됨.
+        The more consecutive blocks accumulate, the longer the cooldown (30s → 60s → 120s → ... max 300s).
+        The streak resets if there are no blocks for 10 minutes.
         """
         try:
             base_cd = float(getattr(self, "entry_ob_block_cooldown_sec", 30.0) or 30.0)
@@ -645,7 +646,7 @@ class GuardsMixin:
             logger.warning("[GUARD] _apply_ob_block_cooldown: %s", exc, exc_info=True)
 
     def _reset_ob_block_streak(self, market: str) -> None:
-        """진입 성공 시 해당 마켓의 OB block streak 리셋."""
+        """Reset the OB block streak for the given market on a successful entry."""
         try:
             self._ob_block_streak.pop(market, None)
         except (AttributeError, TypeError) as exc:

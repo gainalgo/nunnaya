@@ -2,7 +2,7 @@
 # File: app/api/strategy_contrarian_router.py
 # Extracted from strategy_router.py — Phase 1-E (file diet)
 #
-# CONTRARIAN 전략 스캔/셋업/중지 엔드포인트
+# CONTRARIAN strategy scan/setup/stop endpoints
 # ============================================================
 
 from fastapi import APIRouter, Request, Query
@@ -48,7 +48,7 @@ def contrarian_list(request: Request):
     system = request.app.state.system
 
     def _get_price_safe(market: str) -> float:
-        """price_store에서 가격 조회"""
+        """Look up price from price_store."""
         return price_store.get_price(market) or 0
 
     items = []
@@ -140,9 +140,9 @@ def contrarian_scan(
 
     Benchmark types:
     - BTC: Bitcoin (default)
-    - ETH: Ethereum (알트코인 상관관계 높음)
-    - MARKET_AVG: 전체 시장 평균 수익률
-    - FEAR_GREED: Fear & Greed Index (40 이하 = 시장 하락)
+    - ETH: Ethereum (high correlation with altcoins)
+    - MARKET_AVG: average return across the whole market
+    - FEAR_GREED: Fear & Greed Index (<= 40 = market falling)
     """
     from app.core.contrarian_scanner import get_contrarian_scanner
 
@@ -156,7 +156,7 @@ def contrarian_scan(
     system = request.app.state.system
     scanner = get_contrarian_scanner()
 
-    # 마켓 리스트 설정
+    # Build the market list
     markets = []
     try:
         if hasattr(system, "coordinator") and hasattr(system.coordinator, "_contexts"):
@@ -234,8 +234,8 @@ class ContrarianSetupRequest(BaseModel):
     use_atr: bool = False
     rsi_filter: bool = False
     buy_now: bool = False
-    hold_sell: bool = False      # 손절 비활성화 (하락해도 보유 유지)
-    user_sell_only: bool = False # 수동 매도만 허용 (시스템 자동 매도 금지)
+    hold_sell: bool = False      # disable stop-loss (keep holding even on decline)
+    user_sell_only: bool = False # allow manual sells only (block automatic system sells)
 
     @property
     def budget(self) -> float:
@@ -261,14 +261,14 @@ def setup_contrarian_market(req: ContrarianSetupRequest, request: Request):
         system = request.app.state.system
         market = Q.normalize(req.market.strip().upper())
 
-        # CONTRARIAN은 BTC를 기준축으로 사용하므로 운용 대상에서 제외
+        # CONTRARIAN uses BTC as its benchmark axis, so exclude it as a tradable target
         if market == Q.market("BTC"):
             raise HTTPException(
                 status_code=400,
                 detail="BTCUSDT is benchmark-only and cannot be configured as CONTRARIAN.",
             )
 
-        # [2026-03-07] 수동 주문 슬롯 초과 체크 (+2 한도)
+        # [2026-03-07] Manual order slot overflow check (+2 limit)
         overflow_check = _check_manual_overflow(system, "CONTRARIAN", market)
         coin_warnings = _generate_coin_warnings(system, market, "CONTRARIAN")
         if not overflow_check["allowed"]:
@@ -306,8 +306,8 @@ def setup_contrarian_market(req: ContrarianSetupRequest, request: Request):
                     "trail_dist_pct": req.trail_dist_pct,
                     "use_atr": req.use_atr,
                     "rsi_filter": req.rsi_filter,
-                    "hold_sell": req.hold_sell,           # HOLD: 손절 비활성화
-                    "user_sell_only": req.user_sell_only, # LOCK: 수동 매도만 허용
+                    "hold_sell": req.hold_sell,           # HOLD: disable stop-loss
+                    "user_sell_only": req.user_sell_only, # LOCK: allow manual sells only
                 }
             }
         }

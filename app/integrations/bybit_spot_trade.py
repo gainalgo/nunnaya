@@ -1,18 +1,21 @@
 # -*- coding: utf-8 -*-
-"""Bybit V5 SPOT 트레이드 클라이언트 — SpotGazuaManager 의 client 인터페이스를 Bybit 현물로 어댑트.
+"""Bybit V5 SPOT trade client — adapts SpotGazuaManager's client interface to Bybit spot.
 
-[2026-06-17 부모] Bybit 현물부터 만들어 "USDT-현물 FOCUS" 기준판을 세운다(이후 Binance 현물은 상속).
-SpotGazuaManager 는 거래소 무관(client 메서드 인터페이스에만 의존)이라, Upbit 스타일 메서드를
-Bybit v5 spot 으로 구현하면 두뇌(스캔/진입/청산/점수)는 그대로 재사용된다.
+[2026-06-17 owner] Build Bybit spot first to establish the "USDT-spot FOCUS" reference base
+(Binance spot later inherits from this). SpotGazuaManager is exchange-agnostic (depends only on
+the client method interface), so implementing the Upbit-style methods on Bybit v5 spot lets the
+brain (scan/entry/exit/scoring) be reused as-is.
 
-핵심 매수/매도/잔고/주문/캔들은 BybitTradeClient(category="spot") 가 이미 제공 → 상속.
-빠진 공개 시장조회(시장목록/티커/현재가/호가)·헬퍼(open_orders/MIN_ORDER)만 채운다.
+Core buy/sell/balance/order/candle are already provided by BybitTradeClient(category="spot") → inherited.
+Only the missing public market queries (market list/ticker/price/orderbook) and helpers
+(open_orders/MIN_ORDER) are filled in here.
 
-KRW 현물과 다른 점:
-  - quote = USDT (KRW 아님). 심볼 = "BTCUSDT" (KRW-BTC 아님).
-    ※ Upbit base_currency("BTCUSDT")=="BTC" 이미 동작(to_upbit_market 이 USDT 접미사 처리) → 매니저 호환.
-  - 투자유의/주의환기(market_warning) 없음 → get_market_warnings() = {} (차단 안 함).
-  - 최소주문 = USDT notional (심볼별 min_notional 은 base 의 BybitInstrumentCache 가 처리).
+Differences from KRW spot:
+  - quote = USDT (not KRW). symbol = "BTCUSDT" (not KRW-BTC).
+    Note: Upbit base_currency("BTCUSDT")=="BTC" already works (to_upbit_market handles the USDT
+    suffix) → manager-compatible.
+  - No Korean-style investment-warning/caution (market_warning) → get_market_warnings() = {} (no blocking).
+  - Minimum order = USDT notional (per-symbol min_notional is handled by the base BybitInstrumentCache).
 """
 from __future__ import annotations
 
@@ -30,12 +33,12 @@ from app.integrations.bybit_trade import BybitTradeClient
 
 logger = logging.getLogger(__name__)
 
-# Upbit MIN_ORDER_KRW(5000) 자리에 들어갈 USDT 최소주문 코어스 floor (심볼별 정밀 min 은 base 가 검증).
+# Coarse USDT minimum-order floor that stands in for Upbit MIN_ORDER_KRW(5000) (per-symbol precise min validated by base).
 MIN_ORDER_USDT = 5.0
 
 
 def bybit_base_currency(symbol: str) -> str:
-    """Bybit 심볼("BTCUSDT") → base("BTC"). quote 접미사 제거. (Upbit base_currency 와 결과 일치 보조용)"""
+    """Bybit symbol ("BTCUSDT") → base ("BTC"). Strips the quote suffix. (Helper to match Upbit base_currency results)"""
     s = str(symbol).upper().replace("-", "").replace("/", "")
     for q in ("USDT", "USDC", "USD", "BTC", "ETH"):
         if s.endswith(q) and len(s) > len(q):
@@ -44,23 +47,23 @@ def bybit_base_currency(symbol: str) -> str:
 
 
 class BybitSpotTradeClient(BybitTradeClient):
-    """Bybit 현물(spot). UpbitTradeClient 인터페이스 호환 — BybitTradeClient(category="spot") 상속."""
+    """Bybit spot. Compatible with the UpbitTradeClient interface — inherits BybitTradeClient(category="spot")."""
 
-    # 매니저가 getattr(client, "MIN_ORDER_KRW", 5000.0) 로 읽음 (이름만 유지, 단위=USDT).
+    # Read by the manager via getattr(client, "MIN_ORDER_KRW", 5000.0) (name kept, unit=USDT).
     MIN_ORDER_KRW = MIN_ORDER_USDT
 
     def __init__(self, api_key: str = "", api_secret: str = "", *, timeout: float = 10.0):
         super().__init__(api_key or None, api_secret or None, timeout=timeout, category="spot")
         self._mkt_cache: tuple = (0.0, [])
 
-    # ── base 헬퍼 ─────────────────────────────────────────────────────
+    # ── base helper ───────────────────────────────────────────────────
     @staticmethod
     def base_currency(symbol: str) -> str:
         return bybit_base_currency(symbol)
 
-    # ── 시장 목록 (USDT 현물 전체) — Upbit shape 미러 ────────────────────
+    # ── Market list (all USDT spot) — mirrors Upbit shape ───────────────
     def get_all_markets(self) -> List[Dict[str, Any]]:
-        """USDT 현물 마켓 전체. Upbit shape({market, market_event}) 미러(현물 경고 없음=빈 event)."""
+        """All USDT spot markets. Mirrors Upbit shape({market, market_event}) (no spot warning = empty event)."""
         ts0, cached = self._mkt_cache
         if cached and (time.time() - ts0) < 300.0:
             return cached
@@ -85,13 +88,13 @@ class BybitSpotTradeClient(BybitTradeClient):
             return list(cached) if cached else []
 
     def get_market_warnings(self, *, ttl: float = 300.0) -> Dict[str, Dict[str, Any]]:
-        """Bybit 현물엔 한국식 투자유의/주의환기 없음 → 빈 dict(차단 안 함, fail-open)."""
+        """Bybit spot has no Korean-style investment warning/caution → empty dict (no blocking, fail-open)."""
         return {}
 
-    # ── 티커 / 현재가 — Upbit shape 미러 ────────────────────────────────
+    # ── Ticker / price — mirrors Upbit shape ────────────────────────────
     def get_tickers(self, markets: List[str]) -> List[Dict[str, Any]]:
-        """현재가+24h 거래대금. Upbit shape({market, trade_price, acc_trade_price_24h}) 미러.
-        markets 비면 전체(셀렉터 거래대금 랭킹용)."""
+        """Current price + 24h turnover. Mirrors Upbit shape({market, trade_price, acc_trade_price_24h}).
+        Empty markets = all (for selector turnover ranking)."""
         out: List[Dict[str, Any]] = []
         try:
             resp = bybit_get(BYBIT_MARKET_TICKERS, params={"category": "spot"}, timeout=self.timeout)
@@ -123,10 +126,10 @@ class BybitSpotTradeClient(BybitTradeClient):
             logger.warning("[BybitSpot] get_price %s failed: %s", market, e)
             return 0.0
 
-    # ── 호가창 — Upbit shape 미러 ───────────────────────────────────────
+    # ── Orderbook — mirrors Upbit shape ─────────────────────────────────
     def get_orderbook(self, market: str, *, depth: int = 15) -> Dict[str, Any]:
-        """Upbit shape({market, bids:[{price,size}], asks:[{price,size}], ts}) 미러.
-        Bybit v5 orderbook: b=[[price,size],...](매수 내림차순), a=[...](매도 오름차순)."""
+        """Mirrors Upbit shape({market, bids:[{price,size}], asks:[{price,size}], ts}).
+        Bybit v5 orderbook: b=[[price,size],...] (bids descending), a=[...] (asks ascending)."""
         sym = self._normalize_symbol(market)
         bids: List[Dict[str, float]] = []
         asks: List[Dict[str, float]] = []
@@ -146,7 +149,7 @@ class BybitSpotTradeClient(BybitTradeClient):
             logger.warning("[BybitSpot] get_orderbook %s failed: %s", market, e)
         return {"market": sym, "bids": bids, "asks": asks, "ts": 0}
 
-    # ── 미체결 주문 (Upbit open_orders 인터페이스) ──────────────────────
+    # ── Open orders (Upbit open_orders interface) ───────────────────────
     def open_orders(self, market: str, *, side: Optional[str] = None) -> List[Dict[str, Any]]:
         orders = self.list_wait_orders(market=market)
         if side:

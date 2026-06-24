@@ -1,8 +1,8 @@
 """
 HyperSystem Configuration Module
-- 환경변수 로드
-- UI settings 적용
-- 설정 검증
+- Load environment variables
+- Apply UI settings
+- Validate config
 
 [MIGRATED 2026-01-23] CoinStock → Autocoin
 [MIGRATED 2026-03-31] Bybit USDT → Bybit USDT
@@ -23,7 +23,7 @@ from app.core.constants import (
     env_int as _env_int,
 )
 
-# env_json_dict이 없을 수 있음 - 안전하게 처리
+# env_json_dict may not exist - handle safely
 try:
     from app.core.constants import env_json_dict as _env_json_dict
 except ImportError:
@@ -41,9 +41,9 @@ except ImportError:
 
 
 def load_hyper_system_config() -> Dict[str, Any]:
-    """HyperSystem 설정 로드.
-    
-    환경변수에서 모든 설정을 읽어 딕셔너리로 반환.
+    """Load HyperSystem config.
+
+    Reads all settings from environment variables and returns them as a dict.
     """
     config = {}
     
@@ -102,8 +102,8 @@ def load_hyper_system_config() -> Dict[str, Any]:
     config["reserved_gazua_n"] = _env_int("OMA_RESERVED_GAZUA_N", default=0)
     config["reserved_contrarian_n"] = _env_int("OMA_RESERVED_CONTRARIAN_N", default=0)
 
-    # [2026-05-30] Per-strategy ON/OFF toggle (부모님 9개월 통찰 — 슬롯 0도 idle 작동 차단)
-    # enabled=False → target 강제 0 → 후보 스캔 X → plugin.decide() 도 hold 즉시 반환
+    # [2026-05-30] Per-strategy ON/OFF toggle (9-month insight — slot 0 also blocks idle operation)
+    # enabled=False → target forced to 0 → no candidate scan → plugin.decide() also returns hold immediately
     config["reserved_pingpong_enabled"] = _env_bool("OMA_RESERVED_PINGPONG_ENABLED", default=True)
     config["reserved_autoloop_enabled"] = _env_bool("OMA_RESERVED_AUTOLOOP_ENABLED", default=True)
     config["reserved_ladder_enabled"] = _env_bool("OMA_RESERVED_LADDER_ENABLED", default=True)
@@ -113,9 +113,9 @@ def load_hyper_system_config() -> Dict[str, Any]:
     config["reserved_sniper_enabled"] = _env_bool("OMA_RESERVED_SNIPER_ENABLED", default=True)
     config["reserved_whale_enabled"] = _env_bool("OMA_RESERVED_WHALE_ENABLED", default=True)
 
-    # [2026-05-30] Per-strategy explicit budget (부모님 결단 — "모든 전략 동시 가동 가정")
-    # budget_usdt=0 → 옛 자동 배분 (호환성 fallback)
-    # budget_usdt>0 → 수동 지정 = plugin 자체 풀 격리 + 그 안에서 자동 배분
+    # [2026-05-30] Per-strategy explicit budget (decision — "assume all strategies run simultaneously")
+    # budget_usdt=0 → legacy auto allocation (compatibility fallback)
+    # budget_usdt>0 → manual override = isolate plugin's own pool + auto-allocate within it
     config["reserved_pingpong_budget_usdt"] = _env_float("OMA_RESERVED_PINGPONG_BUDGET_USDT", default=0.0)
     config["reserved_autoloop_budget_usdt"] = _env_float("OMA_RESERVED_AUTOLOOP_BUDGET_USDT", default=0.0)
     config["reserved_ladder_budget_usdt"] = _env_float("OMA_RESERVED_LADDER_BUDGET_USDT", default=0.0)
@@ -129,7 +129,7 @@ def load_hyper_system_config() -> Dict[str, Any]:
 
 
 def validate_config(config: Dict[str, Any]) -> List[str]:
-    """설정 유효성 검증. 오류 목록 반환."""
+    """Validate config. Returns a list of errors."""
     errors = []
     
     if config.get("deploy_ratio", 0) < 0 or config.get("deploy_ratio", 0) > 1:
@@ -145,13 +145,13 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
 
 
 def apply_ui_settings(config: Dict[str, Any], ui_settings: Dict[str, Any]) -> Dict[str, Any]:
-    """UI에서 설정된 값을 적용.
-    
-    UI 설정이 환경변수보다 우선.
+    """Apply values configured in the UI.
+
+    UI settings take precedence over environment variables.
     """
     result = dict(config)
-    
-    # 매핑: ui_key -> config_key
+
+    # mapping: ui_key -> config_key
     mappings = {
         "deploy_ratio": "deploy_ratio",
         "min_order_usdt": "min_order_usdt",

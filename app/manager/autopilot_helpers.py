@@ -9,7 +9,7 @@ from typing import Any, List
 
 
 def normalize_strategy_name(raw: Any) -> str:
-    """전략 이름 정규화. SNIPER(S)/SNIPERS → SNIPER 등."""
+    """Normalize strategy name. e.g. SNIPER(S)/SNIPERS → SNIPER."""
     s = str(raw or "").strip().upper()
     if s in ("SNIPER(S)", "SNIPERS"):
         return "SNIPER"
@@ -17,7 +17,7 @@ def normalize_strategy_name(raw: Any) -> str:
 
 
 def extract_row_strategy(row: Any) -> str:
-    """OMA row에서 전략 이름 추출. strategy 필드 우선, 없으면 reason에서 STRATEGY: 접두사 파싱."""
+    """Extract strategy name from an OMA row. Prefer the strategy field; otherwise parse the STRATEGY: prefix from reason."""
     if not isinstance(row, dict):
         return ""
     st = str(row.get("strategy") or "").strip().upper()
@@ -32,7 +32,7 @@ def extract_row_strategy(row: Any) -> str:
 
 
 def infer_strategy_from_reason(reasons: List[str]) -> str:
-    """reason 리스트에서 전략 추론."""
+    """Infer strategy from a list of reason strings."""
     for r in reasons:
         if isinstance(r, str) and r.upper().startswith("STRATEGY:"):
             return r.split(":", 1)[1].strip().upper() or "UNKNOWN"

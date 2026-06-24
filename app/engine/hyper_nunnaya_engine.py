@@ -2,9 +2,9 @@
 # File: app/engine/hyper_nunnaya_engine.py
 # Autocoin OS v3-H — Hyper Nunnaya Engine (Final AI Edition)
 # NOTE:
-# 이 엔진은 '판단자' 역할만 한다.
-# 거래 빈도는 StrategyPipeline / Risk / Allocation 설정에 강하게 의존한다.
-# 0건이 나오는 것은 버그가 아니라 설계 결과일 수 있다.
+# This engine acts only as a 'decision maker'.
+# Trade frequency depends strongly on StrategyPipeline / Risk / Allocation settings.
+# Zero trades may be a design outcome rather than a bug.
 # ============================================================
 from __future__ import annotations  # ✅ must be the first import (Python requirement)
 import json
@@ -36,12 +36,12 @@ _TPSL_STRATEGIES = (
 
 class HyperNunnayaEngine(HyperEngineBase):
     """
-    Autocoin OS v3-H 최종 엔진.
-    - 단일 엔진
-    - AI StrategyPipeline 기반
-    - 시장 적응형 리스크 제어
-    - 정책 자동 최적화
-    - Context(State Machine) 완전 통합
+    Autocoin OS v3-H final engine.
+    - Single engine
+    - Based on AI StrategyPipeline
+    - Market-adaptive risk control
+    - Automatic policy optimization
+    - Full Context(State Machine) integration
     """
 
     VERSION = "v3-H-FINAL"
@@ -174,7 +174,7 @@ class HyperNunnayaEngine(HyperEngineBase):
 
         step_idx = 0
         hold_hours = 0.0
-        # GAZUA는 장기보유 전략 — time_relax SL 축소 적용하지 않음
+        # GAZUA is a long-hold strategy — do not apply time_relax SL reduction
         _skip_time_relax = (strategy_mode.upper() == "GAZUA")
         if not _skip_time_relax and bool(policy.get("time_relax_enabled", True)):
             try:
@@ -210,26 +210,26 @@ class HyperNunnayaEngine(HyperEngineBase):
     # --------------------------------------------------------
     def tick(self, market: str, price: float, *args, **kwargs) -> Dict[str, Any]:
         """
-        TickLoop / Coordinator가 호출하는 공개 tick 메서드.
+        Public tick method called by TickLoop / Coordinator.
         """
         context = self._resolve_context(market, args, kwargs)
         return self._tick_impl(market, price, context)
 
     def _resolve_context(self, market: str, args: tuple, kwargs: dict) -> HyperEngineContext:
-        """Context 해석 및 생성."""
+        """Resolve and create the context."""
         context: Optional[HyperEngineContext] = None
-        
-        # 1) args에서 context 찾기
+
+        # 1) Find context in args
         if args and isinstance(args[0], HyperEngineContext):
             context = args[0]
-        
-        # 2) kwargs에서 context 찾기
+
+        # 2) Find context in kwargs
         if context is None:
             ctx_kw = kwargs.get("context")
             if isinstance(ctx_kw, HyperEngineContext):
                 context = ctx_kw
 
-        # 3) base에서 context 가져오기
+        # 3) Get context from base
         if context is None:
             if hasattr(self, "get_context"):
                 try:
@@ -251,7 +251,7 @@ class HyperNunnayaEngine(HyperEngineBase):
                 except (KeyError, AttributeError, TypeError) as exc:
                     logger.warning("[Engine] contexts dict lookup for %s failed: %s", market, exc)
 
-        # 4) 최후 수단: 새로 생성
+        # 4) Last resort: create a new one
         if context is None:
             try:
                 context = HyperEngineContext(market=market, engine_name=getattr(self, "engine_name", "nunnaya"))
@@ -270,10 +270,10 @@ class HyperNunnayaEngine(HyperEngineBase):
         return context
 
     # --------------------------------------------------------
-    # 초기 정책 설정
+    # Initial policy setup
     # --------------------------------------------------------
     def on_initialize(self, context: HyperEngineContext):
-        """context가 시장별로 생성될 때 호출됨. 초기 정책(Preset)을 지정한다."""
+        """Called when a context is created per market. Sets the initial policy (Preset)."""
         context.policy = {
             "name": "nunnaya",
             "params": {
@@ -288,33 +288,33 @@ class HyperNunnayaEngine(HyperEngineBase):
         }
 
     # --------------------------------------------------------
-    # v3-H 핵심 tick 구현 (리팩토링됨)
+    # v3-H core tick implementation (refactored)
     # --------------------------------------------------------
     def _tick_impl(self, market: str, price: float, context: HyperEngineContext) -> Dict[str, Any]:
         """
-        HyperNunnayaEngine의 실제 엔진 로직.
+        Actual engine logic of HyperNunnayaEngine.
         Brain → Judge → Risk → Optimizer → Fusion → Position Logic
         """
-        # 0) 초기화
+        # 0) Initialize
         if not context.policy:
             self.on_initialize(context)
 
         params = context.policy.get("params", {})
 
-        # 1) AI 파이프라인 실행
+        # 1) Run AI pipeline
         ai = self.pipeline.run(market=market, price=price, context=context)
         context.current_ai = ai
 
-        # 2) 신호 결정 (Arbiter)
+        # 2) Signal resolution (Arbiter)
         signal, strategy_out = self._resolve_signal(context, price, ai)
 
-        # 3) 의도(Intent) 생성
+        # 3) Build intent
         intent, profit = self._build_intent(context, price, params, ai, signal, strategy_out)
 
-        # 4) 진단 정보 부착
+        # 4) Attach diagnostics
         self._attach_diagnostics(context, ai, strategy_out)
 
-        # 5) 정책 업데이트 및 마무리
+        # 5) Policy update and finalize
         self._finalize_tick(context, params, signal, price)
 
         return {
@@ -334,8 +334,8 @@ class HyperNunnayaEngine(HyperEngineBase):
         self, context: HyperEngineContext, price: float, ai: Dict[str, Any]
     ) -> Tuple[str, Optional[Dict[str, Any]]]:
         """
-        신호 결정 로직.
-        우선순위: BASELINE > STRATEGY > AI > hold
+        Signal resolution logic.
+        Priority: BASELINE > STRATEGY > AI > hold
         """
         ai_signal = ai["signal"]
         final_signal = "hold"
@@ -350,7 +350,7 @@ class HyperNunnayaEngine(HyperEngineBase):
         ai_ctrl = controls.get("ai", {})
         strategy_ctrl = controls.get("strategy", {})
 
-        # 0) STRATEGY 플러그인 실행
+        # 0) Run STRATEGY plugin
         strategy_signal: Optional[str] = None
         if isinstance(strategy_ctrl, dict) and strategy_ctrl.get("enabled"):
             try:
@@ -376,11 +376,11 @@ class HyperNunnayaEngine(HyperEngineBase):
                     "meta": {},
                 }
 
-        # 1) BASELINE (최우선: 수동 강제 진입용)
+        # 1) BASELINE (highest priority: for manual forced entry)
         if base.get("enabled") and context.position is None and base.get("level", 0) >= 1:
             final_signal = "buy"
         else:
-            # 2) 기본 신호 소스 선택
+            # 2) Select the default signal source
             if isinstance(strategy_ctrl, dict) and strategy_ctrl.get("enabled") and strategy_signal in ("buy", "sell", "hold", "reserve"):
                 final_signal = str(strategy_signal)
             elif ai_ctrl.get("enabled"):
@@ -388,7 +388,7 @@ class HyperNunnayaEngine(HyperEngineBase):
             else:
                 final_signal = "hold"
 
-            # 3) RISK 차단 (sell은 차단하지 않음)
+            # 3) RISK block (does not block sell)
             if risk_ctrl.get("enabled") and final_signal == "buy":
                 brain = ai.get("brain", {})
                 vol = brain.get("volatility", 0)
@@ -410,19 +410,19 @@ class HyperNunnayaEngine(HyperEngineBase):
         signal: str,
         strategy_out: Optional[Dict[str, Any]],
     ) -> Tuple[Optional[Dict[str, Any]], float]:
-        """주문 의도(Intent) 생성."""
+        """Build the order intent."""
         intent = None
         profit = 0.0
-        
+
         is_live = str(getattr(context, "trading_mode", "")).upper() == "LIVE"
         has_position = bool(context.position)
         is_paper_position = has_position and context.position.get("source") == "paper"
 
-        # TP/SL 판단
+        # TP/SL decision
         should_sell, tp_hit, sl_hit, change_pct = self._check_tp_sl(context, price, params, strategy_out)
 
         # [FIX 2026-01-28] user_sell_only / hold_sell (GAZUA LOCK/HOLD)
-        # 실제 설정값은 context.controls.strategy.params에 저장됨
+        # The actual setting values are stored in context.controls.strategy.params
         strategy_params = {}
         try:
             controls = getattr(context, "controls", None)
@@ -431,16 +431,16 @@ class HyperNunnayaEngine(HyperEngineBase):
                 if isinstance(strategy_ctrl, dict):
                     strategy_params = strategy_ctrl.get("params", {}) or {}
         except (KeyError, AttributeError, TypeError) as exc:
-            logger.warning("[Engine] controls.strategy.params 읽기 실패: %s", exc)
-        
-        # user_sell_only (LOCK): 모든 자동 매도 비활성화
+            logger.warning("[Engine] failed to read controls.strategy.params: %s", exc)
+
+        # user_sell_only (LOCK): disable all automatic selling
         user_sell_only = bool(strategy_params.get("user_sell_only", False)) or bool(params.get("user_sell_only", False))
-        # hold_sell (HOLD): TP 자동 매도만 비활성화 (SL은 작동)
+        # hold_sell (HOLD): disable only TP auto-sell (SL still works)
         hold_sell = bool(strategy_params.get("hold_sell", False)) or bool(params.get("hold_sell", False))
-        
-        # 2026-01-30: SL Grace Period - 매수 후 5분간 SL 비활성화 (사자마자 손절 방지)
-        # [FIX 2026-02-19] position["entry_ts"]만 사용 (position["ts"]는 매도 시에도 갱신되므로 위험)
-        sl_grace_sec = float(strategy_params.get("sl_grace_sec", 300.0))  # 기본 5분
+
+        # 2026-01-30: SL Grace Period - disable SL for 5 min after buy (prevent instant stop-loss)
+        # [FIX 2026-02-19] use only position["entry_ts"] (position["ts"] is also updated on sell, so it is risky)
+        sl_grace_sec = float(strategy_params.get("sl_grace_sec", 300.0))  # default 5 min
         in_grace_period = False
         if has_position and sl_hit and sl_grace_sec > 0:
             try:
@@ -450,29 +450,29 @@ class HyperNunnayaEngine(HyperEngineBase):
                     elapsed = time.time() - float(entry_ts)
                     if elapsed < sl_grace_sec:
                         in_grace_period = True
-                        # Grace Period 동안 SL 비활성화
+                        # Disable SL during the Grace Period
                         sl_hit = False
-                        should_sell = tp_hit  # TP는 허용
+                        should_sell = tp_hit  # TP is allowed
             except (OSError, KeyError, AttributeError, TypeError, ValueError, OverflowError) as exc:
-                logger.warning("[Engine] Grace Period SL 비활성화 처리 실패: %s", exc)
-        
+                logger.warning("[Engine] Grace Period SL disable handling failed: %s", exc)
+
         if user_sell_only and should_sell and not hold_sell:
-            # LOCK: 자동 TP/SL 매도 완전 차단
+            # LOCK: fully block automatic TP/SL selling
             should_sell = False
             tp_hit = False
             sl_hit = False
         elif hold_sell and tp_hit and not sl_hit:
-            # HOLD: TP만 차단, SL은 허용
+            # HOLD: block only TP, allow SL
             should_sell = False
             tp_hit = False
 
-        # [FIX 2026-03-05] SNIPER sl_confirm 진행 중 → 엔진 즉시 SL 억제
-        # 플러그인이 "sniper:sl_confirming" reason으로 hold를 반환한 경우, 엔진 레벨 SL을 무시한다.
-        # 이를 통해 SniperPlugin의 sl_confirm_ticks(기본 3틱) noise defense가 실제 동작하게 된다.
-        # [2026-03-14] LongHold 전환/활성 중에도 엔진 TP/SL 억제 (꺼내주기 전에는 매도 금지)
-        # [2026-03-18] 플러그인 trailing 중 엔진 TP 매도 억제
-        #   플러그인이 arm_trail/trailing/trailing_active 등으로 hold를 반환하면
-        #   엔진이 독자적으로 tp_hit 매도하면 플러그인의 trailing stop이 무시됨
+        # [FIX 2026-03-05] SNIPER sl_confirm in progress → suppress engine SL immediately
+        # When the plugin returns hold with the "sniper:sl_confirming" reason, ignore engine-level SL.
+        # This lets SniperPlugin's sl_confirm_ticks (default 3 ticks) noise defense actually work.
+        # [2026-03-14] Also suppress engine TP/SL during LongHold transition/active (no sell before release)
+        # [2026-03-18] Suppress engine TP sell while the plugin is trailing
+        #   If the plugin returns hold via arm_trail/trailing/trailing_active etc.,
+        #   the engine selling on tp_hit independently would ignore the plugin's trailing stop
         if (sl_hit or tp_hit) and signal == "hold" and strategy_out:
             _sl_reason = str(strategy_out.get("reason") or "")
             if "sl_confirming" in _sl_reason:
@@ -486,12 +486,12 @@ class HyperNunnayaEngine(HyperEngineBase):
                 tp_hit = False
                 should_sell = bool(sl_hit)
 
-        # [FIX 2026-03-15] 플러그인이 hold를 반환했으면 엔진 독자 SL 매도 억제
-        # 플러그인이 sl_confirming, longhold_active 등으로 hold를 반환한 경우
-        # 엔진이 독자적으로 SL 매도하면 플러그인의 DCA/LongHold 전환이 무시됨
+        # [FIX 2026-03-15] If the plugin returned hold, suppress the engine's independent SL sell
+        # When the plugin returns hold via sl_confirming, longhold_active, etc.,
+        # the engine selling on SL independently would ignore the plugin's DCA/LongHold transition
         if signal == "hold" and has_position and sl_hit:
             _hold_reason = str((strategy_out or {}).get("reason") or "")
-            # sl_confirming, longhold, hold_active 등 보호 reason이면 억제
+            # Suppress if it is a protective reason such as sl_confirming, longhold, hold_active
             if any(k in _hold_reason for k in ("sl_confirming", "longhold", "hold_active", "dca")):
                 sl_hit = False
                 should_sell = False
@@ -538,7 +538,7 @@ class HyperNunnayaEngine(HyperEngineBase):
         params: Dict[str, Any],
         strategy_out: Optional[Dict[str, Any]],
     ) -> Tuple[bool, bool, bool, Optional[float]]:
-        """TP/SL 히트 여부 확인."""
+        """Check whether TP/SL is hit."""
         should_sell = False
         tp_hit = False
         sl_hit = False
@@ -553,26 +553,26 @@ class HyperNunnayaEngine(HyperEngineBase):
 
         change_pct = (price - entry) / entry * 100.0
         tp = float(params.get("tp", 1.2))
-        # 2026-01-30: 기본 SL -1.0% → -2.5%로 완화 (사자마자 손절 방지)
+        # 2026-01-30: default SL relaxed from -1.0% → -2.5% (prevent instant stop-loss)
         sl = float(params.get("sl", -2.5))
 
-        # [FIX 2026-02-01] 전략 플러그인의 params에서 sl/tp 우선 적용
-        # 이전에는 엔진 기본값(-2.5%)만 사용되어 GAZUA(-50%)가 무시됨
+        # [FIX 2026-02-01] Apply sl/tp from the strategy plugin's params with priority
+        # Previously only the engine default (-2.5%) was used, so GAZUA (-50%) was ignored
         if isinstance(strategy_out, dict):
             meta = strategy_out.get("meta") or {}
-            # 전략 meta에서 sl_pct/tp_pct 확인 (전략 플러그인이 설정한 값)
+            # Check sl_pct/tp_pct from strategy meta (values set by the strategy plugin)
             if meta.get("sl_pct") is not None:
                 try:
                     sl = float(meta["sl_pct"])
                 except (KeyError, AttributeError, TypeError, ValueError):
-                    logger.warning("[TP/SL] sl_pct 파싱 실패: %s → 엔진 기본값 %.1f%% 유지", meta.get("sl_pct"), sl)
+                    logger.warning("[TP/SL] sl_pct parse failed: %s → keeping engine default %.1f%%", meta.get("sl_pct"), sl)
             if meta.get("tp_pct") is not None:
                 try:
                     tp = float(meta["tp_pct"])
                 except (KeyError, AttributeError, TypeError, ValueError):
-                    logger.warning("[TP/SL] tp_pct 파싱 실패: %s → 엔진 기본값 %.1f%% 유지", meta.get("tp_pct"), tp)
-            # dynamic_sl/dynamic_tp (ATR 기반)이 있으면 최종 덮어씀
-            # GAZUA는 장기보유 전략이므로 ATR dynamic_sl 적용 제외 (-25% SL 유지)
+                    logger.warning("[TP/SL] tp_pct parse failed: %s → keeping engine default %.1f%%", meta.get("tp_pct"), tp)
+            # If dynamic_sl/dynamic_tp (ATR-based) exists, override at the end
+            # GAZUA is a long-hold strategy, so exclude ATR dynamic_sl (keep -25% SL)
             _strat_name = str(strategy_out.get("mode") or strategy_out.get("strategy") or "").upper()
             d_sl = meta.get("dynamic_sl")
             d_tp = meta.get("dynamic_tp")
@@ -580,15 +580,15 @@ class HyperNunnayaEngine(HyperEngineBase):
                 try:
                     sl = float(d_sl)
                 except (TypeError, ValueError):
-                    logger.warning("[TP/SL] dynamic_sl 파싱 실패: %s → 이전 SL %.1f%% 유지", d_sl, sl)
+                    logger.warning("[TP/SL] dynamic_sl parse failed: %s → keeping previous SL %.1f%%", d_sl, sl)
             if d_tp is not None:
                 try:
                     tp = float(d_tp)
                 except (TypeError, ValueError):
-                    logger.warning("[TP/SL] dynamic_tp 파싱 실패: %s → 이전 TP %.1f%% 유지", d_tp, tp)
+                    logger.warning("[TP/SL] dynamic_tp parse failed: %s → keeping previous TP %.1f%%", d_tp, tp)
 
-        # SL은 항상 음수 손익 임계값으로 비교한다.
-        # (예: sl_pct=2.0 이 들어와도 -2.0%로 보정)
+        # SL is always compared as a negative PnL threshold.
+        # (e.g. even if sl_pct=2.0 comes in, it is corrected to -2.0%)
         if sl > 0:
             sl = -abs(sl)
         if tp < 0:
@@ -597,7 +597,7 @@ class HyperNunnayaEngine(HyperEngineBase):
         strategy_mode = self._strategy_mode_from_context(context)
         tp, sl, policy_meta = self._apply_tp_sl_policy(context, strategy_mode, tp, sl)
 
-        # [2026-03-30] 레짐 TP/SL multiplier 적용 (메모리 캐시, HTTP 없음)
+        # [2026-03-30] Apply regime TP/SL multiplier (memory cache, no HTTP)
         try:
             _policy = getattr(self, "_tp_sl_policy_cache", None)
             if _policy is None:
@@ -620,7 +620,7 @@ class HyperNunnayaEngine(HyperEngineBase):
                 policy_meta["regime"] = _regime
                 policy_meta["regime_tp_mult"] = float(_tp_mults.get(_regime, 1.0))
 
-                # [2026-03-30] 수수료 인식 TP: 스프레드 반영 (orderbook_store 메모리 조회)
+                # [2026-03-30] Fee-aware TP: reflect spread (orderbook_store memory lookup)
                 if _policy.get("fee_aware_tp"):
                     _fee = float(_policy.get("fee_rate", 0.001))
                     _spread_bps = 0.0
@@ -633,13 +633,13 @@ class HyperNunnayaEngine(HyperEngineBase):
                             if _bid > 0 and _ask > 0:
                                 _spread_bps = (_ask - _bid) / _bid * 10000
                     except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                        logger.warning("[Engine] 수수료 인식 TP 스프레드 조회 실패: %s", exc)
-                    _fee_cost_pct = (_fee * 2 + _spread_bps / 10000) * 100  # 왕복 수수료 + 스프레드
+                        logger.warning("[Engine] fee-aware TP spread lookup failed: %s", exc)
+                    _fee_cost_pct = (_fee * 2 + _spread_bps / 10000) * 100  # round-trip fee + spread
                     if tp > 0 and tp < _fee_cost_pct * 1.2:
-                        tp = _fee_cost_pct * 1.2  # 수수료 이하로 TP 설정 방지
+                        tp = _fee_cost_pct * 1.2  # prevent setting TP below fee cost
                     policy_meta["fee_aware_tp_floor"] = round(_fee_cost_pct * 1.2, 4)
         except (OSError, json.JSONDecodeError, KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[Engine] 수수료 인식 TP 정책 로드 실패: %s", exc)
+            logger.warning("[Engine] fee-aware TP policy load failed: %s", exc)
 
         if isinstance(strategy_out, dict):
             out_meta = strategy_out.get("meta")
@@ -651,7 +651,7 @@ class HyperNunnayaEngine(HyperEngineBase):
         tp_hit = bool(change_pct >= tp)
         sl_hit = bool(change_pct <= sl)
 
-        # [2026-03-30] TP 모멘텀 체크: 상승 중이면 매도 보류 (2×TP 초과 시 무조건 매도)
+        # [2026-03-30] TP momentum check: defer sell while rising (always sell once above 2×TP)
         if tp_hit and not sl_hit:
             _prices = getattr(context, "_tick_prices", None) or \
                       list(getattr(context, "price_history", []) or [])
@@ -659,11 +659,11 @@ class HyperNunnayaEngine(HyperEngineBase):
                 try:
                     _p3 = [float(x) for x in _prices[-3:]]
                     if _p3[0] < _p3[1] < _p3[2] and _p3[2] <= price:
-                        # 연속 상승 중 — TP 매도 보류 (2×TP 미만일 때만)
+                        # Consecutive uptrend — defer TP sell (only when below 2×TP)
                         if change_pct < tp * 2.0:
                             tp_hit = False
                 except (KeyError, IndexError, TypeError, ValueError) as exc:
-                    logger.warning("[Engine] 연속 상승 TP 보류 판단 실패: %s", exc)
+                    logger.warning("[Engine] consecutive-uptrend TP defer decision failed: %s", exc)
 
         should_sell = bool(tp_hit or sl_hit)
 
@@ -680,8 +680,8 @@ class HyperNunnayaEngine(HyperEngineBase):
         is_live: bool,
         is_paper_position: bool,
     ) -> Optional[Dict[str, Any]]:
-        """BUY 의도 생성."""
-        # 자본 계산
+        """Build the BUY intent."""
+        # Capital calculation
         cap_alloc = float(getattr(context, "allocated_capital", 0.0) or 0.0)
         cap_usable = getattr(context, "usable_capital", None)
         try:
@@ -696,12 +696,12 @@ class HyperNunnayaEngine(HyperEngineBase):
         s_ctrl = (getattr(context, "controls", {}) or {}).get("strategy", {}) or {}
         mode = str(s_ctrl.get("mode") or s_ctrl.get("name") or "").upper()
 
-        # 전략별 사이즈 스케일링
+        # Per-strategy size scaling
         skip_global_size_scale = False
         if isinstance(strategy_out, dict):
             meta = strategy_out.get("meta") or {}
-            # GAZUA 추가매수는 전용 핸들러에서 size_scale을 적용하므로
-            # 여기서 또 곱하면 이중 스케일링이 된다.
+            # GAZUA add-buy applies size_scale in its dedicated handler,
+            # so multiplying again here would cause double scaling.
             if has_position and mode == "GAZUA" and bool(meta.get("allow_add_buy", False)):
                 skip_global_size_scale = True
             scale = meta.get("size_scale")
@@ -711,23 +711,23 @@ class HyperNunnayaEngine(HyperEngineBase):
         allow_buy = False
         buy_reason = "engine_buy"
 
-        # AUTOLOOP 분할매수 로직
+        # AUTOLOOP split-buy logic
         allow_buy, usdt, buy_reason = self._handle_autoloop_buy(context, price, usdt, signal, strategy_out, has_position, allow_buy, buy_reason)
-        # GAZUA 2단 진입(탐색/확인) 추가매수 로직
+        # GAZUA 2-stage entry (probe/confirm) add-buy logic
         allow_buy, usdt, buy_reason = self._handle_gazua_buy(context, price, usdt, signal, strategy_out, has_position, allow_buy, buy_reason)
-        # SNIPER/LIGHTNING probe→confirm 추가매수 로직
+        # SNIPER/LIGHTNING probe→confirm add-buy logic
         allow_buy, usdt, buy_reason = self._handle_staged_probe_confirm_buy(
             context, usdt, signal, strategy_out, has_position, allow_buy, buy_reason
         )
 
-        # 최종 BUY intent 생성
+        # Build the final BUY intent
         if usdt > 0 and (not has_position or (is_live and is_paper_position) or allow_buy):
             intent: Dict[str, Any] = {
                 "action": "buy",
                 "buy_usdt": usdt,
                 "reason": buy_reason
             }
-            # 보유 중 추가매수는 시스템 레이어에서 별도 화이트리스트 검증 후 허용한다.
+            # Add-buy while holding is allowed only after a separate whitelist check in the system layer.
             if has_position and allow_buy:
                 intent["meta"] = {"allow_add_buy": True}
             return intent
@@ -745,7 +745,7 @@ class HyperNunnayaEngine(HyperEngineBase):
         allow_buy: bool,
         buy_reason: str,
     ) -> Tuple[bool, int, str]:
-        """AUTOLOOP 분할매수 처리."""
+        """Handle AUTOLOOP split-buy."""
         try:
             s_ctrl = (getattr(context, "controls", {}) or {}).get("strategy", {}) or {}
             s_params = s_ctrl.get("params", {}) or {}
@@ -756,14 +756,14 @@ class HyperNunnayaEngine(HyperEngineBase):
 
             buy_splits = s_params.get("buy_splits") or [1.0]
 
-            # [⑤] 안티마틴게일: DCA 횟수↑ → 추가 매수 규모↓ (마틴게일 반대)
-            # 트리아지 DCA("triage" in buy_reason)는 복구 목적이므로 적용 제외
+            # [⑤] Anti-martingale: more DCA count → smaller add-buy size (opposite of martingale)
+            # Triage DCA ("triage" in buy_reason) is for recovery, so it is excluded
             _anti_enabled = bool(s_params.get("anti_martingale_enabled",
                 str(os.getenv("OMA_ANTI_MARTINGALE_ENABLED", "false")).lower() in ("1", "true", "yes")))
             if _anti_enabled and "triage" not in str(buy_reason).lower():
                 _decay = float(s_params.get("anti_martingale_decay", os.getenv("OMA_ANTI_MARTINGALE_DECAY", "0.7")))
                 _floor = float(s_params.get("anti_martingale_floor", os.getenv("OMA_ANTI_MARTINGALE_FLOOR", "0.3")))
-                _dca_n = max(0, int(context.get_var("autoloop_entry_stage", 0)) - 1)  # 0=첫DCA, 1=두번째...
+                _dca_n = max(0, int(context.get_var("autoloop_entry_stage", 0)) - 1)  # 0=first DCA, 1=second...
                 _adj = max(_floor, _decay ** _dca_n)   # 1→0.7→0.49→floor
                 buy_splits = [float(x) * _adj for x in buy_splits]
 
@@ -815,7 +815,7 @@ class HyperNunnayaEngine(HyperEngineBase):
                 context.set_var("autoloop_last_add_ts", time.time())
 
         except (OSError, KeyError, AttributeError, TypeError, ValueError, OverflowError):
-            logger.warning("[Engine] AUTOLOOP 분할매수 처리 실패: %s", getattr(context, "market", "?"), exc_info=True)
+            logger.warning("[Engine] AUTOLOOP split-buy handling failed: %s", getattr(context, "market", "?"), exc_info=True)
 
         return allow_buy, usdt, buy_reason
 
@@ -830,7 +830,7 @@ class HyperNunnayaEngine(HyperEngineBase):
         allow_buy: bool,
         buy_reason: str,
     ) -> Tuple[bool, int, str]:
-        """GAZUA 2단 진입(확인 추가매수) 처리."""
+        """Handle GAZUA 2-stage entry (confirm add-buy)."""
         try:
             s_ctrl = (getattr(context, "controls", {}) or {}).get("strategy", {}) or {}
             s_params = s_ctrl.get("params", {}) or {}
@@ -841,7 +841,7 @@ class HyperNunnayaEngine(HyperEngineBase):
             if signal != "buy":
                 return allow_buy, usdt, buy_reason
 
-            # 신규 포지션 진입은 일반 경로에서 처리; 여기서는 보유 중 추가매수만 허용.
+            # New position entry is handled in the normal path; here only add-buy while holding is allowed.
             if not has_position:
                 return allow_buy, usdt, buy_reason
 
@@ -867,7 +867,7 @@ class HyperNunnayaEngine(HyperEngineBase):
             allow_buy = True
             buy_reason = str(meta.get("buy_reason") or "gazua:add_buy")
 
-            # V2 DCA 평단가 재계산 힌트 (실행 레이어에서 사용)
+            # V2 DCA average-price recalculation hint (used by the execution layer)
             if "dca" in buy_reason:
                 try:
                     entry_price = float(context.position.get("entry", 0.0))
@@ -878,10 +878,10 @@ class HyperNunnayaEngine(HyperEngineBase):
                         meta["avg_entry_price"] = avg_price
                         meta["dca_stage"] = 2
                 except (KeyError, AttributeError, TypeError, ValueError):
-                    logger.warning("[Engine] GAZUA DCA 평단가 재계산 실패: %s", getattr(context, "market", "?"), exc_info=True)
+                    logger.warning("[Engine] GAZUA DCA average-price recalculation failed: %s", getattr(context, "market", "?"), exc_info=True)
 
         except (OSError, KeyError, AttributeError, TypeError, ValueError, OverflowError):
-            logger.warning("[Engine] GAZUA 추가매수 처리 실패: %s", getattr(context, "market", "?"), exc_info=True)
+            logger.warning("[Engine] GAZUA add-buy handling failed: %s", getattr(context, "market", "?"), exc_info=True)
 
         return allow_buy, usdt, buy_reason
 
@@ -895,7 +895,7 @@ class HyperNunnayaEngine(HyperEngineBase):
         allow_buy: bool,
         buy_reason: str,
     ) -> Tuple[bool, int, str]:
-        """SNIPER/LIGHTNING의 probe->confirm 2단 진입을 실행 레이어에 연결."""
+        """Wire SNIPER/LIGHTNING probe->confirm 2-stage entry to the execution layer."""
         try:
             if signal != "buy":
                 return allow_buy, usdt, buy_reason
@@ -910,7 +910,7 @@ class HyperNunnayaEngine(HyperEngineBase):
             if not isinstance(meta, dict):
                 return allow_buy, usdt, buy_reason
 
-            # 신규 probe 진입: size_scale이 없다면 probe_ratio를 보조 사용.
+            # New probe entry: if size_scale is missing, use probe_ratio as a fallback.
             if not has_position:
                 if meta.get("size_scale") is None:
                     probe_ratio = meta.get("probe_ratio")
@@ -921,7 +921,7 @@ class HyperNunnayaEngine(HyperEngineBase):
                 buy_reason = str((strategy_out or {}).get("reason") or buy_reason)
                 return allow_buy, usdt, buy_reason
 
-            # 보유 중 confirm 추가매수: 전략 meta의 allow_add_buy 신호가 있어야 한다.
+            # Confirm add-buy while holding: requires the allow_add_buy signal in strategy meta.
             if not bool(meta.get("allow_add_buy", False)):
                 return allow_buy, usdt, buy_reason
 
@@ -933,8 +933,8 @@ class HyperNunnayaEngine(HyperEngineBase):
             if (now_ts - last_add) < add_cooldown:
                 return allow_buy, usdt, buy_reason
 
-            # size_scale은 _build_buy_intent 상단에서 이미 반영됨.
-            # 없을 때만 confirm_buy_ratio를 보조 적용.
+            # size_scale was already applied at the top of _build_buy_intent.
+            # Apply confirm_buy_ratio as a fallback only when it is missing.
             if meta.get("size_scale") is None:
                 confirm_ratio = meta.get("confirm_buy_ratio")
                 if confirm_ratio is not None:
@@ -948,7 +948,7 @@ class HyperNunnayaEngine(HyperEngineBase):
             allow_buy = True
             buy_reason = str(meta.get("buy_reason") or (strategy_out or {}).get("reason") or buy_reason)
         except (OSError, KeyError, AttributeError, TypeError, ValueError, OverflowError):
-            logger.warning("[Engine] %s probe/confirm 매수 처리 실패: %s", mode if 'mode' in dir() else "STAGED", getattr(context, "market", "?"), exc_info=True)
+            logger.warning("[Engine] %s probe/confirm buy handling failed: %s", mode if 'mode' in dir() else "STAGED", getattr(context, "market", "?"), exc_info=True)
 
         return allow_buy, usdt, buy_reason
 
@@ -964,16 +964,16 @@ class HyperNunnayaEngine(HyperEngineBase):
         change_pct: Optional[float],
         should_sell: bool,
     ) -> Optional[Dict[str, Any]]:
-        """SELL 의도 생성."""
+        """Build the SELL intent."""
         if not has_position:
             return None
 
         qty = float(context.position.get("qty") or 0.0)
-        
-        # AUTOLOOP reset 처리
+
+        # AUTOLOOP reset handling
         reset_staged_entry = self._should_reset_autoloop(context, should_sell)
 
-        # GAZUA V2 다단계 부분매도 처리
+        # GAZUA V2 multi-stage partial-sell handling
         gazua_partial = False
         so_reason = ""
         so_meta: Dict[str, Any] = {}
@@ -992,15 +992,15 @@ class HyperNunnayaEngine(HyperEngineBase):
                 context.set_var("gazua_partial_stage", target_stage)
                 context.set_var("gazua_partial_sold", True)
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-                logger.error("[Engine] GAZUA V2 다단계 부분매도 상태 저장 실패: %s", exc)
+                logger.error("[Engine] GAZUA V2 multi-stage partial-sell state save failed: %s", exc)
         else:
-            # 부분매도 처리 (AUTOLOOP/GAZUA generic)
+            # Partial-sell handling (AUTOLOOP/GAZUA generic)
             qty = self._apply_sell_fraction(context, qty)
 
         if qty <= 0:
             return None
 
-        # Exit kind 분류
+        # Exit kind classification
         exit_kind, pp_exit_meta = self._classify_exit_kind(strategy_out, sl_hit, tp_hit)
         if gazua_partial:
             exit_kind = "gazua_partial"
@@ -1024,25 +1024,25 @@ class HyperNunnayaEngine(HyperEngineBase):
             intent["meta"]["sell_fraction"] = float(so_meta.get("sell_fraction", 0.3))
             intent["meta"]["stage"] = int(so_meta.get("stage", 1))
 
-        # AUTOLOOP 상태 리셋
+        # AUTOLOOP state reset
         if reset_staged_entry:
             self._reset_autoloop_state(context)
 
         return intent
 
     def _should_reset_autoloop(self, context: HyperEngineContext, should_sell: bool) -> bool:
-        """AUTOLOOP 상태 리셋 필요 여부."""
+        """Whether AUTOLOOP state reset is needed."""
         try:
             s_ctrl = (getattr(context, "controls", {}) or {}).get("strategy", {}) or {}
             mode = str(s_ctrl.get("mode") or s_ctrl.get("name") or "").upper()
             if mode == "AUTOLOOP" and should_sell:
                 return True
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[Engine] _should_reset_autoloop 판단 실패: %s", exc)
+            logger.warning("[Engine] _should_reset_autoloop decision failed: %s", exc)
         return False
 
     def _apply_sell_fraction(self, context: HyperEngineContext, qty: float) -> float:
-        """부분매도 비율 적용 (AUTOLOOP/GAZUA)."""
+        """Apply partial-sell fraction (AUTOLOOP/GAZUA)."""
         try:
             s_ctrl = (getattr(context, "controls", {}) or {}).get("strategy", {}) or {}
             s_params = s_ctrl.get("params", {}) or {}
@@ -1052,13 +1052,13 @@ class HyperNunnayaEngine(HyperEngineBase):
                 if 0.05 <= f <= 1.0:
                     qty = qty * f
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[Engine] _apply_sell_fraction 처리 실패: %s", exc)
+            logger.warning("[Engine] _apply_sell_fraction handling failed: %s", exc)
         return qty
 
     def _classify_exit_kind(
         self, strategy_out: Optional[Dict[str, Any]], sl_hit: bool, tp_hit: bool
     ) -> Tuple[str, Optional[Dict[str, Any]]]:
-        """Exit kind 분류."""
+        """Classify exit kind."""
         exit_kind = "signal"
         pp_exit_meta = None
 
@@ -1077,7 +1077,7 @@ class HyperNunnayaEngine(HyperEngineBase):
                         elif m0 == "DAMPEN":
                             exit_kind = "pp_dampen"
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[Engine] _classify_exit_kind 분류 실패: %s", exc)
+            logger.warning("[Engine] _classify_exit_kind classification failed: %s", exc)
 
         if sl_hit:
             exit_kind = "sl"
@@ -1087,13 +1087,13 @@ class HyperNunnayaEngine(HyperEngineBase):
         return exit_kind, pp_exit_meta
 
     def _reset_autoloop_state(self, context: HyperEngineContext):
-        """AUTOLOOP 상태 리셋."""
+        """Reset AUTOLOOP state."""
         try:
             context.set_var("autoloop_entry_stage", 0)
             context.set_var("autoloop_last_add_ts", 0.0)
             context.set_var("autoloop_entry_ref", 0.0)
         except (AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[Engine] _reset_autoloop_state 리셋 실패: %s", exc)
+            logger.warning("[Engine] _reset_autoloop_state reset failed: %s", exc)
 
     # --------------------------------------------------------
     # Phase 4: Diagnostics
@@ -1101,7 +1101,7 @@ class HyperNunnayaEngine(HyperEngineBase):
     def _attach_diagnostics(
         self, context: HyperEngineContext, ai: Dict[str, Any], strategy_out: Optional[Dict[str, Any]]
     ):
-        """진단 정보를 context에 부착."""
+        """Attach diagnostic info to the context."""
         try:
             sr = context.strategy_reason if isinstance(getattr(context, "strategy_reason", None), dict) else {}
             sr = dict(sr)
@@ -1124,21 +1124,21 @@ class HyperNunnayaEngine(HyperEngineBase):
                 rsn.update(sr)
                 context.strategy_state["reason"] = rsn
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[Engine] _attach_diagnostics 진단 첨부 실패: %s", exc)
+            logger.warning("[Engine] _attach_diagnostics attach failed: %s", exc)
 
     # --------------------------------------------------------
     # Phase 5: Finalize
     # --------------------------------------------------------
     def _finalize_tick(self, context: HyperEngineContext, params: Dict[str, Any], signal: str, price: float):
-        """Tick 마무리: 정책 업데이트 및 상태 저장."""
-        # AI 기반 추가 리스크 처리 (placeholder)
-        # 향후 변동성/모멘텀 기반 로직 확장 가능
+        """Finalize the tick: update policy and save state."""
+        # AI-based additional risk handling (placeholder)
+        # Volatility/momentum-based logic can be expanded in the future
 
-        # 정책 자동 개선
+        # Automatic policy improvement
         context.update_policy({
             "name": context.policy["name"],
             "params": {**params}
         })
 
-        # Tick 후 상태 finalize
+        # Finalize state after the tick
         context.finalize_tick(signal, price)

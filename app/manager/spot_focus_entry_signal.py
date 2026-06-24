@@ -1,10 +1,10 @@
 # ============================================================
-# Upbit FOCUS Entry Signal — 진입 직전 정밀 확인 (long_only)
+# Upbit FOCUS Entry Signal — precise pre-entry confirmation (long_only)
 # ------------------------------------------------------------
-# 5-State 단순화(가이드 §3.3/§9.1): ZONE_WAIT 생략.
-#   conf >= threshold → 즉시 진입 (fast entry)
-#   conf <  threshold → M5 PA 가 같은 방향일 때만 진입
-# 순수 보조 함수 — 상태 없음.
+# 5-State simplification (guide §3.3/§9.1): ZONE_WAIT omitted.
+#   conf >= threshold → enter immediately (fast entry)
+#   conf <  threshold → enter only when M5 PA agrees with the direction
+# Pure helper function — stateless.
 # ============================================================
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def confirm_entry(
     conf: float = 0.0,
     threshold: float = 0.85,
 ) -> Tuple[bool, str]:
-    """진입 직전 확인. (allow, reason) 반환."""
+    """Pre-entry confirmation. Returns (allow, reason)."""
     if conf >= threshold:
         return True, f"fast_entry(conf={conf:.2f}>={threshold:.2f})"
 

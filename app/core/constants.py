@@ -1,6 +1,6 @@
 # ============================================================
 # File: app/core/constants.py
-# Autocoin OS v3-H — 공통 상수 및 유틸리티 정의 (Bybit 전용)
+# Autocoin OS v3-H — common constants and utility definitions (Bybit only)
 # ============================================================
 
 import logging
@@ -16,13 +16,13 @@ logger = logging.getLogger(__name__)
 
 @lru_cache(maxsize=128)
 def env_bool(key: str, default: bool = False) -> bool:
-    """환경 변수를 bool로 파싱 (캐시됨)."""
+    """Parse an environment variable as bool (cached)."""
     v = str(os.getenv(key, "1" if default else "0")).strip().lower()
     return v in ("1", "true", "yes", "y", "on")
 
 @lru_cache(maxsize=128)
 def env_float(key: str, default: float) -> float:
-    """환경 변수를 float로 파싱 (캐시됨)."""
+    """Parse an environment variable as float (cached)."""
     try:
         return float(os.getenv(key, str(default)))
     except (TypeError, ValueError):
@@ -31,7 +31,7 @@ def env_float(key: str, default: float) -> float:
 
 @lru_cache(maxsize=128)
 def env_int(key: str, default: int) -> int:
-    """환경 변수를 int로 파싱 (캐시됨)."""
+    """Parse an environment variable as int (cached)."""
     try:
         return int(float(os.getenv(key, str(default))))
     except (TypeError, ValueError):
@@ -40,7 +40,7 @@ def env_int(key: str, default: int) -> int:
 
 @lru_cache(maxsize=64)
 def env_json_dict(key: str) -> Dict[str, float]:
-    """환경 변수를 JSON dict[str, float]로 파싱 (캐시됨)."""
+    """Parse an environment variable as a JSON dict[str, float] (cached)."""
     import json
     raw = os.getenv(key, "").strip()
     if not raw:
@@ -55,7 +55,7 @@ def env_json_dict(key: str) -> Dict[str, float]:
     return {}
 
 def clear_env_cache() -> None:
-    """환경 변수 캐시 초기화 (테스트/리로드 시 사용)."""
+    """Clear the environment-variable cache (use on test/reload)."""
     env_bool.cache_clear()
     env_float.cache_clear()
     env_int.cache_clear()
@@ -185,10 +185,10 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 # ============================================================
 # Trading Constants (Quote Currency Abstraction)
 # ============================================================
-# 기축통화 추상화 레이어 사용
+# Use the quote-currency abstraction layer
 from app.core.currency import Q as QUOTE_CURRENCY
 
-# 기축통화 (USDT)
+# Quote currency (USDT)
 BASE_QUOTE_CURRENCY = QUOTE_CURRENCY.symbol
 MIN_ORDER_AMOUNT = QUOTE_CURRENCY.min_order
 

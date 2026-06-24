@@ -2,8 +2,8 @@
 # File: app/core/hyper_config_store.py
 # ------------------------------------------------------------
 # HyperConfigStore
-# - JSON으로 로딩한 다양한 설정(strategy, presets 등)을
-#   시스템 전체에서 조회할 수 있도록 보관하는 중앙 저장소.
+# - Central store that holds various configs (strategy, presets, etc.)
+#   loaded from JSON so they can be queried across the whole system.
 # ============================================================
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 class HyperConfigStore:
     """
-    다양한 JSON 설정(strategy.json, presets, market lists, engine 설정 등)을
-    system 전역에서 사용할 수 있도록 저장한다.
+    Stores various JSON configs (strategy.json, presets, market lists,
+    engine config, etc.) so they can be used system-wide.
     """
 
     def __init__(self):
@@ -30,12 +30,12 @@ class HyperConfigStore:
         self._load_all()
 
     # --------------------------------------------------------
-    # 모든 설정 로딩
+    # Load all configs
     # --------------------------------------------------------
     def _load_all(self):
         """
-        JSON 파일들을 한 번에 로딩하여 내부 dict에 보관한다.
-        필요에 따라 파일 추가/삭제 가능.
+        Load the JSON files at once and keep them in an internal dict.
+        Files can be added/removed as needed.
         """
 
         files = {
@@ -51,12 +51,12 @@ class HyperConfigStore:
             try:
                 self._store[key] = self.loader.load(filename)
             except FileNotFoundError:
-                # 없는 설정은 None 처리하여 사용 시 fallback 가능
+                # Missing configs are set to None so callers can fall back
                 logger.info("[ConfigStore] Config file not found: %s (using fallback)", filename)
                 self._store[key] = None
 
     # --------------------------------------------------------
-    # 설정 조회
+    # Get config
     # --------------------------------------------------------
     def get(self, key: str, default: Any = None) -> Any:
         """
@@ -65,19 +65,19 @@ class HyperConfigStore:
         return self._store.get(key, default)
 
     # --------------------------------------------------------
-    # 설정 갱신
+    # Update config
     # --------------------------------------------------------
     def set(self, key: str, value: Any):
         self._store[key] = value
 
     # --------------------------------------------------------
-    # 전체 조회
+    # Get all
     # --------------------------------------------------------
     def all(self) -> Dict[str, Any]:
         return dict(self._store)
 
 
 # ------------------------------------------------------------
-# 글로벌 인스턴스
+# Global instance
 # ------------------------------------------------------------
 config_store = HyperConfigStore()

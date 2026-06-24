@@ -30,15 +30,15 @@ def _f(x: Any, default: float = 0.0) -> float:
 class MarketState(str, Enum):
     ACTIVE = "ACTIVE"
     WATCH = "WATCH"
-    RECOVERY = "RECOVERY"   # orphan/exit-only 관리 대상
+    RECOVERY = "RECOVERY"   # orphan/exit-only managed target
     DISABLED = "DISABLED"
 
 class OMAMarketRegistry:
-    """OMA의 시장 행정 상태 단일 장부.
+    """Single ledger of OMA market administrative state.
 
-    강화점:
-    - RECOVERY 상태 추가 (진입 금지 + 회수 관리)
-    - runtime/oma_state.json 에 저장/복원 (서버 리셋 후에도 유지)
+    Enhancements:
+    - Added RECOVERY state (entry blocked + reclaim management)
+    - Saved/restored to runtime/oma_state.json (persists across server resets)
     """
 
     def __init__(self, *, state_path: Optional[str] = None):
@@ -152,18 +152,18 @@ class OMAMarketRegistry:
                 self._active_since[market] = now
 
     def _should_demote_to_watch(self, market: str) -> bool:
-        # 최소 ACTIVE 유지 시간 (예: 10분)
+        # Minimum ACTIVE hold time (e.g., 10 minutes)
         MIN_ACTIVE_SEC = 600
 
         since = self._active_since.get(market)
         if since and (time.time() - since) < MIN_ACTIVE_SEC:
             return False
 
-        # 기존 판단 로직 유지
+        # Keep existing decision logic
         return True
 
     # --------------------------------------------------------
-    # WRITE (행정)
+    # WRITE (administration)
     # --------------------------------------------------------
     def set_state(
         self,
@@ -200,7 +200,7 @@ class OMAMarketRegistry:
                 logger.warning("set_state: invalid prev_active_since=%r for %s", prev_active_since, market, exc_info=True)
                 prev_active_since_f = None
 
-            # ★ 상태 전이 검증 (업비트 동기화 2026-04-05)
+            # ★ State transition validation (Upbit sync 2026-04-05)
             new_state = MarketState(state)
             if prev_state == MarketState.DISABLED and new_state == MarketState.RECOVERY:
                 logger.warning("[OMA] BLOCKED transition DISABLED→RECOVERY for %s (must go WATCH first)", market)
@@ -230,9 +230,9 @@ class OMAMarketRegistry:
                 "active_since_ts": prev_active_since_f,
             }
 
-            # ACTIVE 진입 시각:
-            # - 비ACTIVE -> ACTIVE 전환 시에만 신규 기록
-            # - 이미 ACTIVE면 기존 ts 유지 (예산/사유 갱신으로 age가 리셋되지 않도록)
+            # ACTIVE entry timestamp:
+            # - Newly recorded only on non-ACTIVE -> ACTIVE transition
+            # - If already ACTIVE, keep existing ts (so budget/reason updates don't reset age)
             try:
                 if MarketState(state) == MarketState.ACTIVE:
                     if prev_state == MarketState.ACTIVE and prev_active_since_f is not None:
@@ -249,9 +249,9 @@ class OMAMarketRegistry:
                     self._markets[str(market)].pop("active_since_ts", None)
                     self._active_since.pop(str(market), None)
                 except KeyError as exc:
-                    logger.warning("[oma_market_registry] %s: %s", '- 이미 ACTIVE면 기존 ts 유지 (예산/사유 갱신으로 age가 리셋되지 않도록)', exc, exc_info=True)
+                    logger.warning("[oma_market_registry] %s: %s", '- if already ACTIVE, keep existing ts (so budget/reason updates do not reset age)', exc, exc_info=True)
 
-            # 2026-03-10: WATCH 진입 시각 기록 (auto-DISABLED 타임아웃용)
+            # 2026-03-10: Record WATCH entry timestamp (for auto-DISABLED timeout)
             try:
                 if MarketState(state) == MarketState.WATCH:
                     prev_watch_ts = existing.get("watch_since_ts")
@@ -262,7 +262,7 @@ class OMAMarketRegistry:
                 else:
                     self._markets[str(market)].pop("watch_since_ts", None)
             except (ValueError, KeyError) as exc:
-                logger.warning("[oma_market_registry] %s: %s", '2026-03-10: WATCH 진입 시각 기록 (auto-DISABLED 타임아웃용)', exc, exc_info=True)
+                logger.warning("[oma_market_registry] %s: %s", '2026-03-10: Record WATCH entry timestamp (for auto-DISABLED timeout)', exc, exc_info=True)
 
             if persist:
                 self.save()
@@ -403,18 +403,18 @@ class OMAMarketRegistry:
 
     def snapshot(self) -> Dict[str, Any]:
         def _extract_strategy(reasons: list) -> str:
-            """reason 리스트에서 전략 추출
-            1) strategy:XXX 태그 우선
-            2) 없으면 reason 문자열에서 전략 키워드 검색
+            """Extract strategy from the reason list.
+            1) strategy:XXX tag takes priority
+            2) Otherwise, search the reason strings for strategy keywords
             """
             STRATEGY_KEYWORDS = ["PINGPONG", "AUTOLOOP", "LADDER", "LIGHTNING", "GAZUA", "CONTRARIAN", "SNIPER"]
             
-            # 1) strategy:XXX 형식
+            # 1) strategy:XXX format
             for r in (reasons or []):
                 if isinstance(r, str) and r.upper().startswith("STRATEGY:"):
                     return r.split(":", 1)[1].strip().upper()
             
-            # 2) reason에서 전략 키워드 찾기 (예: "pingpong_budget_restore")
+            # 2) Find strategy keyword in reason (e.g., "pingpong_budget_restore")
             for r in (reasons or []):
                 if isinstance(r, str):
                     r_upper = r.upper()
@@ -459,6 +459,6 @@ class OMAMarketRegistry:
             }
 
 # ------------------------------------------------------------
-# 프로세스 전역 단일 인스턴스
+# Process-wide singleton instance
 # ------------------------------------------------------------
 oma_market_registry = OMAMarketRegistry()

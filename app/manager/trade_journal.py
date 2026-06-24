@@ -1,10 +1,10 @@
 # ============================================================
-# Trade Journal — FOCUS + Harpoon 전용 거래 장부
+# Trade Journal — dedicated trade ledger for FOCUS + Harpoon
 # ------------------------------------------------------------
-# JSONL 파일로 모든 진입/청산을 기록.
-# 각 레코드에 전략명, 방향, 가격, 수량, PnL, 수수료, 이유 포함.
+# Records every entry/exit to a JSONL file.
+# Each record includes strategy name, direction, price, qty, PnL, fee, and reason.
 #
-# 사용:
+# Usage:
 #   from app.manager.trade_journal import journal
 #   journal.record_entry(...)
 #   journal.record_exit(...)
@@ -29,60 +29,61 @@ JOURNAL_PATH = os.path.join("runtime", "focus_harpoon_journal.jsonl")
 FEE_RATE = 0.00055
 
 # ── EXIT dedup guard ──
-# phantom EXIT 경로(_check_bybit_positions) 와 SYNC 경로(_live_sync) 가 같은 SERVER_SL 청산을
-# 각각 기록하는 버그(2026-04-23 BCHUSDT 3중 기록 관측) 를 방지.
-# 동일 (market, direction, entry_price, reason) 이 윈도우 내 재호출되면 skip.
-# cooldown_sec(기본 600s) 이 재진입/재청산을 막아주므로 30초 윈도우는 정상 거래를 가로막지 않음.
+# Prevents the bug where the phantom EXIT path (_check_bybit_positions) and the SYNC
+# path (_live_sync) each record the same SERVER_SL exit (triple-recording observed on
+# BCHUSDT 2026-04-23).
+# If the same (market, direction, entry_price, reason) is re-called within the window, skip.
+# cooldown_sec (default 600s) blocks re-entry/re-exit, so a 30s window never blocks normal trades.
 EXIT_DEDUP_WINDOW_SEC = 30.0
 _EXIT_DEDUP_CACHE_CAP = 200
 
 
 @dataclass
 class TradeRecord:
-    """단일 거래 기록."""
-    ts: float = 0.0                 # 기록 시각 (unix timestamp)
+    """A single trade record."""
+    ts: float = 0.0                 # record time (unix timestamp)
     strategy: str = ""              # "FOCUS" or "HARPOON"
     event: str = ""                 # "ENTRY" / "EXIT" / "PARTIAL"
     market: str = ""
     direction: str = ""             # "LONG" or "SHORT"
-    price: float = 0.0              # 체결 가격
+    price: float = 0.0              # fill price
     qty: float = 0.0
-    # Exit 전용 필드
+    # Exit-only fields
     entry_price: float = 0.0
-    exit_reason: str = ""           # "TP1", "TP2", "SL", "TIMEOUT", "trend_reversal" 등
-    pnl_gross: float = 0.0          # 수수료 전 PnL ($)
-    fee: float = 0.0                # 수수료 ($)
-    pnl_net: float = 0.0            # 순 PnL ($)
-    pnl_pct: float = 0.0            # 수익률 (%)
-    hold_sec: float = 0.0           # 보유 시간 (초)
+    exit_reason: str = ""           # "TP1", "TP2", "SL", "TIMEOUT", "trend_reversal", etc.
+    pnl_gross: float = 0.0          # PnL before fees ($)
+    fee: float = 0.0                # fee ($)
+    pnl_net: float = 0.0            # net PnL ($)
+    pnl_pct: float = 0.0            # return (%)
+    hold_sec: float = 0.0           # hold time (seconds)
     leverage: int = 1
-    margin: float = 0.0             # 투입 마진 ($)
+    margin: float = 0.0             # margin used ($)
     roe_pct: float = 0.0            # Return on Equity (%)
-    # 추가 정보
+    # Extra info
     phase: str = ""                 # FOCUS: SCOUT/REINFORCED/ALLIN
-    dynamic_trailing: bool = False  # Dynamic Trailing 사용 여부
-    breakeven_locked: bool = False  # 손익분기 잠금 여부
-    peak_profit_pct: float = 0.0    # 최고 수익률 (%)
+    dynamic_trailing: bool = False  # whether Dynamic Trailing was used
+    breakeven_locked: bool = False  # whether breakeven is locked
+    peak_profit_pct: float = 0.0    # peak return (%)
 
 
 class TradeJournal:
-    """FOCUS + Harpoon 전용 장부 매니저."""
+    """Dedicated ledger manager for FOCUS + Harpoon."""
 
     def __init__(self, path: Optional[str] = None):
-        # ★ [2026-06-23] path-aware — 거래소별 장부 격리(Bybit=기본 JOURNAL_PATH, Binance=별도).
-        #   path 미지정 시 기존 전역 경로(=Bybit/Harpoon, 0변화).
+        # ★ [2026-06-23] path-aware — per-exchange ledger isolation (Bybit=default JOURNAL_PATH, Binance=separate).
+        #   If path is unset, use the existing global path (=Bybit/Harpoon, no behavior change).
         self.path = path or JOURNAL_PATH
         self._lock = threading.Lock()
         self._recent_exits: Dict[tuple, float] = {}
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        # ★ 인메모리 캐시 (2026-05-15 leak fix) ──
-        # 매 5초 dashboard polling이 38MB 파일 풀파싱하던 누수 차단.
-        # 첫 호출 시 한 번만 파일→list 로드. 이후 _append/get_*은 메모리만 사용.
+        # ★ In-memory cache (2026-05-15 leak fix) ──
+        # Stops the leak where dashboard polling fully reparsed a 38MB file every 5s.
+        # Loads file→list once on first call. Afterwards _append/get_* use memory only.
         self._cache: List[Dict] = []
         self._cache_loaded = False
 
     def _ensure_cache(self):
-        """★ 첫 호출 시 전체 파일 → 인메모리 list (1회만)."""
+        """★ On first call, load the whole file → in-memory list (once only)."""
         if self._cache_loaded:
             return
         with self._lock:
@@ -105,7 +106,7 @@ class TradeJournal:
             self._cache_loaded = True
 
     def _append(self, record: TradeRecord):
-        """JSONL 한 줄 추가 + 인메모리 캐시 갱신."""
+        """Append one JSONL line + update the in-memory cache."""
         with self._lock:
             rec_dict = asdict(record)
             try:
@@ -115,11 +116,11 @@ class TradeJournal:
                     os.fsync(f.fileno())
             except OSError as exc:
                 logger.warning("[JOURNAL] write failed: %s", exc)
-            # ★ 캐시 갱신 (leak fix 2026-05-15) — 매번 풀파싱 차단의 핵심
+            # ★ Cache update (leak fix 2026-05-15) — the key to avoiding a full reparse each time
             if self._cache_loaded:
                 self._cache.append(rec_dict)
 
-    # ── Record Blocked (차단된 진입 시도) ──
+    # ── Record Blocked (a blocked entry attempt) ──
 
     def record_blocked(
         self,
@@ -129,7 +130,7 @@ class TradeJournal:
         reason: str,
         detail: str = "",
     ):
-        """차단된 진입 시도 기록 — 나중에 '몇 번 막았는가' 분석용."""
+        """Record a blocked entry attempt — for later 'how many times did we block' analysis."""
         rec = TradeRecord(
             ts=time.time(),
             strategy=strategy.upper(),
@@ -142,8 +143,9 @@ class TradeJournal:
         self._append(rec)
         logger.info("[JOURNAL] %s BLOCKED %s %s | %s | %s",
                     strategy, direction, market, reason, detail)
-        # ★ [2026-06-15 해결안 B] 게이트 집계 sink (옵션, FocusManager가 등록). 모든 BLOCKED의
-        #   단일 funnel 이라 '왜 침묵했나' 완전 집계. 실패는 절대 기록 흐름에 전파 안 함.
+        # ★ [2026-06-15 solution B] gate-aggregation sink (optional, registered by FocusManager).
+        #   A single funnel for all BLOCKED events, giving a complete 'why did it stay silent'
+        #   tally. Failures are never propagated into the recording flow.
         _sink = getattr(self, "_gate_sink", None)
         if _sink is not None:
             try:
@@ -163,7 +165,7 @@ class TradeJournal:
         leverage: int = 1,
         phase: str = "",
     ):
-        """진입 기록."""
+        """Record an entry."""
         margin = price * qty / leverage if leverage > 0 else price * qty
         rec = TradeRecord(
             ts=time.time(),
@@ -199,8 +201,8 @@ class TradeJournal:
         breakeven_locked: bool = False,
         peak_profit_pct: float = 0.0,
     ):
-        """청산 기록 (수수료 자동 계산)."""
-        # ── Dedup 가드 — phantom/SYNC 경로 동시 발동 시 중복 기록 방지 ──
+        """Record an exit (fee calculated automatically)."""
+        # ── Dedup guard — prevent duplicate records when phantom/SYNC paths fire together ──
         _now = time.time()
         _dedup_key = (
             market.upper(),
@@ -217,14 +219,14 @@ class TradeJournal:
                 )
                 return
             self._recent_exits[_dedup_key] = _now
-            # 캐시 정리 — 윈도우 ×10 이전 항목 제거
+            # Cache cleanup — drop entries older than window ×10
             if len(self._recent_exits) > _EXIT_DEDUP_CACHE_CAP:
                 _cutoff = _now - EXIT_DEDUP_WINDOW_SEC * 10
                 self._recent_exits = {
                     k: v for k, v in self._recent_exits.items() if v > _cutoff
                 }
 
-        # PnL 계산
+        # PnL calculation
         if direction.upper() == "LONG":
             pnl_gross = (exit_price - entry_price) * qty
         else:
@@ -281,7 +283,7 @@ class TradeJournal:
         reason: str,
         leverage: int = 1,
     ):
-        """부분 청산 기록."""
+        """Record a partial exit."""
         if direction.upper() == "LONG":
             pnl_gross = (exit_price - entry_price) * qty
         else:
@@ -319,9 +321,9 @@ class TradeJournal:
         include_blocked: bool = True,
         page: int = 1,
     ) -> Dict:
-        """거래 조회 (페이지네이션 + 필터). ★ 캐시 기반 (leak fix 2026-05-15)."""
+        """Query trades (pagination + filter). ★ Cache-based (leak fix 2026-05-15)."""
         self._ensure_cache()
-        # 필터링 — 캐시 list 순회 (파일 read 없음)
+        # Filtering — iterate the cache list (no file read)
         if strategy or market or not include_blocked:
             strat_u = strategy.upper() if strategy else ""
             mkt_u = market.upper() if market else ""
@@ -335,23 +337,23 @@ class TradeJournal:
                     continue
                 trades.append(rec)
         else:
-            trades = self._cache  # 필터 없으면 참조만 (복사 X)
+            trades = self._cache  # no filter → reference only (no copy)
 
         total_count = len(trades)
-        # 페이지 슬라이싱 (오래된 순 저장 → page=1이 최신)
+        # Page slicing (stored oldest-first → page=1 is newest)
         end_idx = total_count - ((page - 1) * limit)
         start_idx = max(0, end_idx - limit)
         end_idx = max(0, end_idx)
         return {"trades": trades[start_idx:end_idx], "total_count": total_count}
 
     def get_markets(self) -> List[str]:
-        """고유 마켓 목록 조회. ★ 캐시 기반."""
+        """Get the list of unique markets. ★ Cache-based."""
         self._ensure_cache()
         markets = {rec.get("market") for rec in self._cache if rec.get("market")}
         return sorted(markets)
 
     def get_summary(self) -> Dict[str, Any]:
-        """전략별 성과 요약."""
+        """Per-strategy performance summary."""
         trades = self.get_trades(limit=9999, include_blocked=True)["trades"]
         exits = [t for t in trades if t.get("event") == "EXIT"]
 
@@ -372,7 +374,7 @@ class TradeJournal:
             total_pnl = sum(t.get("pnl_net", 0) for t in s_exits)
             total_fee = sum(t.get("fee", 0) for t in s_exits)
 
-            # Dynamic trailing 사용 시 성과
+            # Performance when Dynamic trailing was used
             dt_exits = [t for t in s_exits if t.get("dynamic_trailing")]
             dt_pnl = sum(t.get("pnl_net", 0) for t in dt_exits)
             no_dt_exits = [t for t in s_exits if not t.get("dynamic_trailing")]
@@ -391,10 +393,10 @@ class TradeJournal:
                 "avg_pnl": round(total_pnl / len(s_exits), 4) if s_exits else 0,
                 "best_trade": round(max((t.get("pnl_net", 0) for t in s_exits), default=0), 4),
                 "worst_trade": round(min((t.get("pnl_net", 0) for t in s_exits), default=0), 4),
-                # 금액 기준 승률: win_pnl / (win_pnl + |loss_pnl|) × 100
+                # Amount-based win rate: win_pnl / (win_pnl + |loss_pnl|) × 100
                 "win_pnl": round(win_pnl, 4),
                 "loss_pnl": round(loss_pnl, 4),
-                # Dynamic trailing 비교
+                # Dynamic trailing comparison
                 "dt_trades": len(dt_exits),
                 "dt_pnl": round(dt_pnl, 4),
                 "no_dt_trades": len(no_dt_exits),
@@ -404,8 +406,9 @@ class TradeJournal:
                 "today_trades": sum(1 for t in s_exits if t.get("ts", 0) >= _reset_ts),
             }
 
-        # ★ [2026-05-31 부모] PnL 기산점 명확화 — 첫 EXIT ts (journal 파일 시작점).
-        #   부모님 통찰: "PnL 기산점이 정확하면 좋은데 사실 그것이 모호" → since 표시로 해결.
+        # ★ [2026-05-31 owner] Clarify the PnL baseline — first EXIT ts (journal file start point).
+        #   Owner's insight: "an accurate PnL baseline would be nice, but it's actually ambiguous"
+        #   → solved by showing a 'since' marker.
         first_exit_ts = min((t.get("ts", 0) for t in exits if t.get("ts", 0) > 0), default=0)
 
         summary["combined"] = {
@@ -414,18 +417,19 @@ class TradeJournal:
             "total_fee": round(sum(s.get("total_fee", 0) for s in summary.values() if isinstance(s, dict)), 4),
             "today_pnl": round(sum(s.get("today_pnl", 0) for s in summary.values() if isinstance(s, dict)), 4),
             "today_trades": sum(s.get("today_trades", 0) for s in summary.values() if isinstance(s, dict)),
-            "first_exit_ts": first_exit_ts,  # ★ PnL 기산점 (journal 첫 EXIT)
+            "first_exit_ts": first_exit_ts,  # ★ PnL baseline (journal's first EXIT)
         }
 
         return summary
 
 
-# ── Singleton (Bybit/Harpoon 전역 장부 — 기존 동작 0변화) ──
+# ── Singleton (Bybit/Harpoon global ledger — no behavior change) ──
 journal = TradeJournal()
 
-# ── Per-path 레지스트리 (거래소별 장부 격리) ──
-#   get_journal(JOURNAL_PATH) 는 위 전역 singleton 을 그대로 반환(같은 인메모리 캐시/dedup/gate_sink 보존).
-#   다른 경로(예: runtime/binance_futures/journal.jsonl)는 전용 인스턴스 1개를 캐시해 공유.
+# ── Per-path registry (per-exchange ledger isolation) ──
+#   get_journal(JOURNAL_PATH) returns the global singleton above as-is (preserving the same
+#   in-memory cache/dedup/gate_sink).
+#   Other paths (e.g. runtime/binance_futures/journal.jsonl) cache and share one dedicated instance.
 _JOURNALS: Dict[str, TradeJournal] = {JOURNAL_PATH: journal}
 _JOURNALS_LOCK = threading.Lock()
 

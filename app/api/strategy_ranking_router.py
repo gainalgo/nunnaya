@@ -43,7 +43,7 @@ router = APIRouter()
 
 
 # ============================================================
-# Holdings Upside Ranking - 보유 코인 상승 여력 순위
+# Holdings Upside Ranking - upside potential ranking of held coins
 # ============================================================
 
 @router.get(
@@ -58,24 +58,24 @@ def holdings_upside_ranking(
     top_n: int = Query(3, ge=1, le=20, description="Number of top coins to return"),
 ):
     """
-    현재 보유 중인 코인들의 상승 여력 순위.
+    Upside potential ranking of currently held coins.
 
-    AI 분석, 기술적 지표, 시장 모멘텀을 종합하여
-    가장 상승 여력이 큰 코인 TOP N을 반환합니다.
+    Combines AI analysis, technical indicators, and market momentum
+    to return the TOP N coins with the greatest upside potential.
 
-    평가 요소:
-    - AI 예측 점수 (ai_prediction)
-    - 추세 강도 (trend)
-    - RSI 과매도 여부
-    - 볼린저 밴드 위치 (하단 근처 = 상승 여력)
-    - 현재 손익률 (낙폭 큰 코인 = 반등 여력)
+    Evaluation factors:
+    - AI prediction score (ai_prediction)
+    - Trend strength (trend)
+    - RSI oversold condition
+    - Bollinger Band position (near lower band = upside potential)
+    - Current PnL (heavily dropped coin = rebound potential)
     """
     system = request.app.state.system
 
-    # 1. 현재 보유 코인 조회
+    # 1. Fetch currently held coins
     holdings = []
 
-    # 먼저 trade_client 확인
+    # First check trade_client
     if not hasattr(system, "trade_client") or system.trade_client is None:
         return {"ok": False, "error": "trade_client not available (DRY mode?)"}
 
@@ -107,9 +107,9 @@ def holdings_upside_ranking(
         return {"ok": False, "error": f"Failed to fetch holdings: {e}", "traceback": traceback.format_exc()}
 
     if not holdings:
-        return {"ok": True, "message": "보유 코인 없음 (잔고 0)", "rankings": []}
+        return {"ok": True, "message": "No held coins (balance 0)", "rankings": []}
 
-    # 2. 현재가 조회 (exchange ticker)
+    # 2. Fetch current prices (exchange ticker)
     symbols = [h["symbol"] for h in holdings]
     try:
         # Convert symbols to exchange market format
@@ -135,7 +135,7 @@ def holdings_upside_ranking(
         logger.error("strategy_ranking_router.holdings_upside_ranking L133 except", exc_info=True)
         tickers = {}
 
-    # 3. 각 코인의 상승 여력 점수 계산
+    # 3. Compute upside potential score for each coin
     rankings = []
 
     for h in holdings:
@@ -151,18 +151,18 @@ def holdings_upside_ranking(
         avg_buy = h["avg_buy_price"]
         qty = h["qty"]
 
-        # 현재 손익률
+        # Current PnL
         pnl_pct = ((current_price - avg_buy) / avg_buy * 100) if avg_buy > 0 else 0
 
-        # 평가 금액
+        # Valuation
         eval_usdt = current_price * qty
 
-        # AI 분석
+        # AI analysis
         ai_score = 0.5
         trend = 0.0
         volatility = 0.0
         rsi = 50.0
-        bb_position = 0.5  # 0=하단, 0.5=중간, 1=상단
+        bb_position = 0.5  # 0=lower, 0.5=middle, 1=upper
 
         ctx = system.coordinator.get_context(market)
         if ctx:
@@ -172,53 +172,53 @@ def holdings_upside_ranking(
             volatility = float(brain.get("volatility", 0.0))
             rsi = float(brain.get("rsi", 50.0))
 
-            # 볼린저 밴드 위치 계산
+            # Compute Bollinger Band position
             bb_upper = float(brain.get("bb_upper", current_price))
             bb_lower = float(brain.get("bb_lower", current_price))
             if bb_upper > bb_lower:
                 bb_position = (current_price - bb_lower) / (bb_upper - bb_lower)
 
-        # 상승 여력 점수 계산 (0~100)
+        # Compute upside potential score (0~100)
         upside_score = 0.0
 
-        # (1) AI 예측 점수 (가중치: 30%)
-        # 0.5 이상이면 상승 신호
+        # (1) AI prediction score (weight: 30%)
+        # >= 0.5 is a bullish signal
         ai_factor = (ai_score - 0.5) * 2.0  # -1 ~ +1
         upside_score += max(0, ai_factor * 30)
 
-        # (2) 추세 강도 (가중치: 20%)
-        # trend > 0 이면 상승 추세
+        # (2) Trend strength (weight: 20%)
+        # trend > 0 means uptrend
         trend_factor = min(1.0, max(-1.0, trend))
         upside_score += max(0, trend_factor * 20)
 
-        # (3) RSI 과매도 보너스 (가중치: 20%)
-        # RSI < 30 = 과매도 = 반등 여력
+        # (3) RSI oversold bonus (weight: 20%)
+        # RSI < 30 = oversold = rebound potential
         if rsi < 30:
             upside_score += 20
         elif rsi < 40:
             upside_score += 10
         elif rsi > 70:
-            upside_score -= 10  # 과매수 = 하락 가능성
+            upside_score -= 10  # overbought = downside risk
 
-        # (4) 볼린저 밴드 위치 (가중치: 15%)
-        # 하단 근처 = 상승 여력
-        bb_factor = 1.0 - bb_position  # 0=상단, 1=하단
+        # (4) Bollinger Band position (weight: 15%)
+        # near lower band = upside potential
+        bb_factor = 1.0 - bb_position  # 0=upper, 1=lower
         upside_score += bb_factor * 15
 
-        # (5) 낙폭 반등 기대 (가중치: 15%)
-        # 크게 하락한 코인 = 반등 여력 (단, 과도한 하락은 펀더멘탈 문제)
+        # (5) Drop rebound expectation (weight: 15%)
+        # heavily dropped coin = rebound potential (but excessive drop = fundamental issue)
         if -30 <= pnl_pct < -10:
-            upside_score += 15  # 적당한 낙폭 = 반등 기대
+            upside_score += 15  # moderate drop = rebound expected
         elif -10 <= pnl_pct < 0:
             upside_score += 10
         elif pnl_pct < -30:
-            upside_score += 5   # 과도한 낙폭 = 리스크
+            upside_score += 5   # excessive drop = risk
 
-        # 점수 정규화 (0~100)
+        # Normalize score (0~100)
         upside_score = max(0, min(100, upside_score))
 
-        # 예상 상승률 (휴리스틱)
-        # 변동성 기반 + AI 신뢰도
+        # Expected upside (heuristic)
+        # volatility-based + AI confidence
         daily_range = float(ticker.get("high_price") or current_price) - float(ticker.get("low_price") or current_price)
         daily_vol_pct = daily_range / current_price if current_price > 0 else 0.05
         expected_upside_pct = daily_vol_pct * 100 * max(0.2, ai_score)
@@ -244,10 +244,10 @@ def holdings_upside_ranking(
             "reason": _get_upside_reason(ai_score, trend, rsi, bb_position, pnl_pct),
         })
 
-    # 상승 여력 순으로 정렬
+    # Sort by upside potential
     rankings.sort(key=lambda x: x["upside_score"], reverse=True)
 
-    # 순위 부여
+    # Assign ranks
     for i, r in enumerate(rankings):
         r["rank"] = i + 1
 
@@ -266,35 +266,35 @@ def holdings_upside_ranking(
 
 
 def _get_upside_reason(ai_score: float, trend: float, rsi: float, bb_position: float, pnl_pct: float) -> str:
-    """상승 여력 판단 이유 생성."""
+    """Generate the reason for the upside potential assessment."""
     reasons = []
 
     if ai_score >= 0.65:
-        reasons.append("AI 강력 매수 신호")
+        reasons.append("Strong AI buy signal")
     elif ai_score >= 0.55:
-        reasons.append("AI 매수 우세")
+        reasons.append("AI buy bias")
 
     if trend >= 0.3:
-        reasons.append("상승 추세")
+        reasons.append("Uptrend")
 
     if rsi < 30:
-        reasons.append("RSI 과매도")
+        reasons.append("RSI oversold")
     elif rsi < 40:
-        reasons.append("RSI 저점")
+        reasons.append("RSI low")
 
     if bb_position < 0.2:
-        reasons.append("BB 하단 터치")
+        reasons.append("BB lower band touch")
     elif bb_position < 0.4:
-        reasons.append("BB 하단 근처")
+        reasons.append("Near BB lower band")
 
     if -30 <= pnl_pct < -10:
-        reasons.append("낙폭 반등 기대")
+        reasons.append("Drop rebound expected")
 
-    return " · ".join(reasons) if reasons else "분석 중"
+    return " · ".join(reasons) if reasons else "Analyzing"
 
 
 # ============================================================
-# Market Upside Ranking - 전체 마켓 상승 여력 순위
+# Market Upside Ranking - upside potential ranking of all markets
 # ============================================================
 
 @router.get(
@@ -312,20 +312,20 @@ def market_upside_ranking(
     max_spread_bps: float = Query(50, ge=0, description="Maximum bid-ask spread in basis points (0=no filter)"),
 ):
     """
-    전체 마켓의 상승 여력 순위.
+    Upside potential ranking of all markets.
 
-    티커 데이터 + 엔진 context 기반 빠른 분석.
-    (캔들 조회 없이 즉시 응답)
+    Fast analysis based on ticker data + engine context.
+    (Responds immediately without fetching candles)
 
-    평가 요소:
-    - AI 예측 점수 (context 있는 경우)
-    - 일일 등락률 및 변동성
-    - 거래량
-    - 현재가 위치 (고가/저가 대비)
+    Evaluation factors:
+    - AI prediction score (when context is available)
+    - Daily change rate and volatility
+    - Trading volume
+    - Current price position (vs high/low)
 
-    필터링:
-    - min_price: 최소 가격 (기본 0.01 USDT) - 페니코인 제외
-    - max_spread_bps: 최대 스프레드 (기본 50 bps = 0.5%) - 유동성 낮은 코인 제외
+    Filtering:
+    - min_price: minimum price (default 0.01 USDT) - excludes penny coins
+    - max_spread_bps: maximum spread (default 50 bps = 0.5%) - excludes illiquid coins
     """
     import time
 
@@ -341,7 +341,7 @@ def market_upside_ranking(
     if cached is not None:
         return cached
 
-    # 1. Exchange 마켓 티커 전체 조회
+    # 1. Fetch all exchange market tickers
     try:
         # First get all markets
         markets_resp = bybit_get(BYBIT_MARKET_INSTRUMENTS, params={"category": bybit_v5_rest_category()}, timeout=5.0)
@@ -361,7 +361,7 @@ def market_upside_ranking(
     if not tickers:
         return {"ok": True, "message": "No markets", "rankings": []}
 
-    # 2. 거래량 + 가격 필터링
+    # 2. Volume + price filtering
     filtered_tickers = []
     filtered_out = {"low_volume": 0, "low_price": 0, "wide_spread": 0}
 
@@ -382,7 +382,7 @@ def market_upside_ranking(
     if not filtered_tickers:
         return {"ok": True, "message": "No markets meet filter criteria", "rankings": [], "filtered_out": filtered_out}
 
-    # 3. 각 코인의 상승 여력 점수 계산 (캔들 조회 없이 티커만 사용)
+    # 3. Compute upside potential score for each coin (ticker only, no candles)
     system = request.app.state.system
     rankings = []
 
@@ -399,21 +399,21 @@ def market_upside_ranking(
         low = float(ticker.get("low_price") or current_price)
         prev_close = float(ticker.get("prev_closing_price") or current_price)
 
-        # 일일 변동폭 (%)
+        # Daily range (%)
         daily_vol_pct = (high - low) / low if low > 0 else 0.05
 
-        # 일일 등락률 (%) - signed_change_rate는 비율이므로 * 100
+        # Daily change rate (%) - signed_change_rate is a ratio so * 100
         change_pct = float(ticker.get("signed_change_rate") or 0) * 100
 
-        # 현재가 위치 (고가/저가 대비) - 저가에 가까울수록 상승 여력
+        # Current price position (vs high/low) - closer to low = more upside
         price_position = (current_price - low) / (high - low) if high > low else 0.5
 
-        # AI 분석 (context가 있으면 사용)
+        # AI analysis (used when context is available)
         ai_score = 0.5
         trend = 0.0
         volatility = daily_vol_pct
         rsi = 50.0
-        bb_position = price_position  # 티커 기반 근사
+        bb_position = price_position  # ticker-based approximation
 
         ctx = system.coordinator.get_context(market)
         if ctx:
@@ -427,25 +427,25 @@ def market_upside_ranking(
             if bb_upper > bb_lower:
                 bb_position = (current_price - bb_lower) / (bb_upper - bb_lower)
         else:
-            # context 없으면 티커 기반 휴리스틱
-            # 하락 중이면 반등 기대 (단, 과도한 하락은 제외)
+            # No context: ticker-based heuristic
+            # If declining, expect rebound (but exclude excessive drops)
             if -5 <= change_pct < -1:
-                trend = 0.1  # 약간의 반등 기대
+                trend = 0.1  # slight rebound expected
             elif change_pct >= 2:
-                trend = 0.2  # 상승 모멘텀
+                trend = 0.2  # upward momentum
 
-        # 상승 여력 점수 계산 (0~100)
+        # Compute upside potential score (0~100)
         upside_score = 0.0
 
-        # (1) AI 예측 점수 (가중치: 25%)
+        # (1) AI prediction score (weight: 25%)
         ai_factor = (ai_score - 0.5) * 2.0
         upside_score += max(0, ai_factor * 25)
 
-        # (2) 추세 강도 (가중치: 20%)
-        trend_factor = min(1.0, max(-1.0, trend * 10))  # 스케일 조정
+        # (2) Trend strength (weight: 20%)
+        trend_factor = min(1.0, max(-1.0, trend * 10))  # scale adjustment
         upside_score += max(0, trend_factor * 20)
 
-        # (3) RSI 과매도 보너스 (가중치: 20%)
+        # (3) RSI oversold bonus (weight: 20%)
         if rsi < 30:
             upside_score += 20
         elif rsi < 40:
@@ -455,32 +455,32 @@ def market_upside_ranking(
         elif rsi > 70:
             upside_score -= 10
 
-        # (4) 볼린저 밴드 위치 (가중치: 15%)
+        # (4) Bollinger Band position (weight: 15%)
         bb_factor = 1.0 - bb_position
         upside_score += bb_factor * 15
 
-        # (5) 거래량 상위 보너스 (가중치: 10%)
-        # 거래량 많을수록 유동성 좋음 (USDT 기준)
-        if vol24 >= 500_000_000:  # 500M USDT 이상
+        # (5) High-volume bonus (weight: 10%)
+        # higher volume = better liquidity (USDT basis)
+        if vol24 >= 500_000_000:  # 500M USDT or more
             upside_score += 10
-        elif vol24 >= 100_000_000:  # 100M USDT 이상
+        elif vol24 >= 100_000_000:  # 100M USDT or more
             upside_score += 7
-        elif vol24 >= 50_000_000:  # 50M USDT 이상
+        elif vol24 >= 50_000_000:  # 50M USDT or more
             upside_score += 4
 
-        # (6) 변동성 보너스 (가중치: 10%)
-        # 적당한 변동성 = 기회
+        # (6) Volatility bonus (weight: 10%)
+        # moderate volatility = opportunity
         if 0.03 <= daily_vol_pct <= 0.10:
             upside_score += 10
         elif 0.02 <= daily_vol_pct < 0.03:
             upside_score += 5
         elif daily_vol_pct > 0.15:
-            upside_score -= 5  # 과도한 변동성 = 리스크
+            upside_score -= 5  # excessive volatility = risk
 
-        # 점수 정규화 (0~100)
+        # Normalize score (0~100)
         upside_score = max(0, min(100, upside_score))
 
-        # 예상 상승률
+        # Expected upside
         confidence = max(0.2, (ai_score - 0.5) * 2.0)
         expected_upside_pct = daily_vol_pct * 100 * confidence
 
@@ -504,10 +504,10 @@ def market_upside_ranking(
             "reason": _get_market_upside_reason(ai_score, trend, rsi, bb_position, vol24, daily_vol_pct),
         })
 
-    # 상승 여력 순으로 정렬
+    # Sort by upside potential
     rankings.sort(key=lambda x: x["upside_score"], reverse=True)
 
-    # 순위 부여
+    # Assign ranks
     for i, r in enumerate(rankings):
         r["rank"] = i + 1
 
@@ -528,42 +528,42 @@ def market_upside_ranking(
 
 
 def _get_market_upside_reason(ai_score: float, trend: float, rsi: float, bb_position: float, vol24: float, daily_vol_pct: float) -> str:
-    """전체 마켓 상승 여력 판단 이유 생성."""
+    """Generate the reason for the market-wide upside potential assessment."""
     reasons = []
 
     if ai_score >= 0.65:
-        reasons.append("AI 강력 매수")
+        reasons.append("Strong AI buy")
     elif ai_score >= 0.55:
-        reasons.append("AI 매수 우세")
+        reasons.append("AI buy bias")
 
     if trend >= 0.03:
-        reasons.append("상승 추세")
+        reasons.append("Uptrend")
     elif trend >= 0.01:
-        reasons.append("추세 전환 중")
+        reasons.append("Trend reversing")
 
     if rsi < 30:
-        reasons.append("RSI 과매도")
+        reasons.append("RSI oversold")
     elif rsi < 40:
-        reasons.append("RSI 저점")
+        reasons.append("RSI low")
 
     if bb_position < 0.2:
-        reasons.append("BB 하단")
+        reasons.append("BB lower band")
     elif bb_position < 0.35:
-        reasons.append("BB 하단 근처")
+        reasons.append("Near BB lower band")
 
-    if vol24 >= 500_000_000:  # 500M USDT 이상
-        reasons.append("대형주")
-    elif vol24 >= 100_000_000:  # 100M USDT 이상
-        reasons.append("중형주")
+    if vol24 >= 500_000_000:  # 500M USDT or more
+        reasons.append("Large cap")
+    elif vol24 >= 100_000_000:  # 100M USDT or more
+        reasons.append("Mid cap")
 
     if 0.05 <= daily_vol_pct <= 0.10:
-        reasons.append("변동성 적정")
+        reasons.append("Moderate volatility")
 
-    return " · ".join(reasons) if reasons else "분석 중"
+    return " · ".join(reasons) if reasons else "Analyzing"
 
 
 # ============================================================
-# Rebound Opportunity - 전체 마켓에서 급락 후 반등 기회 포착
+# Rebound Opportunity - find rebound opportunities after a sharp drop
 # ============================================================
 
 @router.get(
@@ -583,20 +583,20 @@ def market_rebound_ranking(
     max_spread_bps: float = Query(50, ge=0, description="Maximum bid-ask spread in basis points (0=no filter)"),
 ):
     """
-    전체 마켓에서 급락 후 반등 기회를 찾습니다.
+    Find rebound opportunities after a sharp drop across all markets.
 
-    급락의 원인을 분석하고, 하락이 멈추고 반등할 가능성이 높은 코인을 찾습니다.
+    Analyzes the cause of the drop and finds coins likely to stop falling and rebound.
 
-    평가 요소:
-    - 선택한 시간대 낙폭 (필수: max_decline_pct 이하)
-    - 고가 대비 현재가 위치 (저점 근처)
-    - 거래량 급증 (패닉 셀링 후 바닥 확인)
-    - 일중 변동성 및 반등 신호
-    - AI 분석 (context 있는 경우)
+    Evaluation factors:
+    - Drop over the selected timeframe (required: at or below max_decline_pct)
+    - Current price position vs high (near the bottom)
+    - Volume spike (confirming a bottom after panic selling)
+    - Intraday volatility and rebound signals
+    - AI analysis (when context is available)
 
-    필터링:
-    - min_price: 최소 가격 (기본 0.01 USDT) - 페니코인 제외
-    - max_spread_bps: 최대 스프레드 (기본 50 bps = 0.5%) - 유동성 낮은 코인 제외
+    Filtering:
+    - min_price: minimum price (default 0.01 USDT) - excludes penny coins
+    - max_spread_bps: maximum spread (default 50 bps = 0.5%) - excludes illiquid coins
     """
     import time
 
@@ -610,7 +610,7 @@ def market_rebound_ranking(
     if cached is not None:
         return cached
 
-    # 1. Exchange 마켓 티커 전체 조회
+    # 1. Fetch all exchange market tickers
     try:
         # First get all markets
         markets_resp = bybit_get(BYBIT_MARKET_INSTRUMENTS, params={"category": bybit_v5_rest_category()}, timeout=5.0)
@@ -630,7 +630,7 @@ def market_rebound_ranking(
     if not tickers:
         return {"ok": True, "message": "No markets", "rankings": []}
 
-    # 2. 거래량 + 가격 필터링 후 티커 맵 생성
+    # 2. Build ticker map after volume + price filtering
     tickers = {}
     filtered_out = {"low_volume": 0, "low_price": 0, "wide_spread": 0}
 
@@ -652,15 +652,15 @@ def market_rebound_ranking(
     if not tickers:
         return {"ok": True, "message": "No markets meet filter criteria", "rankings": [], "filtered_out": filtered_out}
 
-    # 2.5. 1h/4h 캔들 조회 (필요한 경우)
+    # 2.5. Fetch 1h/4h candles (if needed)
     candle_changes = {}  # market -> change_rate
-    timeframe_label = "24시간"
+    timeframe_label = "24h"
 
     if timeframe in ("1h", "4h"):
         minutes = 60 if timeframe == "1h" else 240
-        timeframe_label = "1시간" if timeframe == "1h" else "4시간"
+        timeframe_label = "1h" if timeframe == "1h" else "4h"
 
-        for market in list(tickers.keys())[:100]:  # 최대 100개만
+        for market in list(tickers.keys())[:100]:  # up to 100 only
             try:
                 candle_resp = bybit_get(BYBIT_MARKET_KLINE, params={"category": bybit_v5_rest_category(), "symbol": market, "interval": str(minutes), "limit": 2}, timeout=3.0)
                 _raw_c = parse_bybit_list(candle_resp.json())
@@ -674,9 +674,9 @@ def market_rebound_ranking(
 
                 time.sleep(0.02)  # OS scheduling yield
             except Exception as exc:
-                logger.warning("[RANKING_API] 2.5. 1h/4h 캔들 조회 (필요한 경우): %s", exc, exc_info=True)
+                logger.warning("[RANKING_API] 2.5. fetch 1h/4h candles: %s", exc, exc_info=True)
 
-    # 3. 급락 코인 필터링 및 점수 계산
+    # 3. Filter dropping coins and compute scores
     system = request.app.state.system
     rankings = []
 
@@ -687,33 +687,33 @@ def market_rebound_ranking(
 
         vol_24h = float(ticker.get("acc_trade_price_24h") or 0)
 
-        # 변화율 (timeframe에 따라)
+        # Change rate (depends on timeframe)
         if timeframe in ("1h", "4h") and market in candle_changes:
             change_rate = candle_changes[market]
         else:
             change_rate = float(ticker.get("signed_change_rate") or 0) * 100
 
-        # 급락 필터 (max_decline_pct 이하만)
+        # Drop filter (only at or below max_decline_pct)
         if change_rate > max_decline_pct:
             continue
 
         currency = market.replace(Q.config.market_prefix, "") if market.startswith(Q.config.market_prefix) else market
 
-        # 가격 위치 분석
+        # Price position analysis
         high_price = float(ticker.get("high_price") or current_price)
         low_price = float(ticker.get("low_price") or current_price)
         prev_close = float(ticker.get("prev_closing_price") or current_price)
 
-        # 일중 범위 내 위치 (0=저점, 1=고점)
+        # Position within intraday range (0=low, 1=high)
         if high_price > low_price:
             intraday_position = (current_price - low_price) / (high_price - low_price)
         else:
             intraday_position = 0.5
 
-        # 전일 대비 낙폭
+        # Drop vs previous close
         drop_from_prev = ((current_price - prev_close) / prev_close * 100) if prev_close > 0 else 0
 
-        # AI 분석 (context 있는 경우)
+        # AI analysis (when context is available)
         rsi = 50.0
         trend = 0.0
         bb_position = 0.5
@@ -747,73 +747,75 @@ def market_rebound_ranking(
             if bb_upper > bb_lower:
                 bb_position = (current_price - bb_lower) / (bb_upper - bb_lower)
 
-        # ========== 반등 기회 점수 계산 ==========
+        # ========== Compute rebound opportunity score ==========
         rebound_score = 0.0
         rebound_signals = []
 
-        # (1) 낙폭 분석 (가중치: 25%)
+        # (1) Drop analysis (weight: 25%)
+        # NOTE: decline_severity values are kept in Korean — they are lookup keys
+        # in the dashboard JS severity-icon map (dashboard.js).
         if change_rate <= -15:
             decline_severity = "폭락"
-            rebound_score += 20  # 극심한 낙폭은 리스크
-            rebound_signals.append(f"폭락 ({change_rate:.1f}%)")
+            rebound_score += 20  # extreme drop is risky
+            rebound_signals.append(f"Crash ({change_rate:.1f}%)")
         elif change_rate <= -10:
             decline_severity = "급락"
             rebound_score += 25
-            rebound_signals.append(f"급락 ({change_rate:.1f}%)")
+            rebound_signals.append(f"Sharp drop ({change_rate:.1f}%)")
         elif change_rate <= -5:
             decline_severity = "하락"
             rebound_score += 20
-            rebound_signals.append(f"하락 ({change_rate:.1f}%)")
+            rebound_signals.append(f"Drop ({change_rate:.1f}%)")
         else:
             decline_severity = "조정"
             rebound_score += 15
-            rebound_signals.append(f"조정 ({change_rate:.1f}%)")
+            rebound_signals.append(f"Pullback ({change_rate:.1f}%)")
 
-        # (2) 저점 반등 신호 (가중치: 25%)
-        # 일중 저점에서 반등 중인가?
+        # (2) Bottom rebound signal (weight: 25%)
+        # Rebounding from the intraday low?
         if intraday_position < 0.2:
             rebound_score += 10
-            rebound_signals.append("저점 근처")
+            rebound_signals.append("Near bottom")
         elif 0.2 <= intraday_position <= 0.5:
-            rebound_score += 25  # 저점에서 반등 중
-            rebound_signals.append("저점 반등 중")
+            rebound_score += 25  # rebounding from the bottom
+            rebound_signals.append("Rebounding from bottom")
         elif 0.5 < intraday_position <= 0.7:
             rebound_score += 20
-            rebound_signals.append("회복 진행 중")
+            rebound_signals.append("Recovery in progress")
         else:
-            rebound_score += 5  # 이미 많이 회복
+            rebound_score += 5  # already recovered a lot
 
-        # (3) RSI 과매도 (가중치: 20%)
+        # (3) RSI oversold (weight: 20%)
         if rsi < 25:
             rebound_score += 20
-            rebound_signals.append(f"RSI 극과매도 ({rsi:.0f})")
+            rebound_signals.append(f"RSI deeply oversold ({rsi:.0f})")
         elif rsi < 30:
             rebound_score += 15
-            rebound_signals.append(f"RSI 과매도 ({rsi:.0f})")
+            rebound_signals.append(f"RSI oversold ({rsi:.0f})")
         elif rsi < 40:
             rebound_score += 10
-            rebound_signals.append(f"RSI 저점 ({rsi:.0f})")
+            rebound_signals.append(f"RSI low ({rsi:.0f})")
 
-        # (4) BB 하단 (가중치: 15%)
+        # (4) BB lower band (weight: 15%)
         if bb_position < 0.15:
             rebound_score += 15
-            rebound_signals.append("BB 하단 이탈")
+            rebound_signals.append("Broke below BB lower band")
         elif bb_position < 0.3:
             rebound_score += 10
-            rebound_signals.append("BB 하단 근처")
+            rebound_signals.append("Near BB lower band")
 
-        # (5) 거래량 분석 (가중치: 15%) - USDT 기준
-        # 거래량이 크면 관심 집중
-        if vol_24h >= 500_000_000:  # 500M USDT 이상
+        # (5) Volume analysis (weight: 15%) - USDT basis
+        # high volume = focused attention
+        if vol_24h >= 500_000_000:  # 500M USDT or more
             rebound_score += 15
-            rebound_signals.append("대형 거래량")
-        elif vol_24h >= 100_000_000:  # 100M USDT 이상
+            rebound_signals.append("Large volume")
+        elif vol_24h >= 100_000_000:  # 100M USDT or more
             rebound_score += 10
-            rebound_signals.append("활발한 거래")
-        elif vol_24h >= 30_000_000:  # 30M USDT 이상
+            rebound_signals.append("Active trading")
+        elif vol_24h >= 30_000_000:  # 30M USDT or more
             rebound_score += 5
 
-        # 점수 정규화 (0~100)
+        # Normalize score (0~100)
         rebound_score = max(0, min(100, rebound_score))
 
         rankings.append({
@@ -836,13 +838,13 @@ def market_rebound_ranking(
                 "low_price": low_price,
             },
             "signals": rebound_signals,
-            "reason": " · ".join(rebound_signals[:3]) if rebound_signals else "분석 중",
+            "reason": " · ".join(rebound_signals[:3]) if rebound_signals else "Analyzing",
         })
 
-    # 반등 기회 점수 순으로 정렬
+    # Sort by rebound opportunity score
     rankings.sort(key=lambda x: x["rebound_score"], reverse=True)
 
-    # 순위 부여
+    # Assign ranks
     for i, r in enumerate(rankings):
         r["rank"] = i + 1
 
@@ -853,7 +855,7 @@ def market_rebound_ranking(
         "total_declining": len(rankings),
         "top_n": top_n,
         "rankings": rankings[:top_n],
-        "all_rankings": rankings[:30],  # 최대 30개만
+        "all_rankings": rankings[:30],  # up to 30 only
         "summary": {
             "best_rebound": rankings[0] if rankings else None,
             "avg_rebound_score": round(sum(r["rebound_score"] for r in rankings) / len(rankings), 1) if rankings else 0,
@@ -865,7 +867,7 @@ def market_rebound_ranking(
 
 
 # ============================================================
-# RSI Ranking - 전체 USDT 마켓 RSI 순위 (과매도 코인 찾기)
+# RSI Ranking - RSI ranking of all USDT markets (find oversold coins)
 # ============================================================
 
 @router.get(
@@ -884,18 +886,18 @@ def market_rsi_ranking(
     max_spread_bps: float = Query(50, ge=0, description="Maximum bid-ask spread in basis points (0=no filter)"),
 ):
     """
-    전체 마켓의 RSI 순위.
+    RSI ranking of all markets.
 
-    RSI가 낮은 코인 = 과매도 상태 = 반등 가능성
+    Lower RSI = oversold = rebound potential
 
-    - RSI < 30: 극과매도 (강력 반등 기대)
-    - RSI 30~40: 과매도 (반등 가능)
-    - RSI 40~60: 중립
-    - RSI > 70: 과매수 (하락 가능)
+    - RSI < 30: deeply oversold (strong rebound expected)
+    - RSI 30~40: oversold (rebound possible)
+    - RSI 40~60: neutral
+    - RSI > 70: overbought (downside possible)
 
-    필터링:
-    - min_price: 최소 가격 (기본 0.01 USDT) - 페니코인 제외
-    - max_spread_bps: 최대 스프레드 (기본 50 bps = 0.5%) - 유동성 낮은 코인 제외
+    Filtering:
+    - min_price: minimum price (default 0.01 USDT) - excludes penny coins
+    - max_spread_bps: maximum spread (default 50 bps = 0.5%) - excludes illiquid coins
     """
     import time as time_module
 
@@ -909,7 +911,7 @@ def market_rsi_ranking(
     if cached is not None:
         return cached
 
-    # 1. Exchange 마켓 티커 전체 조회
+    # 1. Fetch all exchange market tickers
     try:
         # First get all markets
         markets_resp = bybit_get(BYBIT_MARKET_INSTRUMENTS, params={"category": bybit_v5_rest_category()}, timeout=5.0)
@@ -929,7 +931,7 @@ def market_rsi_ranking(
     if not tickers:
         return {"ok": True, "message": "No markets", "rankings": []}
 
-    # 2. 거래량 + 가격 필터링 후 티커 맵 생성
+    # 2. Build ticker map after volume + price filtering
     tickers = {}
     vol_filtered_markets = []
     filtered_out = {"low_volume": 0, "low_price": 0, "wide_spread": 0}
@@ -953,11 +955,11 @@ def market_rsi_ranking(
     if not vol_filtered_markets:
         return {"ok": True, "message": "No markets meet filter criteria", "rankings": [], "filtered_out": filtered_out}
 
-    # 3. RSI/MACD/일목 계산을 위한 캔들 조회 (15분 캔들 60개)
+    # 3. Fetch candles for RSI/MACD/Ichimoku calculation (60 x 15min candles)
     rankings = []
 
     def calc_ema(data, period):
-        """EMA 계산"""
+        """Compute EMA"""
         if len(data) < period:
             return None
         multiplier = 2 / (period + 1)
@@ -966,7 +968,7 @@ def market_rsi_ranking(
             ema = (price - ema) * multiplier + ema
         return ema
 
-    for market in vol_filtered_markets[:80]:  # 최대 80개만 (API 제한)
+    for market in vol_filtered_markets[:80]:  # up to 80 only (API limit)
         try:
             candle_resp = bybit_get(BYBIT_MARKET_KLINE, params={"category": bybit_v5_rest_category(), "symbol": market, "interval": "15", "limit": 60}, timeout=3.0)
             _raw_candles = parse_bybit_list(candle_resp.json())
@@ -982,7 +984,7 @@ def market_rsi_ranking(
             lows = [float(c.get("low_price") or 0) for c in candles]
             volumes = [float(c.get("candle_acc_trade_volume") or 0) for c in candles]
 
-            # RSI 계산 (14 period)
+            # RSI calculation (14 period)
             gains = []
             losses = []
             for i in range(1, len(closes)):
@@ -1006,33 +1008,33 @@ def market_rsi_ranking(
                 rs = avg_gain / avg_loss
                 rsi = 100 - (100 / (1 + rs))
 
-            # RSI 필터
+            # RSI filter
             if rsi > rsi_max:
                 continue
 
-            # MACD 계산 (12, 26, 9)
+            # MACD calculation (12, 26, 9)
             ema12 = calc_ema(closes, 12)
             ema26 = calc_ema(closes, 26)
             macd_line = (ema12 - ema26) if ema12 and ema26 else 0
-            macd_score = 40 if macd_line > 0 else 20  # 상승세면 40점, 하락세면 20점
+            macd_score = 40 if macd_line > 0 else 20  # 40 if rising, 20 if falling
 
-            # 일목균형표 간이 계산 (전환선 9, 기준선 26)
+            # Simplified Ichimoku (tenkan 9, kijun 26)
             tenkan = (max(highs[-9:]) + min(lows[-9:])) / 2 if len(highs) >= 9 else closes[-1]
             kijun = (max(highs[-26:]) + min(lows[-26:])) / 2 if len(highs) >= 26 else closes[-1]
             current = closes[-1]
 
-            # 일목 점수: 가격이 전환선/기준선 위면 상승세
+            # Ichimoku score: price above tenkan/kijun = rising
             ichimoku_score = 0
             if current > tenkan:
                 ichimoku_score += 50
             if current > kijun:
                 ichimoku_score += 50
 
-            # 거래량 점수: 최근 거래량 vs 평균 거래량
+            # Volume score: recent volume vs average volume
             avg_vol = sum(volumes[:-1]) / len(volumes[:-1]) if len(volumes) > 1 else 1
             current_vol = volumes[-1]
             vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1
-            volume_score = min(100, int(vol_ratio * 40))  # 최대 100점
+            volume_score = min(100, int(vol_ratio * 40))  # max 100 points
 
             ticker = tickers.get(market, {})
             currency = market.replace(Q.config.market_prefix, "") if market.startswith(Q.config.market_prefix) else market
@@ -1040,21 +1042,21 @@ def market_rsi_ranking(
             change_rate = float(ticker.get("signed_change_rate") or 0) * 100
             vol_24h = float(ticker.get("acc_trade_price_24h") or 0)
 
-            # RSI 상태 판단
+            # RSI status
             if rsi < 20:
-                rsi_status = "극과매도"
+                rsi_status = "Deeply oversold"
                 rsi_emoji = "🔴"
             elif rsi < 30:
-                rsi_status = "과매도"
+                rsi_status = "Oversold"
                 rsi_emoji = "🟠"
             elif rsi < 40:
-                rsi_status = "저점"
+                rsi_status = "Low"
                 rsi_emoji = "🟡"
             else:
-                rsi_status = "중립"
+                rsi_status = "Neutral"
                 rsi_emoji = "⚪"
 
-            # RSI 점수 (낮을수록 높은 점수 - 과매도 = 반등 기회)
+            # RSI score (lower = higher score - oversold = rebound opportunity)
             rsi_score = max(0, 100 - int(rsi * 2.5))
 
             rankings.append({
@@ -1081,13 +1083,13 @@ def market_rsi_ranking(
             logger.warning("[RSI ranking] %s connection failed, skipping", market)
             continue
         except Exception as exc:
-            logger.warning("[RANKING_API] RSI 점수 (낮을수록 높은 점수 - 과매도 = 반등 기회) except-> continue: %s", exc, exc_info=True)
+            logger.warning("[RANKING_API] RSI score (lower = higher, oversold = rebound) except-> continue: %s", exc, exc_info=True)
             continue
 
-    # RSI 낮은 순으로 정렬
+    # Sort by lowest RSI
     rankings.sort(key=lambda x: x["rsi"])
 
-    # 순위 부여
+    # Assign ranks
     for i, r in enumerate(rankings):
         r["rank"] = i + 1
 
@@ -1108,8 +1110,8 @@ def market_rsi_ranking(
 
 
 # ============================================================
-# Technical Aggregate Score - 종합 기술 점수
-# 거래량 + RSI + 일목균형표 + MACD 종합
+# Technical Aggregate Score
+# Combines volume + RSI + Ichimoku + MACD
 # ============================================================
 
 @router.get(
@@ -1128,19 +1130,19 @@ def market_tech_score(
     max_spread_bps: float = Query(50, ge=0, description="Maximum bid-ask spread in basis points (0=no filter)"),
 ):
     """
-    종합 기술 분석 점수.
+    Comprehensive technical analysis score.
 
-    4가지 지표를 종합하여 매수 적합도를 0~100 점수로 계산합니다.
+    Combines 4 indicators into a 0~100 buy-suitability score.
 
-    - 거래량 급등 (20%): 평균 대비 거래량 증가
-    - RSI (25%): 과매도 상태일수록 높은 점수
-    - 일목균형표 (25%): 구름 돌파/위치
-    - MACD (30%): 골든크로스, 히스토그램 방향
+    - Volume spike (20%): volume increase vs average
+    - RSI (25%): higher score the more oversold
+    - Ichimoku (25%): cloud breakout/position
+    - MACD (30%): golden cross, histogram direction
 
-    필터링:
-    - min_volume_usdt: 24시간 거래량 최소값 (기본 100M USDT)
-    - min_price: 최소 가격 (기본 0.01 USDT) - 페니코인 제외
-    - max_spread_bps: 최대 스프레드 (기본 50 bps = 0.5%) - 유동성 낮은 코인 제외
+    Filtering:
+    - min_volume_usdt: minimum 24h volume (default 100M USDT)
+    - min_price: minimum price (default 0.01 USDT) - excludes penny coins
+    - max_spread_bps: maximum spread (default 50 bps = 0.5%) - excludes illiquid coins
     """
     import time as time_module
 
@@ -1154,7 +1156,7 @@ def market_tech_score(
     if cached is not None:
         return cached
 
-    # 1. Exchange 마켓 티커 전체 조회
+    # 1. Fetch all exchange market tickers
     try:
         # First get all markets
         markets_resp = bybit_get(BYBIT_MARKET_INSTRUMENTS, params={"category": bybit_v5_rest_category()}, timeout=5.0)
@@ -1174,7 +1176,7 @@ def market_tech_score(
     if not tickers:
         return {"ok": True, "message": "No markets", "rankings": []}
 
-    # 2. 거래량 + 가격 필터링 후 티커 맵 생성
+    # 2. Build ticker map after volume + price filtering
     tickers = {}
     vol_filtered_markets = []
     filtered_out = {"low_volume": 0, "low_price": 0, "wide_spread": 0}
@@ -1184,12 +1186,12 @@ def market_tech_score(
         vol_24h = float(t.get("acc_trade_price_24h") or 0)
         last_price = float(t.get("trade_price") or 0)
 
-        # 거래량 필터
+        # Volume filter
         if vol_24h < min_volume_usdt:
             filtered_out["low_volume"] += 1
             continue
 
-        # 가격 필터 (페니코인 제외)
+        # Price filter (excludes penny coins)
         if min_price > 0 and last_price < min_price:
             filtered_out["low_price"] += 1
             continue
@@ -1202,12 +1204,12 @@ def market_tech_score(
     if not vol_filtered_markets:
         return {"ok": True, "message": "No markets meet filter criteria", "rankings": [], "filtered_out": filtered_out}
 
-    # 3. 각 코인의 기술 점수 계산
+    # 3. Compute technical score for each coin
     rankings = []
 
-    for market in vol_filtered_markets[:60]:  # 최대 60개 (API 제한)
+    for market in vol_filtered_markets[:60]:  # up to 60 (API limit)
         try:
-            # 1시간 캔들 30개 조회 (일목균형표, MACD 계산용)
+            # Fetch 30 x 1h candles (for Ichimoku, MACD calculation)
             candle_resp = bybit_get(BYBIT_MARKET_KLINE, params={"category": bybit_v5_rest_category(), "symbol": market, "interval": "60", "limit": 30}, timeout=3.0)
             _raw_candles = parse_bybit_list(candle_resp.json())
             candles = [{"trade_price": float(k[4]), "high_price": float(k[2]), "low_price": float(k[3]), "opening_price": float(k[1]), "candle_acc_trade_volume": float(k[5]), "timestamp": int(k[0])} for k in _raw_candles if isinstance(k, (list, tuple)) and len(k) >= 6]
@@ -1224,7 +1226,7 @@ def market_tech_score(
 
             current_price = closes[-1]
 
-            # ========== 1. RSI 계산 (14 period) ==========
+            # ========== 1. RSI calculation (14 period) ==========
             gains, losses = [], []
             for i in range(1, min(15, len(closes))):
                 diff = closes[i] - closes[i-1]
@@ -1240,7 +1242,7 @@ def market_tech_score(
                 rs = avg_gain / avg_loss
                 rsi = 100 - (100 / (1 + rs))
 
-            # RSI 점수 (과매도일수록 높음)
+            # RSI score (higher the more oversold)
             if rsi < 20:
                 rsi_score = 100
             elif rsi < 30:
@@ -1256,7 +1258,7 @@ def market_tech_score(
             else:
                 rsi_score = 0
 
-            # ========== 2. MACD 계산 ==========
+            # ========== 2. MACD calculation ==========
             def ema(data, period):
                 if len(data) < period:
                     return data[-1] if data else 0
@@ -1270,60 +1272,60 @@ def market_tech_score(
             ema26 = ema(closes, 26)
             macd_line = ema12 - ema26
 
-            # 간단한 시그널 라인 (9일 EMA of MACD)
-            # 여기서는 단순화: MACD > 0 이고 상승 중이면 좋음
+            # Simple signal line (9-period EMA of MACD)
+            # Simplified here: good if MACD > 0 and rising
             prev_ema12 = ema(closes[:-1], 12) if len(closes) > 1 else ema12
             prev_ema26 = ema(closes[:-1], 26) if len(closes) > 1 else ema26
             prev_macd = prev_ema12 - prev_ema26
 
-            macd_momentum = macd_line - prev_macd  # 히스토그램 방향
+            macd_momentum = macd_line - prev_macd  # histogram direction
 
-            # MACD 점수
-            macd_score = 50  # 기본
+            # MACD score
+            macd_score = 50  # default
             if macd_line > 0 and macd_momentum > 0:
-                macd_score = 90  # 골든크로스 + 상승
+                macd_score = 90  # golden cross + rising
             elif macd_line < 0 and macd_momentum > 0:
-                macd_score = 70  # 아직 음수지만 상승 전환
+                macd_score = 70  # still negative but turning up
             elif macd_line > 0 and macd_momentum < 0:
-                macd_score = 40  # 양수지만 하락 중
+                macd_score = 40  # positive but declining
             elif macd_line < 0 and macd_momentum < 0:
-                macd_score = 10  # 데드크로스 + 하락
+                macd_score = 10  # dead cross + falling
 
-            # ========== 3. 일목균형표 (간략 계산) ==========
-            # 전환선: 9일 (고가+저가)/2
-            # 기준선: 26일 (고가+저가)/2
+            # ========== 3. Ichimoku (simplified calculation) ==========
+            # Tenkan: 9-period (high+low)/2
+            # Kijun: 26-period (high+low)/2
             if len(highs) >= 26 and len(lows) >= 26:
-                tenkan = (max(highs[-9:]) + min(lows[-9:])) / 2  # 전환선
-                kijun = (max(highs[-26:]) + min(lows[-26:])) / 2  # 기준선
+                tenkan = (max(highs[-9:]) + min(lows[-9:])) / 2  # tenkan
+                kijun = (max(highs[-26:]) + min(lows[-26:])) / 2  # kijun
 
-                # 구름 (선행스팬 A/B) - 단순화
+                # Cloud (senkou span A/B) - simplified
                 senkou_a = (tenkan + kijun) / 2
                 senkou_b = (max(highs[-52:]) + min(lows[-52:])) / 2 if len(highs) >= 52 else kijun
                 cloud_top = max(senkou_a, senkou_b)
                 cloud_bottom = min(senkou_a, senkou_b)
 
-                # 일목 점수
+                # Ichimoku score
                 ichimoku_score = 50
                 if current_price > cloud_top:
-                    ichimoku_score = 90  # 구름 위
+                    ichimoku_score = 90  # above the cloud
                     if current_price > tenkan > kijun:
-                        ichimoku_score = 100  # 완벽한 상승 배열
+                        ichimoku_score = 100  # perfect bullish alignment
                 elif current_price > cloud_bottom:
-                    ichimoku_score = 60  # 구름 안
+                    ichimoku_score = 60  # inside the cloud
                 else:
-                    ichimoku_score = 20  # 구름 아래
+                    ichimoku_score = 20  # below the cloud
                     if tenkan < kijun:
-                        ichimoku_score = 10  # 하락 배열
+                        ichimoku_score = 10  # bearish alignment
             else:
                 ichimoku_score = 50
 
-            # ========== 4. 거래량 점수 ==========
+            # ========== 4. Volume score ==========
             avg_vol = sum(volumes[:-1]) / (len(volumes) - 1) if len(volumes) > 1 else 1
             current_vol = volumes[-1] if volumes else 0
             vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1
 
             if vol_ratio >= 3.0:
-                volume_score = 100  # 거래량 폭발
+                volume_score = 100  # volume explosion
             elif vol_ratio >= 2.0:
                 volume_score = 80
             elif vol_ratio >= 1.5:
@@ -1331,10 +1333,10 @@ def market_tech_score(
             elif vol_ratio >= 1.0:
                 volume_score = 40
             else:
-                volume_score = 20  # 거래량 감소
+                volume_score = 20  # declining volume
 
-            # ========== 종합 점수 계산 ==========
-            # 거래량(20%) + RSI(25%) + 일목(25%) + MACD(30%)
+            # ========== Aggregate score calculation ==========
+            # Volume(20%) + RSI(25%) + Ichimoku(25%) + MACD(30%)
             total_score = (
                 volume_score * 0.20 +
                 rsi_score * 0.25 +
@@ -1350,7 +1352,9 @@ def market_tech_score(
             change_rate = float(ticker.get("signed_change_rate") or 0) * 100
             vol_24h = float(ticker.get("acc_trade_price_24h") or 0)
 
-            # 신호 판단
+            # Signal determination
+            # NOTE: signal values are kept in Korean — the dashboard JS compares them
+            # with strict equality (r.signal === "강력 매수" / "매수") in dashboard.js.
             if total_score >= 80:
                 signal = "강력 매수"
                 signal_emoji = "🟢"
@@ -1393,13 +1397,13 @@ def market_tech_score(
             logger.warning("[Tech score] %s connection failed, skipping", market)
             continue
         except Exception as exc:
-            logger.warning("[RANKING_API] 신호 판단 except-> continue: %s", exc, exc_info=True)
+            logger.warning("[RANKING_API] signal determination except-> continue: %s", exc, exc_info=True)
             continue
 
-    # 점수 높은 순으로 정렬
+    # Sort by highest score
     rankings.sort(key=lambda x: x["total_score"], reverse=True)
 
-    # 순위 부여
+    # Assign ranks
     for i, r in enumerate(rankings):
         r["rank"] = i + 1
 
@@ -1423,7 +1427,7 @@ def market_tech_score(
 
 
 # ============================================================
-# TOP 5 Rankings Unified API - 통합 랭킹 API
+# TOP 5 Rankings Unified API
 # ============================================================
 
 @router.get(
@@ -1441,15 +1445,15 @@ def market_rankings_unified(
     max_spread_bps: float = Query(50, ge=0, description="Maximum bid-ask spread in basis points"),
 ):
     """
-    통합 TOP 5 랭킹 API.
+    Unified TOP 5 rankings API.
 
-    4개 분석 API의 결과를 한번에 조회합니다:
-    - rebound: 급락 반등 기회 TOP 5
-    - rsi_oversold: RSI 과매도 TOP 5
-    - tech_score: 종합 기술 점수 TOP 5
-    - upside: 전체 마켓 상승 여력 TOP 5
+    Fetches the results of 4 analysis APIs at once:
+    - rebound: TOP 5 sharp-drop rebound opportunities
+    - rsi_oversold: TOP 5 RSI oversold
+    - tech_score: TOP 5 aggregate technical score
+    - upside: TOP 5 market-wide upside potential
 
-    캐시 TTL: 30초
+    Cache TTL: 30s
     """
     import time as time_module
 
@@ -1463,7 +1467,7 @@ def market_rankings_unified(
     if cached is not None:
         return cached
 
-    # 1. Exchange 마켓 티커 전체 조회 (한 번만)
+    # 1. Fetch all exchange market tickers (once)
     try:
         # First get all markets
         markets_resp = bybit_get(BYBIT_MARKET_INSTRUMENTS, params={"category": bybit_v5_rest_category()}, timeout=5.0)
@@ -1483,7 +1487,7 @@ def market_rankings_unified(
     if not tickers:
         return {"ok": True, "message": "No markets", "rankings": {}}
 
-    # 2. 공통 필터링
+    # 2. Common filtering
     tickers = {}
     for t in tickers:
         market = t.get("market", "")
@@ -1502,9 +1506,9 @@ def market_rankings_unified(
         return {"ok": True, "message": "No markets meet filter criteria", "rankings": {}}
 
     system = request.app.state.system
-    markets_list = list(tickers.keys())[:80]  # 최대 80개
+    markets_list = list(tickers.keys())[:80]  # up to 80
 
-    # 3. 캔들 데이터 조회 (15분 캔들 60개)
+    # 3. Fetch candle data (60 x 15min candles)
     candle_data = {}
     for market in markets_list:
         try:
@@ -1518,7 +1522,7 @@ def market_rankings_unified(
         except Exception as exc:
             logger.warning("[RANKING_API] Reverse for chronological order: %s", exc, exc_info=True)
 
-    # 4. 각 분석 수행
+    # 4. Run each analysis
     rebound_list = []
     rsi_list = []
     tech_list = []
@@ -1544,11 +1548,11 @@ def market_rankings_unified(
         low = float(ticker.get("low_price") or current_price)
         change_pct = float(ticker.get("signed_change_rate") or 0) * 100
 
-        # 가격 위치
+        # Price position
         price_position = (current_price - low) / (high - low) if high > low else 0.5
         daily_vol_pct = (high - low) / low if low > 0 else 0.05
 
-        # AI context 조회
+        # Fetch AI context
         ai_score = 0.5
         trend = 0.0
         rsi = 50.0
@@ -1565,7 +1569,7 @@ def market_rankings_unified(
             if bb_upper > bb_lower:
                 bb_position = (current_price - bb_lower) / (bb_upper - bb_lower)
 
-        # 캔들 기반 RSI/MACD 계산
+        # Candle-based RSI/MACD calculation
         candles = candle_data.get(market)
         rsi_calc = rsi
         macd_score = 50
@@ -1578,7 +1582,7 @@ def market_rankings_unified(
             lows_c = [float(c.get("low_price") or 0) for c in candles]
             volumes = [float(c.get("candle_acc_trade_volume") or 0) for c in candles]
 
-            # RSI 계산
+            # RSI calculation
             gains, losses = [], []
             for i in range(1, len(closes)):
                 diff = closes[i] - closes[i-1]
@@ -1613,7 +1617,7 @@ def market_rankings_unified(
                 else:
                     macd_score = 10
 
-            # 일목균형표
+            # Ichimoku
             if len(highs_c) >= 26:
                 tenkan = (max(highs_c[-9:]) + min(lows_c[-9:])) / 2
                 kijun = (max(highs_c[-26:]) + min(lows_c[-26:])) / 2
@@ -1629,7 +1633,7 @@ def market_rankings_unified(
                 else:
                     ichimoku_score = 20
 
-            # 거래량 점수
+            # Volume score
             if len(volumes) > 1:
                 avg_vol = sum(volumes[:-1]) / (len(volumes) - 1)
                 vol_ratio = volumes[-1] / avg_vol if avg_vol > 0 else 1
@@ -1642,7 +1646,7 @@ def market_rankings_unified(
                 else:
                     volume_score = 40
 
-        # RSI 점수 계산
+        # RSI score calculation
         if rsi_calc < 20:
             rsi_score = 100
         elif rsi_calc < 30:
@@ -1655,7 +1659,7 @@ def market_rankings_unified(
             rsi_score = 20
 
         # ===== (A) Rebound Score =====
-        if change_pct <= -3:  # 급락 코인만
+        if change_pct <= -3:  # dropping coins only
             rebound_score = 0.0
             if change_pct <= -15:
                 rebound_score += 20
@@ -1701,7 +1705,7 @@ def market_rankings_unified(
 
         # ===== (B) RSI Oversold =====
         if rsi_calc <= 40:
-            rsi_status = "극과매도" if rsi_calc < 20 else ("과매도" if rsi_calc < 30 else "저점")
+            rsi_status = "Deeply oversold" if rsi_calc < 20 else ("Oversold" if rsi_calc < 30 else "Low")
             rsi_list.append({
                 "market": market,
                 "price": current_price,
@@ -1718,6 +1722,8 @@ def market_rankings_unified(
             macd_score * 0.30
         )
         if tech_total >= 50:
+            # NOTE: signal values kept in Korean — dashboard JS compares them with
+            # strict equality (r.signal === "강력 매수" / "매수") in dashboard.js.
             signal = "강력 매수" if tech_total >= 80 else ("매수" if tech_total >= 65 else "중립")
             tech_list.append({
                 "market": market,
@@ -1761,9 +1767,9 @@ def market_rankings_unified(
             "ai_score": round(ai_score, 3),
         })
 
-    # 5. 각 리스트 정렬 및 TOP N 추출
+    # 5. Sort each list and extract TOP N
     rebound_list.sort(key=lambda x: x["score"], reverse=True)
-    rsi_list.sort(key=lambda x: x["rsi"])  # RSI 낮은 순
+    rsi_list.sort(key=lambda x: x["rsi"])  # lowest RSI first
     tech_list.sort(key=lambda x: x["score"], reverse=True)
     upside_list.sort(key=lambda x: x["score"], reverse=True)
 
@@ -1772,22 +1778,22 @@ def market_rankings_unified(
         "timestamp": int(time_module.time()),
         "rankings": {
             "rebound": {
-                "title": "급락 반등 기회",
+                "title": "Sharp-drop rebound opportunities",
                 "recommended_strategy": "GAZUA",
                 "items": rebound_list[:top_n],
             },
             "rsi_oversold": {
-                "title": "RSI 과매도",
+                "title": "RSI oversold",
                 "recommended_strategy": "LIGHTNING",
                 "items": rsi_list[:top_n],
             },
             "tech_score": {
-                "title": "종합 기술 점수",
+                "title": "Aggregate technical score",
                 "recommended_strategy": "LADDER",
                 "items": tech_list[:top_n],
             },
             "upside": {
-                "title": "전체 마켓",
+                "title": "All markets",
                 "recommended_strategy": "AUTOLOOP",
                 "items": upside_list[:top_n],
             },
@@ -1800,28 +1806,29 @@ def market_rankings_unified(
 # ============================================================
 # Manual Parameter Calculator
 # ------------------------------------------------------------
-# 목적:
-# - 추천 목록에 없는 코인도 수동 입력 시 전략별 권장 파라미터 계산
-# - 각 전략(LADDER/LIGHTNING/GAZUA)에 맞는 최적 값 반환
+# Purpose:
+# - Compute per-strategy recommended parameters for manually entered coins
+#   that are not in the recommendation lists
+# - Return optimal values for each strategy (LADDER/LIGHTNING/GAZUA)
 # ============================================================
 @router.get(
     "/calc_params",
-    summary="수동 코인 파라미터 계산",
-    description="입력된 마켓의 AI 점수/지표를 분석하여 전략별 권장 파라미터 반환",
+    summary="Manual coin parameter calculation",
+    description="Analyzes the AI score/indicators of the given market and returns per-strategy recommended parameters",
 )
 def calc_params(
     request: Request,
-    market: str = Query(..., description="마켓 코드 (예: BTCUSDT)"),
-    strategy: str = Query(..., description="전략 (LADDER, LIGHTNING, GAZUA)"),
+    market: str = Query(..., description="Market code (e.g., BTCUSDT)"),
+    strategy: str = Query(..., description="Strategy (LADDER, LIGHTNING, GAZUA)"),
     budget: float = Query(100, description="Budget (USDT)"),
 ):
-    """수동 코인 파라미터 계산."""
+    """Manual coin parameter calculation."""
     import time as time_module
 
     market = market.strip().upper()
     strategy = strategy.strip().upper()
 
-    # 마켓 형식 정규화: BTC, BTC/USDT 등 → BTCUSDT
+    # Normalize market format: BTC, BTC/USDT, etc. -> BTCUSDT
     market = market.replace("_", "").replace("/", "-")
     prefix = Q.config.market_prefix
     quote = Q.config.symbol  # USDT
@@ -1892,7 +1899,7 @@ def calc_params(
             if score is not None:
                 ai_score = float(score)
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
-        logger.warning("[RANKING_API] Candle format (reversed for chronological order): %s", exc, exc_info=True)
+        logger.warning("[RANKING_API] AI score prediction failed: %s", exc, exc_info=True)
 
     params = {}
 
@@ -2013,14 +2020,14 @@ def get_daily_pnl(
 
 @router.get(
     "/multi-timeframe/{market}",
-    summary="다중 타임프레임 AI 분석",
-    description="5분, 15분, 1시간 타임프레임에서 AI 점수를 계산하고 최적 타임프레임을 선택합니다.",
+    summary="Multi-timeframe AI analysis",
+    description="Computes AI scores across 5min, 15min, 1h timeframes and selects the best timeframe.",
 )
 def get_multi_timeframe_analysis(
     market: str,
-    force_refresh: bool = Query(False, description="캐시 무시하고 새로 계산"),
+    force_refresh: bool = Query(False, description="Ignore cache and recompute"),
 ) -> Dict[str, Any]:
-    """다중 타임프레임 AI 분석 결과 조회."""
+    """Fetch multi-timeframe AI analysis results."""
     try:
         from app.core.multi_timeframe_ai import analyze_multi_timeframe
 
@@ -2029,7 +2036,7 @@ def get_multi_timeframe_analysis(
         if not result:
             return {
                 "ok": False,
-                "error": "분석 실패 (데이터 부족)",
+                "error": "Analysis failed (insufficient data)",
                 "market": market.upper(),
             }
 
@@ -2052,24 +2059,24 @@ def get_multi_timeframe_analysis(
 
 @router.get(
     "/multi-timeframe/batch",
-    summary="다중 타임프레임 AI 배치 분석",
-    description="여러 마켓의 다중 타임프레임 AI 분석을 수행합니다.",
+    summary="Multi-timeframe AI batch analysis",
+    description="Runs multi-timeframe AI analysis for multiple markets.",
 )
 def get_multi_timeframe_batch(
-    markets: str = Query(..., description="쉼표로 구분된 마켓 목록 (예: BTCUSDT,ETHUSDT)"),
-    force_refresh: bool = Query(False, description="캐시 무시"),
+    markets: str = Query(..., description="Comma-separated market list (e.g., BTCUSDT,ETHUSDT)"),
+    force_refresh: bool = Query(False, description="Ignore cache"),
 ) -> Dict[str, Any]:
-    """다중 마켓 타임프레임 분석."""
+    """Multi-market timeframe analysis."""
     try:
         from app.core.multi_timeframe_ai import analyze_multi_timeframe
 
         market_list = [m.strip().upper() for m in markets.split(",") if m.strip()]
 
         if not market_list:
-            return {"ok": False, "error": "마켓 목록이 비어있습니다"}
+            return {"ok": False, "error": "Market list is empty"}
 
         if len(market_list) > 20:
-            return {"ok": False, "error": "최대 20개 마켓까지 지원됩니다"}
+            return {"ok": False, "error": "Up to 20 markets are supported"}
 
         results = {}
         for m in market_list:
@@ -2084,7 +2091,7 @@ def get_multi_timeframe_batch(
                     "reason": result.selection_reason,
                 }
             else:
-                results[m] = {"error": "분석 실패"}
+                results[m] = {"error": "Analysis failed"}
 
         return {
             "ok": True,
@@ -2097,20 +2104,20 @@ def get_multi_timeframe_batch(
 
 
 # ============================================================
-# Surge Scanner - 실시간 급등/역행 코인 스캐너
-# [2026-01-31] 역행(Contrarian) + AI 분석 통합
+# Surge Scanner - real-time surge/contrarian coin scanner
+# [2026-01-31] Contrarian + AI analysis integration
 # ============================================================
 
 def _get_market_benchmark(tickers: list, timeframe: str = "24h") -> dict:
-    """시장 기준점 계산 (BTC + 시장 평균).
+    """Compute market benchmark (BTC + market average).
 
     Returns:
         {
-            "btc_change": BTC 변화율 (%),
-            "market_avg": 시장 평균 변화율 (%),
-            "market_median": 시장 중앙값 변화율 (%),
-            "rising_count": 상승 코인 수,
-            "falling_count": 하락 코인 수,
+            "btc_change": BTC change rate (%),
+            "market_avg": market average change rate (%),
+            "market_median": market median change rate (%),
+            "rising_count": number of rising coins,
+            "falling_count": number of falling coins,
         }
     """
     btc_change = 0.0
@@ -2142,41 +2149,41 @@ def _get_market_benchmark(tickers: list, timeframe: str = "24h") -> dict:
 
 @router.get(
     "/market/surge",
-    summary="실시간 급등/역행 코인 스캐너",
+    summary="Real-time surge/contrarian coin scanner",
     responses={
-        200: {"description": "급등 및 역행 코인 목록"},
+        200: {"description": "List of surging and contrarian coins"},
     },
 )
 def market_surge_scanner(
     request: Request,
-    top_n: int = Query(10, ge=1, le=50, description="상위 N개"),
-    min_surge_pct: float = Query(3.0, ge=0.5, description="최소 급등률 (%)"),
-    min_volume_usdt: float = Query(500_000, ge=0, description="최소 24시간 거래량 (USDT)"),
-    timeframe: str = Query("1h", description="타임프레임: 5m, 15m, 1h, 4h, 24h"),
-    exclude_active: bool = Query(False, description="이미 활성화된 마켓 제외"),
-    mode: str = Query("both", description="모드: absolute(절대급등), relative(역행), both(둘다)"),
+    top_n: int = Query(10, ge=1, le=50, description="Top N"),
+    min_surge_pct: float = Query(3.0, ge=0.5, description="Minimum surge rate (%)"),
+    min_volume_usdt: float = Query(500_000, ge=0, description="Minimum 24h volume (USDT)"),
+    timeframe: str = Query("1h", description="Timeframe: 5m, 15m, 1h, 4h, 24h"),
+    exclude_active: bool = Query(False, description="Exclude already active markets"),
+    mode: str = Query("both", description="Mode: absolute (absolute surge), relative (contrarian), both"),
 ):
     """
-    전체 마켓에서 급등/역행 코인을 스캔합니다.
+    Scan all markets for surging/contrarian coins.
 
-    **모드 설명:**
-    - `absolute`: 절대 급등률 기준 (단순히 +5% 이상)
-    - `relative`: 역행 강도 기준 (시장 대비 상대 강도)
-      - 예: 시장평균 -3%, 코인 +5% → 역행강도 = +8%
-    - `both`: 둘 다 계산하여 종합 점수 (★ 기본값)
+    **Mode description:**
+    - `absolute`: by absolute surge rate (simply >= +5%)
+    - `relative`: by contrarian strength (relative strength vs market)
+      - e.g.: market avg -3%, coin +5% -> contrarian strength = +8%
+    - `both`: computes both into an aggregate score (★ default)
 
-    **타임프레임:**
-    - 5m: 5분 (초단타) | 15m: 15분 (스캘핑)
-    - 1h: 1시간 (단타) ★ | 4h: 4시간 (스윙)
-    - 24h: 24시간 (일일)
+    **Timeframe:**
+    - 5m: 5 minutes (ultra-scalp) | 15m: 15 minutes (scalping)
+    - 1h: 1 hour (intraday) ★ | 4h: 4 hours (swing)
+    - 24h: 24 hours (daily)
 
-    **SNIPER 타겟:**
-    - 역행 강도 높은 코인 (시장 하락 시 혼자 상승)
-    - AI 점수 + 거래량 급증 + RSI 여유
+    **SNIPER target:**
+    - coins with high contrarian strength (rising alone while market falls)
+    - AI score + volume spike + RSI headroom
     """
     import time
 
-    # Cache check (5초 TTL)
+    # Cache check (5s TTL)
     cache_key = _build_cache_key(
         "market/surge",
         top_n=top_n, min_surge_pct=min_surge_pct, min_volume_usdt=min_volume_usdt,
@@ -2186,11 +2193,11 @@ def market_surge_scanner(
     if cached is not None:
         return cached
 
-    # 타임프레임 설정
+    # Timeframe settings
     tf_minutes = {"5m": 5, "15m": 15, "1h": 60, "4h": 240, "24h": 1440}.get(timeframe, 60)
     tf_candles = {"5m": 3, "15m": 3, "1h": 2, "4h": 2, "24h": 1}.get(timeframe, 2)
 
-    # 1. 전체 마켓 티커 조회
+    # 1. Fetch all market tickers
     try:
         markets_resp = bybit_get(BYBIT_MARKET_INSTRUMENTS, params={"category": bybit_v5_rest_category()}, timeout=5.0)
         all_markets = [Q.normalize(str(m.get("symbol") or "")) for m in parse_bybit_list(markets_resp.json()) if isinstance(m, dict) and str(m.get("symbol") or "")]
@@ -2203,17 +2210,17 @@ def market_surge_scanner(
         tickers = [normalize_bybit_ticker(t) for t in _raw_tickers if isinstance(t, dict) and Q.normalize(str(t.get("symbol") or "")).upper() in _market_set]
     except Exception as e:
         logger.warning("strategy_ranking_router.market_surge_scanner L2189: %s", e)
-        return {"ok": False, "error": f"티커 조회 실패: {e}"}
+        return {"ok": False, "error": f"Ticker fetch failed: {e}"}
 
     if not tickers:
-        return {"ok": True, "message": "티커 없음", "surging": []}
+        return {"ok": True, "message": "No tickers", "surging": []}
 
-    # 2. 시장 기준점 계산 (역행 분석용)
+    # 2. Compute market benchmark (for contrarian analysis)
     benchmark = _get_market_benchmark(tickers, timeframe)
     btc_change = benchmark["btc_change"]
     market_avg = benchmark["market_avg"]
 
-    # 시스템 참조
+    # System reference
     system = request.app.state.system
     active_markets = set()
     if exclude_active and system:
@@ -2223,10 +2230,10 @@ def market_surge_scanner(
                 if state in (MarketState.ACTIVE, MarketState.RECOVERY):
                     active_markets.add(m)
         except (AttributeError, TypeError) as exc:
-            logger.warning("[RANKING_API] 시스템 참조: %s", exc, exc_info=True)
+            logger.warning("[RANKING_API] system reference: %s", exc, exc_info=True)
 
-    # 3. BTC 캔들로 타임프레임별 BTC 변화율 계산
-    btc_tf_change = btc_change  # 기본값은 24h
+    # 3. Compute per-timeframe BTC change rate from BTC candles
+    btc_tf_change = btc_change  # default is 24h
     if timeframe != "24h":
         try:
             btc_market = Q.market("BTC")
@@ -2239,9 +2246,9 @@ def market_surge_scanner(
                 if btc_past > 0:
                     btc_tf_change = ((btc_curr - btc_past) / btc_past) * 100
         except Exception as exc:
-            logger.warning("[RANKING_API] 3. BTC 캔들로 타임프레임별 BTC 변화율 계산: %s", exc, exc_info=True)
+            logger.warning("[RANKING_API] 3. compute per-timeframe BTC change from BTC candles: %s", exc, exc_info=True)
 
-    # 4. 거래량 필터링 + 후보 선별
+    # 4. Volume filtering + candidate selection
     candidates = []
 
     for t in tickers:
@@ -2249,7 +2256,7 @@ def market_surge_scanner(
 
         if market in active_markets:
             continue
-        if market == f"{Q.config.market_prefix}BTC":  # BTC는 기준이므로 제외
+        if market == f"{Q.config.market_prefix}BTC":  # BTC is the benchmark, so exclude
             continue
 
         vol_24h = float(t.get("acc_trade_price_24h") or 0)
@@ -2268,9 +2275,9 @@ def market_surge_scanner(
             "change_24h": change_24h,
         })
 
-    # 5. 타임프레임별 변화율 + 역행 강도 계산
+    # 5. Compute per-timeframe change rate + contrarian strength
     surging = []
-    all_tf_changes = []  # 시장 평균 계산용
+    all_tf_changes = []  # for computing market average
 
     if timeframe != "24h" and candidates:
         for batch_start in range(0, min(len(candidates), 100), 10):
@@ -2293,10 +2300,10 @@ def market_surge_scanner(
                             surge_pct = ((current_price - past_price) / past_price) * 100
                             all_tf_changes.append(surge_pct)
 
-                            # 역행 강도 = 코인 변화율 - BTC 변화율
+                            # contrarian strength = coin change rate - BTC change rate
                             relative_strength = surge_pct - btc_tf_change
 
-                            # 필터링: 모드에 따라
+                            # Filtering: depends on mode
                             passes_filter = False
                             if mode == "absolute" and surge_pct >= min_surge_pct:
                                 passes_filter = True
@@ -2325,9 +2332,9 @@ def market_surge_scanner(
 
                     time.sleep(0.02)
                 except Exception as exc:
-                    logger.warning("[RANKING_API] 필터링: 모드에 따라: %s", exc, exc_info=True)
+                    logger.warning("[RANKING_API] filtering by mode: %s", exc, exc_info=True)
     else:
-        # 24h 타임프레임
+        # 24h timeframe
         for c in candidates:
             ticker = c["ticker"]
             change = c["change_24h"]
@@ -2355,10 +2362,10 @@ def market_surge_scanner(
                     "low_price": float(ticker.get("low_price") or 0),
                 })
 
-    # 6. 타임프레임 시장 평균 계산
+    # 6. Compute timeframe market average
     market_tf_avg = sum(all_tf_changes) / len(all_tf_changes) if all_tf_changes else market_avg
 
-    # 7. AI/RSI 분석 + 급등 점수 계산
+    # 7. AI/RSI analysis + surge score calculation
     for item in surging:
         market = item["market"]
         ctx = system.coordinator.contexts.get(market) if system else None
@@ -2375,50 +2382,50 @@ def market_surge_scanner(
             item["trend"] = float(brain.get("trend", 0.0))
             item["momentum"] = float(brain.get("momentum", 0.0))
 
-        # 종합 점수 계산 (AI 기반)
+        # Aggregate score calculation (AI-based)
         surge = item["surge_pct"]
         rel_str = item["relative_strength"]
         rsi = item["rsi"]
         ai = item["ai_score"]
         vol_surge = item.get("vol_surge_ratio", 1.0)
 
-        # 점수 = 역행강도(40%) + 절대급등(20%) + AI(25%) + 거래량급증(15%)
-        # RSI 과매수 페널티
+        # score = contrarian strength(40%) + absolute surge(20%) + AI(25%) + volume spike(15%)
+        # RSI overbought penalty
         rsi_penalty = max(0, (rsi - 70) * 0.1) if rsi > 70 else 0
 
         score = (
-            rel_str * 0.4 +           # 역행 강도 (핵심)
-            surge * 0.2 +              # 절대 급등률
-            (ai - 0.5) * 50 * 0.25 +   # AI 점수 (0.5 기준)
-            min(vol_surge, 3.0) * 0.15 * 10 -  # 거래량 급증
-            rsi_penalty * 5             # 과매수 페널티
+            rel_str * 0.4 +           # contrarian strength (key)
+            surge * 0.2 +              # absolute surge rate
+            (ai - 0.5) * 50 * 0.25 +   # AI score (0.5 baseline)
+            min(vol_surge, 3.0) * 0.15 * 10 -  # volume spike
+            rsi_penalty * 5             # overbought penalty
         )
         item["sniper_score"] = round(score, 2)
 
-        # 역행 여부 판정
+        # Determine contrarian status
         item["is_contrarian"] = rel_str > 0 and btc_tf_change < 0
 
-        # 전략 추천
+        # Strategy recommendation
         if item["is_contrarian"] and rel_str >= 5:
             item["recommended_strategy"] = "SNIPER"
-            item["reason"] = f"역행 급등 (BTC {btc_tf_change:+.1f}% 대비 +{rel_str:.1f}%)"
+            item["reason"] = f"Contrarian surge (+{rel_str:.1f}% vs BTC {btc_tf_change:+.1f}%)"
         elif surge >= 10 and rsi < 80:
             item["recommended_strategy"] = "SNIPER"
-            item["reason"] = "강한 급등 + RSI 여유"
+            item["reason"] = "Strong surge + RSI headroom"
         elif surge >= 5:
             item["recommended_strategy"] = "LIGHTNING"
-            item["reason"] = "모멘텀 급등"
+            item["reason"] = "Momentum surge"
         else:
             item["recommended_strategy"] = "GAZUA"
-            item["reason"] = "추세 상승"
+            item["reason"] = "Trend rising"
 
-        # 경고
+        # Warnings
         if rsi >= 75:
-            item["warning"] = "RSI 과매수 주의"
+            item["warning"] = "Caution: RSI overbought"
         elif surge >= 20:
-            item["warning"] = "급등 피로 주의"
+            item["warning"] = "Caution: surge fatigue"
 
-    # 8. 정렬: sniper_score 높은 순
+    # 8. Sort: highest sniper_score first
     surging.sort(key=lambda x: -x.get("sniper_score", 0))
     surging = surging[:top_n]
 

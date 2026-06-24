@@ -1,8 +1,8 @@
 """
 Market Regime Detection Module
-- 시장 국면(BULL/BEAR/SIDEWAYS/VOLATILE) 인식
-- TP/SL 조절을 위한 변동성 스케일 제공
-- 예산 배분을 위한 국면별 배수 제공
+- Detects market regime (BULL/BEAR/SIDEWAYS/VOLATILE)
+- Provides a volatility scale for TP/SL adjustment
+- Provides per-regime multipliers for budget allocation
 
 [MIGRATED 2026-03-31] Bybit USDT
 """
@@ -41,7 +41,7 @@ class RegimeResult:
 
 
 class RegimeDetector:
-    """시장 국면 감지기"""
+    """Market regime detector"""
     
     def __init__(self):
         self.enabled = env_bool("OMA_REGIME_ENABLED", default=True)
@@ -49,25 +49,25 @@ class RegimeDetector:
         self.min_hold_sec = env_float("OMA_REGIME_MIN_HOLD_SEC", default=300.0)
         self.lookback_ticks = env_int("OMA_REGIME_LOOKBACK_TICKS", default=60)
         
-        # 국면 판정 임계치
+        # Regime decision thresholds
         self.atr_th = env_float("OMA_REGIME_ATR_TH", default=3.0)
         self.vol_th = env_float("OMA_REGIME_VOL_TH", default=5.0)
         self.bull_ret_th = env_float("OMA_REGIME_BULL_RET_TH", default=3.0)
         self.bear_ret_th = env_float("OMA_REGIME_BEAR_RET_TH", default=3.0)
-        
-        # 예산 배수
+
+        # Budget multipliers
         self.bull_max_mult_x = env_float("OMA_REGIME_BULL_MAX_MULT_X", default=1.25)
         self.bear_max_mult_x = env_float("OMA_REGIME_BEAR_MAX_MULT_X", default=0.70)
         self.volatile_corr_x = env_float("OMA_REGIME_VOLATILE_CORR_X", default=1.50)
-        
-        # 캐시
+
+        # Cache
         self._cache: Dict[str, RegimeResult] = {}
         self._last_regime: Optional[MarketRegime] = None
         self._regime_since: float = 0.0
         self._data_warning_logged: bool = False
     
     def detect(self, market: str = "BTCUSDT") -> RegimeResult:
-        """시장 국면 감지."""
+        """Detect the market regime."""
         if not self.enabled:
             return RegimeResult(
                 regime=MarketRegime.SIDEWAYS,
@@ -81,13 +81,13 @@ class RegimeDetector:
             )
         
         now = time.time()
-        
-        # 캐시 확인
+
+        # Check cache
         cached = self._cache.get(market)
         if cached and (now - cached.timestamp) < self.cache_sec:
             return cached
-        
-        # 가격 데이터 가져오기
+
+        # Fetch price data
         prices = self._get_prices(market, count=self.lookback_ticks)
         if not prices or len(prices) < 10:
             result = self._default_result()
@@ -97,17 +97,17 @@ class RegimeDetector:
                 self._data_warning_logged = True
             return result
         
-        # 지표 계산
+        # Compute indicators
         atr_pct = self._calc_atr_pct(prices)
         vol_pct = self._calc_volatility_pct(prices)
         ret_pct = self._calc_return_pct(prices)
         momentum = self._calc_momentum(prices)
         rsi = self._calc_rsi(prices)
         
-        # 국면 판정
+        # Determine regime
         regime = self._determine_regime(atr_pct, vol_pct, ret_pct, momentum, rsi)
-        
-        # 최소 홀드 시간 체크
+
+        # Minimum hold time check
         if self._last_regime and regime != self._last_regime:
             if (now - self._regime_since) < self.min_hold_sec:
                 regime = self._last_regime
@@ -134,32 +134,32 @@ class RegimeDetector:
         return result
     
     def _get_prices(self, market: str, count: int) -> List[float]:
-        """price_store에서 가격 히스토리 가져오기 (fallback 포함)"""
+        """Fetch price history from price_store (with fallback)"""
         if hasattr(price_store, 'get_prices'):
             prices = price_store.get_prices(market, count=count)
             if prices:
                 return prices
         
-        # fallback: 현재 가격만 반환
+        # fallback: return only the current price
         current = price_store.get_price(market)
         if current:
             return [current]
         return []
     
     def _determine_regime(self, atr_pct: float, vol_pct: float, ret_pct: float, momentum: float, rsi: float) -> MarketRegime:
-        # VOLATILE: 변동성 급증
+        # VOLATILE: volatility spike
         if atr_pct >= self.atr_th or vol_pct >= self.vol_th:
             return MarketRegime.VOLATILE
-        
-        # BULL: 상승 추세
+
+        # BULL: uptrend
         if ret_pct >= self.bull_ret_th and (momentum > 0 or rsi >= 55):
             return MarketRegime.BULL
-        
-        # BEAR: 하락 추세
+
+        # BEAR: downtrend
         if ret_pct <= -self.bear_ret_th and (momentum < 0 or rsi <= 45):
             return MarketRegime.BEAR
-        
-        # SIDEWAYS: 횡보
+
+        # SIDEWAYS: ranging
         return MarketRegime.SIDEWAYS
     
     def _calc_atr_pct(self, prices: List[float]) -> float:
@@ -224,7 +224,7 @@ class RegimeDetector:
         )
     
     def get_budget_multiplier(self, regime: MarketRegime) -> float:
-        """국면별 예산 배수 반환"""
+        """Return the budget multiplier for each regime"""
         if regime == MarketRegime.BULL:
             return self.bull_max_mult_x
         elif regime == MarketRegime.BEAR:
@@ -232,7 +232,7 @@ class RegimeDetector:
         return 1.0
     
     def get_tp_sl_scale(self, regime: MarketRegime) -> Dict[str, float]:
-        """국면별 TP/SL 스케일 반환"""
+        """Return the TP/SL scale for each regime"""
         scales = {
             MarketRegime.BULL: {"sl": 1.20, "tp": 1.25, "trail": 1.0},
             MarketRegime.BEAR: {"sl": 0.75, "tp": 0.70, "trail": 1.0},
@@ -242,7 +242,7 @@ class RegimeDetector:
         return scales.get(regime, {"sl": 1.0, "tp": 1.0, "trail": 1.0})
 
 
-# 싱글톤
+# Singleton
 _regime_detector: Optional[RegimeDetector] = None
 
 def get_regime_detector() -> RegimeDetector:

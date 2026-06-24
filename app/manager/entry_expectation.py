@@ -1,15 +1,15 @@
 # ============================================================
-# Entry Expectation Calculator — 진입 기대치 메커니즘 (Phase 1)
+# Entry Expectation Calculator — entry expectation mechanism (Phase 1)
 # ------------------------------------------------------------
-# 진입 시점에 "이 자리에서 어디까지 갈 수 있나"를 시장 구조로 정량화.
-#   Reward 거리 = 진입가 ~ 다음 자연 도달가 (primary_tf(H1) S/R zone)
-#   Risk 거리   = 진입가 ~ 무효화 가격 (직전 primary_tf(H1) swing low/high)
-#   RR ratio    = Reward / Risk
+# At entry time, quantify "how far can price go from here" via market structure.
+#   Reward distance = entry price ~ next natural target (primary_tf(H1) S/R zone)
+#   Risk distance   = entry price ~ invalidation price (prior primary_tf(H1) swing low/high)
+#   RR ratio        = Reward / Risk
 #
-# Pure functions — no state, no HyperSystem dependency. cycle_tp.py 스타일.
-# 입력 캔들은 OHLCV (oldest-first). dict↔OHLCV 변환은 호출부 책임.
-# ATR 은 인자로 받되, OHLCV 경로용 헬퍼 atr_from_ohlcv() 를 함께 제공한다
-# (technical_indicators.calc_atr_from_candles 는 Bybit dict 전용이라 못 씀).
+# Pure functions — no state, no HyperSystem dependency. cycle_tp.py style.
+# Input candles are OHLCV (oldest-first). dict↔OHLCV conversion is the caller's job.
+# ATR is taken as an argument, but a helper atr_from_ohlcv() is provided for the
+# OHLCV path (technical_indicators.calc_atr_from_candles is Bybit-dict-only, unusable here).
 # ============================================================
 from __future__ import annotations
 
@@ -21,21 +21,22 @@ from app.strategy.greenpen.zone_engine import compute_zones, Zone, ZoneType
 from app.strategy.greenpen.market_structure import analyze_structure
 
 
-# ── ATR Helper (OHLCV 입력용) ───────────────────────────────
+# ── ATR Helper (for OHLCV input) ────────────────────────────
 
 def atr_from_ohlcv(candles: List[OHLCV], period: int = 14) -> float:
-    """OHLCV 리스트(oldest-first)에서 ATR(절대 가격 단위) 계산.
+    """Compute ATR (absolute price units) from an OHLCV list (oldest-first).
 
-    표준 True Range 평균. technical_indicators.calc_atr_from_candles 의
-    OHLCV 입력 버전 — 그쪽은 Bybit dict("high_price" 등) 전용이라
-    OHLCV 경로(zone_engine·market_structure 와 같은 입력)에서 못 쓴다.
+    Standard True Range average. The OHLCV-input version of
+    technical_indicators.calc_atr_from_candles — that one is Bybit-dict-only
+    ("high_price" etc.), so it can't be used on the OHLCV path
+    (same input as zone_engine / market_structure).
 
     Args:
-        candles: OHLCV 리스트, oldest-first (candles[-1] 이 최신).
-        period: ATR 기간 (기본 14). 캔들이 부족하면 가능한 만큼 사용.
+        candles: OHLCV list, oldest-first (candles[-1] is the latest).
+        period: ATR period (default 14). If candles are short, use as many as available.
 
     Returns:
-        ATR 값 (가격 단위). 캔들 2개 미만이거나 유효 TR 0개면 0.0.
+        ATR value (price units). 0.0 if fewer than 2 candles or no valid TR.
     """
     if len(candles) < 2:
         return 0.0
@@ -58,23 +59,23 @@ def atr_from_ohlcv(candles: List[OHLCV], period: int = 14) -> float:
 
 @dataclass
 class EntryExpectation:
-    """진입 기대치 산정 결과.
+    """Result of the entry expectation computation.
 
-    reward_pct / risk_pct 는 진입가 대비 가격 이동 거리(%) — leverage 무관.
-    rr_ratio 는 reward_pct / risk_pct.
+    reward_pct / risk_pct are price-move distances (%) relative to the entry
+    price — leverage-independent. rr_ratio is reward_pct / risk_pct.
     """
-    reward_pct: float            # 진입가 → reward_target 거리 (%, 항상 ≥ 0)
-    risk_pct: float              # 진입가 → risk_invalidation 거리 (%, 항상 ≥ 0)
-    rr_ratio: float              # reward_pct / risk_pct (risk 0 이면 0.0)
-    reward_target: float         # 도달 목표가 (절대가격, 0 = 산정 불가)
-    risk_invalidation: float     # 무효화 가격 (절대가격, 0 = 산정 불가)
+    reward_pct: float            # entry → reward_target distance (%, always ≥ 0)
+    risk_pct: float              # entry → risk_invalidation distance (%, always ≥ 0)
+    rr_ratio: float              # reward_pct / risk_pct (0.0 if risk is 0)
+    reward_target: float         # target price (absolute, 0 = not computable)
+    risk_invalidation: float     # invalidation price (absolute, 0 = not computable)
     reward_source: str           # "primary_zone" / "m15_obstacle" / "atr_fallback" / "none"
     risk_source: str             # "primary_swing" / "atr_fallback" / "none"
-    note: str                    # 진단용 한 줄 설명
+    note: str                    # one-line diagnostic description
 
     @property
     def is_valid(self) -> bool:
-        """reward·risk 둘 다 산정됐는지 — Gate(Phase 2) 통과 전제."""
+        """Whether both reward and risk were computed — prerequisite for the Gate (Phase 2)."""
         return self.reward_pct > 0.0 and self.risk_pct > 0.0
 
 
@@ -91,27 +92,28 @@ def compute_entry_expectation(
     swing_lookback: int = 5,
     max_risk_pct: float = 0.15,
 ) -> EntryExpectation:
-    """진입 기대치(Reward / Risk / RR)를 시장 구조 기반으로 산정.
+    """Compute entry expectation (Reward / Risk / RR) from market structure.
 
     Args:
-        direction: "LONG" 또는 "SHORT".
-        entry_price: 진입(예정) 가격.
-        primary_candles: primary_tf(H1) OHLCV 리스트 (oldest-first). reward zone + risk swing 산정용.
-        atr_primary: primary_tf(H1) ATR(14). zone 폭 계산 + S/R 미발견 시 fallback 거리.
-        m15_candles: 15m OHLCV 리스트 (oldest-first). reward 경로 중간 장애물 탐지용.
-        m15_atr: 15m ATR(14). m15_candles 와 함께 있어야 장애물 탐지 작동.
-        swing_lookback: swing point 확인용 좌우 캔들 수.
-        max_risk_pct: risk_invalidation(무효화선)이 진입가 대비 이 비율 넘게
-            멀면 swing 을 신뢰하지 않고 ATR fallback 사용 (기본 0.15 = 15%).
+        direction: "LONG" or "SHORT".
+        entry_price: (planned) entry price.
+        primary_candles: primary_tf(H1) OHLCV list (oldest-first). For reward zone + risk swing.
+        atr_primary: primary_tf(H1) ATR(14). Zone width calc + fallback distance when no S/R found.
+        m15_candles: 15m OHLCV list (oldest-first). For detecting obstacles along the reward path.
+        m15_atr: 15m ATR(14). Must be present together with m15_candles for obstacle detection to work.
+        swing_lookback: number of left/right candles used to confirm a swing point.
+        max_risk_pct: if risk_invalidation (the invalidation line) is farther than this
+            ratio relative to the entry price, distrust the swing and use ATR fallback
+            (default 0.15 = 15%).
 
     Returns:
-        EntryExpectation. reward 또는 risk 산정 불가 시 해당 _pct=0.0, source="none".
-        입력이 깨졌으면(entry_price<=0, primary_candles<3) 전부 0 + is_valid=False.
+        EntryExpectation. If reward or risk is not computable, that _pct=0.0, source="none".
+        If input is broken (entry_price<=0, primary_candles<3), all 0 + is_valid=False.
     """
     d = direction.upper()
     is_long = d == "LONG"
 
-    # 입력이 깨졌으면 빈 결과 — Gate(Phase 2)에서 is_valid=False 로 차단됨
+    # Broken input → empty result — blocked at the Gate (Phase 2) via is_valid=False
     if entry_price <= 0 or len(primary_candles) < 3:
         return EntryExpectation(
             reward_pct=0.0, risk_pct=0.0, rr_ratio=0.0,
@@ -166,20 +168,20 @@ def _compute_reward_target(
     m15_candles: Optional[List[OHLCV]],
     m15_atr: Optional[float],
 ) -> Tuple[float, str]:
-    """다음 자연 도달가 산정: primary_tf(H1) S/R zone → m15 경로 장애물 단축 → ATR fallback."""
+    """Compute next natural target: primary_tf(H1) S/R zone → shorten by m15 path obstacle → ATR fallback."""
     target = 0.0
     source = "none"
 
-    # 1. primary_tf(H1) zone 기반 1차 목표 (compute_zones 는 atr<=0 이면 [] 반환)
+    # 1. primary_tf(H1) zone-based primary target (compute_zones returns [] if atr<=0)
     if atr_primary > 0:
         zones = compute_zones(primary_candles, atr_primary)
         zone = _nearest_directional_zone(zones, entry_price, is_long)
         if zone is not None:
-            # zone 의 먼저 닿는 경계 — LONG 은 하단, SHORT 는 상단 (보수적)
+            # The zone boundary hit first — lower for LONG, upper for SHORT (conservative)
             target = zone.price_low if is_long else zone.price_high
             source = "primary_zone"
 
-    # 2. m15 경로 장애물 — 1차 목표보다 먼저 닿는 반대 구조가 있으면 목표 단축
+    # 2. m15 path obstacle — if an opposing structure is hit before the primary target, shorten it
     if target > 0 and m15_candles and m15_atr and m15_atr > 0 and len(m15_candles) >= 3:
         m15_zones = compute_zones(m15_candles, m15_atr)
         obstacle = _path_obstacle(m15_zones, entry_price, target, is_long)
@@ -187,12 +189,12 @@ def _compute_reward_target(
             target = obstacle
             source = "m15_obstacle"
 
-    # 3. S/R 미발견 → ATR fallback (구조를 못 읽은 자리 = 보수적 1×ATR)
+    # 3. No S/R found → ATR fallback (a spot where structure can't be read = conservative 1×ATR)
     if target <= 0 and atr_primary > 0:
         target = entry_price + atr_primary if is_long else entry_price - atr_primary
         source = "atr_fallback"
 
-    # ATR fallback 이 음수가 되는 극단 케이스 방지 (SHORT, atr > entry_price)
+    # Guard against the extreme case where ATR fallback goes negative (SHORT, atr > entry_price)
     if target <= 0:
         return 0.0, "none"
 
@@ -204,9 +206,9 @@ def _nearest_directional_zone(
     entry_price: float,
     is_long: bool,
 ) -> Optional[Zone]:
-    """진입가 너머에서 가장 가까운 도달 목표 zone.
+    """Nearest target zone beyond the entry price.
 
-    LONG → 진입가 위의 RESISTANCE, SHORT → 진입가 아래의 SUPPORT.
+    LONG → RESISTANCE above the entry price, SHORT → SUPPORT below the entry price.
     """
     best: Optional[Zone] = None
     best_dist = float("inf")
@@ -232,9 +234,9 @@ def _path_obstacle(
     reward_target: float,
     is_long: bool,
 ) -> Optional[float]:
-    """진입가 ~ reward_target 경로 사이에서 먼저 닿는 반대 구조(장애물) 가격.
+    """Price of the opposing structure (obstacle) hit first along the entry ~ reward_target path.
 
-    LONG → 경로 중 RESISTANCE, SHORT → 경로 중 SUPPORT. 없으면 None.
+    LONG → RESISTANCE along the path, SHORT → SUPPORT along the path. None if absent.
     """
     best: Optional[float] = None
     best_dist = float("inf")
@@ -242,7 +244,7 @@ def _path_obstacle(
         if is_long:
             if z.type != ZoneType.RESISTANCE:
                 continue
-            level = z.price_low  # 먼저 닿는 경계
+            level = z.price_low  # boundary hit first
             if not (entry_price < level < reward_target):
                 continue
             dist = level - entry_price
@@ -269,19 +271,19 @@ def _compute_risk_invalidation(
     swing_lookback: int,
     max_risk_pct: float = 0.15,
 ) -> Tuple[float, str]:
-    """무효화 가격 산정: 직전 primary_tf(H1) swing low/high → ATR fallback.
+    """Compute invalidation price: prior primary_tf(H1) swing low/high → ATR fallback.
 
-    swing 이 진입가에서 max_risk_pct(기본 15%) 넘게 멀면 신뢰하지 않는다.
-    급등락한 코인은 진입가 근처에 swing 이 없어 아주 먼 옛날 극값을 잡는데
-    (예: SHORT 인데 swing high 가 진입가 +117%), 그러면 SL 이 절벽이 되고
-    RR 이 망가진다. 그 경우 swing 을 버리고 ATR fallback 으로 강등.
+    If a swing is farther than max_risk_pct (default 15%) from the entry price, distrust it.
+    Sharply moved coins have no swing near the entry price and pick up a very old, far
+    extreme (e.g. SHORT but the swing high is +117% from entry), which turns the SL into a
+    cliff and wrecks RR. In that case, discard the swing and downgrade to ATR fallback.
     """
     structure = analyze_structure(primary_candles, lookback=swing_lookback)
     invalidation = 0.0
     source = "none"
 
     if is_long:
-        # 진입가 아래의 가장 가까운(=가장 높은) swing low
+        # nearest (= highest) swing low below the entry price
         candidates = [
             s.price for s in structure.swings
             if not s.is_high and 0 < s.price < entry_price
@@ -290,7 +292,7 @@ def _compute_risk_invalidation(
             invalidation = max(candidates)
             source = "primary_swing"
     else:
-        # 진입가 위의 가장 가까운(=가장 낮은) swing high
+        # nearest (= lowest) swing high above the entry price
         candidates = [
             s.price for s in structure.swings
             if s.is_high and s.price > entry_price
@@ -299,17 +301,17 @@ def _compute_risk_invalidation(
             invalidation = min(candidates)
             source = "primary_swing"
 
-    # ★ swing 이 비정상적으로 멀면(진입가 대비 max_risk_pct 초과) 신뢰 불가 → 버림
+    # ★ If a swing is abnormally far (exceeds max_risk_pct vs entry), untrustworthy → discard
     if invalidation > 0 and abs(entry_price - invalidation) / entry_price > max_risk_pct:
         invalidation = 0.0
         source = "none"
 
-    # swing 미발견 또는 과도하게 멀어 폐기됨 → ATR fallback
+    # Swing not found, or discarded for being too far → ATR fallback
     if invalidation <= 0 and atr_primary > 0:
         invalidation = entry_price - atr_primary if is_long else entry_price + atr_primary
         source = "atr_fallback"
 
-    # ATR fallback 이 음수가 되는 극단 케이스 방지 (LONG, atr > entry_price)
+    # Guard against the extreme case where ATR fallback goes negative (LONG, atr > entry_price)
     if invalidation <= 0:
         return 0.0, "none"
 

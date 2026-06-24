@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Paper Trading Client — BybitTradeClient 동일 인터페이스, 모의 체결.
+"""Paper Trading Client — same interface as BybitTradeClient, simulated fills.
 
-PaperTradeClient는 실제 거래소 API를 호출하지 않고,
-현재 시장가 기반으로 즉시 체결을 시뮬레이션합니다.
-모든 전략이 LIVE 모드와 동일하게 동작하되, 실제 주문은 나가지 않습니다.
+PaperTradeClient does not call the real exchange API; it simulates
+immediate fills based on the current market price.
+All strategies behave identically to LIVE mode, but no real orders are sent.
 
 Usage:
     client = PaperTradeClient(initial_usdt=1000.0)
-    # OrderStateMachine에 BybitTradeClient 대신 주입
+    # Inject into OrderStateMachine in place of BybitTradeClient
     osm = OrderStateMachine(client=client, ledger=ledger)
 """
 from __future__ import annotations
@@ -22,12 +22,12 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_FEE_RATE = 0.001  # 0.1% taker fee (Bybit 기본)
+_DEFAULT_FEE_RATE = 0.001  # 0.1% taker fee (Bybit default)
 _STATE_FILE = "paper_positions.json"
 
 
 class PaperTradeClient:
-    """BybitTradeClient 프로토콜 호환 모의 거래 클라이언트."""
+    """Mock trading client compatible with the BybitTradeClient protocol."""
 
     def __init__(
         self,
@@ -37,7 +37,7 @@ class PaperTradeClient:
         slippage_bps: float = 0.0,
     ):
         self._fee_rate = float(fee_rate)
-        # ★ [2026-06-24] paper 슬리피지(편도 bps) — 매수=비싸게/매도=싸게 체결로 가정해 live 근접.
+        # ★ [2026-06-24] paper slippage (one-way bps) — assume buys fill higher / sells fill lower to approximate live.
         self._slip_bps = max(0.0, float(slippage_bps))
         self._lock = threading.Lock()
         self._state_file = os.path.join(
@@ -45,17 +45,17 @@ class PaperTradeClient:
             _STATE_FILE,
         )
 
-        # 상태 초기화
+        # Initialize state
         self._usdt_balance: float = float(initial_usdt)
         self._coin_balances: Dict[str, float] = {}  # {"BTC": 0.005, ...}
         self._order_history: List[Dict[str, Any]] = []
         self._initial_usdt = float(initial_usdt)
         self._created_ts = time.time()
 
-        # 기존 상태 로드 시도
+        # Try to load existing state
         self._load_state()
 
-        # API 통계 (BybitTradeClient 호환)
+        # API stats (BybitTradeClient compatible)
         self._api_call_count = 0
         self._api_call_reset_ts = time.time()
 
@@ -68,7 +68,7 @@ class PaperTradeClient:
     # State Persistence
     # ================================================================
     def _load_state(self):
-        """runtime/paper_positions.json에서 상태 복원."""
+        """Restore state from runtime/paper_positions.json."""
         try:
             if os.path.exists(self._state_file):
                 with open(self._state_file, "r", encoding="utf-8") as f:
@@ -88,7 +88,7 @@ class PaperTradeClient:
             logger.warning("[PaperTrade] State load failed, using initial: %s", e)
 
     def _save_state(self):
-        """상태를 JSON으로 저장 (thread-safe)."""
+        """Save state as JSON (thread-safe)."""
         try:
             from app.core.io_utils import safe_write_json
             data = {
@@ -107,7 +107,7 @@ class PaperTradeClient:
     # Price Lookup
     # ================================================================
     def _get_current_price(self, market: str) -> float:
-        """price_store에서 현재가 조회."""
+        """Look up the current price from price_store."""
         try:
             from app.core.hyper_price_store import price_store
             p = price_store.get_price(market)
@@ -135,7 +135,7 @@ class PaperTradeClient:
         self, market: str, side: str, price: float,
         qty: float, cost: float, fee: float,
     ) -> Dict[str, Any]:
-        """BybitTradeClient._convert_order() 와 동일한 포맷."""
+        """Same format as BybitTradeClient._convert_order()."""
         oid = f"PAPER-{uuid.uuid4().hex[:12]}"
         return {
             "uuid": oid,
@@ -156,20 +156,20 @@ class PaperTradeClient:
         }
 
     # ================================================================
-    # TradeClient Protocol — 핵심 메서드
+    # TradeClient Protocol — core methods
     # ================================================================
     def market_buy(self, market: str, amount: float, **kw) -> Dict[str, Any]:
-        """시장가 매수 시뮬레이션 (amount = USDT 금액)."""
+        """Simulate a market buy (amount = USDT value)."""
         return self.market_buy_usdt(market, amount, **kw)
 
     def market_buy_usdt(self, market: str, amount: float, **kw) -> Dict[str, Any]:
-        """USDT 기준 시장가 매수."""
+        """Market buy denominated in USDT."""
         symbol = self._normalize_symbol(market)
         price = self._get_current_price(symbol)
         if price <= 0:
             raise RuntimeError(f"[PaperTrade] No price for {symbol}")
 
-        price *= (1.0 + self._slip_bps / 10000.0)  # ★ paper 슬리피지 — 매수 불리(비싸게) 체결
+        price *= (1.0 + self._slip_bps / 10000.0)  # ★ paper slippage — buy fills unfavorably (higher)
         amount = float(amount)
         fee = amount * self._fee_rate
         net_amount = amount - fee
@@ -195,17 +195,17 @@ class PaperTradeClient:
         return order
 
     def market_sell(self, market: str, qty: float, **kw) -> Dict[str, Any]:
-        """시장가 매도 시뮬레이션 (qty = 코인 수량)."""
+        """Simulate a market sell (qty = coin quantity)."""
         return self.market_sell_qty(market, qty, **kw)
 
     def market_sell_qty(self, market: str, qty: float, **kw) -> Dict[str, Any]:
-        """수량 기준 시장가 매도."""
+        """Market sell by quantity."""
         symbol = self._normalize_symbol(market)
         price = self._get_current_price(symbol)
         if price <= 0:
             raise RuntimeError(f"[PaperTrade] No price for {symbol}")
 
-        price *= (1.0 - self._slip_bps / 10000.0)  # ★ paper 슬리피지 — 매도 불리(싸게) 체결
+        price *= (1.0 - self._slip_bps / 10000.0)  # ★ paper slippage — sell fills unfavorably (lower)
         qty = float(qty)
         proceeds = qty * price
         fee = proceeds * self._fee_rate
@@ -214,7 +214,7 @@ class PaperTradeClient:
         with self._lock:
             base = self._base_currency(symbol)
             held = self._coin_balances.get(base, 0.0)
-            if held < qty * 0.999:  # 0.1% 오차 허용
+            if held < qty * 0.999:  # allow 0.1% tolerance
                 raise RuntimeError(
                     f"[PaperTrade] Insufficient {base}: need {qty:.8f}, have {held:.8f}"
                 )
@@ -234,7 +234,7 @@ class PaperTradeClient:
         return order
 
     def market_sell_usdt(self, market: str, quote_amount: float, **kw) -> Dict[str, Any]:
-        """USDT 금액 기준 매도."""
+        """Sell by USDT value."""
         symbol = self._normalize_symbol(market)
         price = self._get_current_price(symbol)
         if price <= 0:
@@ -243,19 +243,19 @@ class PaperTradeClient:
         return self.market_sell_qty(market, qty, **kw)
 
     # ================================================================
-    # Limit Orders (즉시 체결로 시뮬레이션)
+    # Limit Orders (simulated as immediate fills)
     # ================================================================
     def limit_buy(self, market: str, price: float, volume: float, **kw) -> Dict[str, Any]:
-        """지정가 매수 → 즉시 체결로 시뮬레이션."""
+        """Limit buy → simulated as an immediate fill."""
         cost = float(price) * float(volume)
         return self.market_buy_usdt(market, cost, **kw)
 
     def limit_sell(self, market: str, price: float, volume: float, **kw) -> Dict[str, Any]:
-        """지정가 매도 → 즉시 체결로 시뮬레이션."""
+        """Limit sell → simulated as an immediate fill."""
         return self.market_sell_qty(market, volume, **kw)
 
     # ================================================================
-    # Place Order (통합 인터페이스)
+    # Place Order (unified interface)
     # ================================================================
     def place_order(self, *, market, side, ord_type, volume=None, price=None, **kw) -> Dict[str, Any]:
         s = str(side).lower()
@@ -278,7 +278,7 @@ class PaperTradeClient:
     # Account / Balance
     # ================================================================
     def accounts(self, *, skip_currencies=None, **kw) -> List[Dict[str, Any]]:
-        """계좌 잔고 조회 (BybitTradeClient.accounts() 호환)."""
+        """Query account balances (BybitTradeClient.accounts() compatible)."""
         skip = set(skip_currencies or [])
         result = []
         with self._lock:
@@ -320,7 +320,7 @@ class PaperTradeClient:
         return {"uuid": uuid, "state": "done", "market": market or "", "_raw": {"paper": True}}
 
     def list_orders(self, *, state="wait", market=None, limit=50, **kw) -> List[Dict[str, Any]]:
-        """대기 주문 조회 — Paper는 즉시 체결이므로 항상 빈 리스트."""
+        """Query pending orders — always empty since Paper fills immediately."""
         return []
 
     def list_done_orders(self, *, market=None, **kw) -> List[Dict[str, Any]]:
@@ -332,11 +332,11 @@ class PaperTradeClient:
         return orders
 
     def cancel_order(self, *, uuid: str, market=None) -> Dict[str, Any]:
-        """Paper 주문 취소 — 이미 체결됐으므로 no-op."""
+        """Cancel a Paper order — no-op since it is already filled."""
         return self.get_order(uuid=uuid, market=market)
 
     def wait_order(self, *, uuid: str, market=None, timeout_sec=30.0, poll_interval=1.0) -> Dict[str, Any]:
-        """Paper 주문 대기 — 즉시 체결이므로 바로 반환."""
+        """Wait on a Paper order — returns immediately since fills are instant."""
         return self.get_order(uuid=uuid, market=market)
 
     # ================================================================
@@ -358,7 +358,7 @@ class PaperTradeClient:
         return {"balance": self.accounts()}
 
     # ================================================================
-    # API Stats (BybitTradeClient 호환)
+    # API Stats (BybitTradeClient compatible)
     # ================================================================
     def get_api_stats(self) -> Dict[str, Any]:
         elapsed = time.time() - self._api_call_reset_ts
@@ -370,7 +370,7 @@ class PaperTradeClient:
         }
 
     # ================================================================
-    # Futures No-ops (BybitTradeClient 호환)
+    # Futures No-ops (BybitTradeClient compatible)
     # ================================================================
     def set_leverage(self, symbol: str, leverage: int = 1, **kw):
         logger.debug("[PaperTrade] set_leverage(%s, %d) — no-op", symbol, leverage)
@@ -381,7 +381,7 @@ class PaperTradeClient:
         return {"retCode": 0}
 
     def get_positions(self, symbol: str = "", **kw) -> List[Dict[str, Any]]:
-        """가상 포지션 조회."""
+        """Query virtual positions."""
         results = []
         with self._lock:
             for coin, qty in self._coin_balances.items():
@@ -419,10 +419,10 @@ class PaperTradeClient:
             return str(o)
 
     # ================================================================
-    # Paper-specific 관리
+    # Paper-specific management
     # ================================================================
     def reset(self, initial_usdt: float = 0.0):
-        """Paper 잔고 초기화."""
+        """Reset the Paper balance."""
         with self._lock:
             self._usdt_balance = initial_usdt or self._initial_usdt
             self._coin_balances.clear()
@@ -432,7 +432,7 @@ class PaperTradeClient:
         logger.info("[PaperTrade] Reset to $%.2f", self._usdt_balance)
 
     def get_summary(self) -> Dict[str, Any]:
-        """Paper 거래 요약."""
+        """Paper trading summary."""
         with self._lock:
             total_value = self._usdt_balance
             positions = []

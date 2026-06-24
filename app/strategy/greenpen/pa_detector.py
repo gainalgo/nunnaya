@@ -27,10 +27,10 @@ class PatternType(str, Enum):
     STAR_V1 = "STAR_V1"          # Pat3-1: Morning/Evening Star
     STAR_V2 = "STAR_V2"          # Pat3-2: same→opposite→breakout
     SQUEEZE_BREAK = "SQUEEZE_BREAK"  # Pat3-3: tight range → breakout
-    # ★ [2026-04-24] Break of Structure — 부모님 지시로 신규 추가
-    #   기존엔 키워드만 있고 detection 코드 없음 = 죽은 신호. 살림.
-    BOS_BULLISH = "BOS_BULLISH"  # 최근 N봉 high 돌파 + 종가 위 → LONG
-    BOS_BEARISH = "BOS_BEARISH"  # 최근 N봉 low  돌파 + 종가 아래 → SHORT
+    # ★ [2026-04-24] Break of Structure — newly added per owner's request
+    #   Previously only the keyword existed with no detection code = dead signal. Revived.
+    BOS_BULLISH = "BOS_BULLISH"  # break above recent N-bar high + close above → LONG
+    BOS_BEARISH = "BOS_BEARISH"  # break below recent N-bar low  + close below → SHORT
 
 
 @dataclass
@@ -140,8 +140,9 @@ def detect_pa_patterns(
         signals.append(sig)
 
     # ★ [2026-04-24] BOS — Break of Structure (lookback breakout)
-    #   부모 지시: BOS_BULLISH/BEARISH 키워드만 있고 detection 없던 결함 보강.
-    #   "하푼이 잡아야 할 신호" — 지지/저항 돌파 = HARPOON 의 진짜 먹잇감.
+    #   Owner's request: fix the gap where only the BOS_BULLISH/BEARISH keywords
+    #   existed with no detection. "A signal HARPOON should catch" —
+    #   support/resistance breakouts are HARPOON's real prey.
     sig = _detect_bos(candles, lookback=10)
     if sig:
         signals.append(sig)
@@ -435,33 +436,33 @@ def candles_from_prices(prices: list, *, window: int = 4) -> List[OHLCV]:
 
 
 # ── BOS: Break of Structure (lookback breakout) ─────────────
-# ★ [2026-04-24] 부모 지시: "하푼이 잡아야 할 신호" — 지지/저항 돌파.
-# 기존엔 PatternType BOS_BULLISH/BEARISH 키워드만 등록되어 있고
-# 실제 detection 코드가 없어서 죽은 신호였음. 이번에 활성.
+# ★ [2026-04-24] Owner's request: "a signal HARPOON should catch" — support/resistance breakout.
+# Previously only the PatternType BOS_BULLISH/BEARISH keywords were registered
+# with no actual detection code, so it was a dead signal. Now activated.
 def _detect_bos(
     candles: List[OHLCV],
     lookback: int = 10,
     *,
-    close_margin_pct: float = 0.0005,  # 종가가 break level 보다 0.05% 이상 outside
+    close_margin_pct: float = 0.0005,  # close must be at least 0.05% outside the break level
 ) -> Optional[PASignal]:
-    """Break of Structure: 최근 lookback 봉 high/low 돌파 + 종가가 그 위/아래.
+    """Break of Structure: break of the recent lookback high/low + close above/below it.
 
     BOS_BULLISH (LONG):
-      - 마지막 봉 high  > 직전 lookback 봉 max(high)
-      - 마지막 봉 close > 직전 lookback 봉 max(high) × (1 + margin)
-      - 종가가 양봉(bullish)
+      - last candle high  > prior lookback bars' max(high)
+      - last candle close > prior lookback bars' max(high) × (1 + margin)
+      - close is bullish
     BOS_BEARISH (SHORT):
-      - 마지막 봉 low   < 직전 lookback 봉 min(low)
-      - 마지막 봉 close < 직전 lookback 봉 min(low)  × (1 - margin)
-      - 종가가 음봉(bearish)
+      - last candle low   < prior lookback bars' min(low)
+      - last candle close < prior lookback bars' min(low)  × (1 - margin)
+      - close is bearish
 
-    confidence: 돌파폭 / lookback range. 작은 돌파일수록 confidence ↓.
+    confidence: breakout size / lookback range. Smaller breakouts → lower confidence.
     """
     if len(candles) < lookback + 1:
         return None
 
     last = candles[-1]
-    prior = candles[-lookback - 1:-1]  # 직전 lookback 봉 (마지막 봉 제외)
+    prior = candles[-lookback - 1:-1]  # prior lookback bars (excluding the last candle)
     if not prior:
         return None
 
@@ -474,14 +475,14 @@ def _detect_bos(
         and last.close > prior_high * (1 + close_margin_pct)
         and last.is_bullish):
         breakout_pct = (last.close - prior_high) / prior_range
-        conf = min(1.0, max(0.45, breakout_pct * 2.0))  # 작은 돌파도 0.45 보장
+        conf = min(1.0, max(0.45, breakout_pct * 2.0))  # guarantee 0.45 even for small breakouts
         return PASignal(
             pattern=PatternType.BOS_BULLISH,
             direction=Direction.LONG,
             confidence=conf,
             candle_idx=len(candles) - 1,
             trigger_price=last.high,
-            invalidation_price=prior_high,  # 다시 break level 이하 = invalidation
+            invalidation_price=prior_high,  # falling back below the break level = invalidation
             meta={
                 "lookback": lookback,
                 "prior_high": prior_high,

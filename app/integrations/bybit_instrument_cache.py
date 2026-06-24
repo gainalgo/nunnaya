@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Bybit Instrument Cache — 심볼별 거래 규칙 캐시 (spot / linear 분리)."""
+"""Bybit Instrument Cache — per-symbol trading rules cache (spot / linear separated)."""
 from __future__ import annotations
 
 import logging

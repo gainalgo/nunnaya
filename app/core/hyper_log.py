@@ -1,6 +1,6 @@
 # ============================================================
 # File: autocoin/hyper/system/hyper_log.py
-# Hyper Log – 통합 로깅 유틸리티 (Simple Edition)
+# Hyper Log – Unified logging utility (Simple Edition)
 # ============================================================
 
 import datetime
@@ -9,8 +9,8 @@ import traceback
 
 class HyperLog:
     """
-    Autocoin 전체에서 사용할 공통 Logger.
-    매우 단순하지만 확장 가능하도록 유지.
+    Common logger used throughout Autocoin.
+    Very simple, but kept extensible.
     """
 
     @staticmethod

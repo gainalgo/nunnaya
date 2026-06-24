@@ -2,8 +2,8 @@
 # File: app/manager/profit_store.py
 # ------------------------------------------------------------
 # ProfitStore
-# - 시장별 수익(Realized Profit)을 계산하고 저장하는 모듈.
-# - 엔진에서 발생한 신호(매수/매도)를 받아 수익을 업데이트한다.
+# - Module that computes and stores realized profit per market.
+# - Receives signals (buy/sell) from the engine and updates profit.
 # ============================================================
 
 from __future__ import annotations
@@ -12,8 +12,8 @@ from typing import Dict, Any
 
 class ProfitStore:
     """
-    시장별 포지션 상태와 실현 수익을 관리한다.
-    구조:
+    Manages per-market position state and realized profit.
+    Structure:
         trades = {
             "XRPUSDT": {
                 "position": None or "long",
@@ -27,7 +27,7 @@ class ProfitStore:
         self.trades: Dict[str, Dict[str, Any]] = {}
 
     # --------------------------------------------------------
-    # 포지션 구조 초기화
+    # Initialize position structure
     # --------------------------------------------------------
     def _ensure(self, market: str):
         if market not in self.trades:
@@ -38,7 +38,7 @@ class ProfitStore:
             }
 
     # --------------------------------------------------------
-    # 메인 업데이트 로직
+    # Main update logic
     # --------------------------------------------------------
     def update(self, market: str, signal: str, price: float):
         """
@@ -64,31 +64,31 @@ class ProfitStore:
         # --------------------------
         elif signal == "sell":
             if pos == "long":
-                # 수익 계산
+                # Compute profit
                 profit = price - entry
                 state["realized_profit"] += profit
 
-                # 포지션 종료
+                # Close position
                 state["position"] = None
                 state["entry_price"] = 0.0
 
-        # HOLD → 아무 것도 안함
+        # HOLD → do nothing
 
     # --------------------------------------------------------
-    # 시장별 상태 조회
+    # Query state for a single market
     # --------------------------------------------------------
     def get(self, market: str) -> Dict[str, Any]:
         self._ensure(market)
         return dict(self.trades[market])
 
     # --------------------------------------------------------
-    # 전체 상태 조회
+    # Query state for all markets
     # --------------------------------------------------------
     def all(self) -> Dict[str, Any]:
         return {m: dict(v) for m, v in self.trades.items()}
 
 
 # ------------------------------------------------------------
-# 글로벌 인스턴스
+# Global instance
 # ------------------------------------------------------------
 profit_store = ProfitStore()

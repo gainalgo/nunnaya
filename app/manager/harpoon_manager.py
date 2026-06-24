@@ -1,12 +1,13 @@
 """
-Harpoon (작살) — FOCUS Sub-Strategy Scalper
+Harpoon — FOCUS Sub-Strategy Scalper
 
-FOCUS가 감지한 H4 존 근처에서 M1 PA 패턴으로 고배율 단타를 반복하는 전략.
-FOCUS의 데이터를 읽기 전용으로 소비하며, FOCUS 상태를 절대 변경하지 않는다.
+A strategy that repeats high-leverage scalps with M1 PA patterns near the H4
+zones detected by FOCUS. It consumes FOCUS data read-only and never modifies
+FOCUS state.
 
 Architecture:
-    FOCUS (낚시꾼 🎣) → zones, h4_sig, ATR, state
-    Harpoon (작살 🔱) → M1 PA 패턴 감지 → 존 근처 고배율 단타
+    FOCUS (the fisherman 🎣) → zones, h4_sig, ATR, state
+    Harpoon (the harpoon 🔱) → M1 PA pattern detection → high-leverage scalps near zones
 
 State Machine:
     STANDBY → ZONE_READY → STALKING → FIRED → COOLDOWN → STANDBY
@@ -34,110 +35,110 @@ CONFIG_PATH = os.path.join("runtime", "harpoon_config.json")
 # ---------------------------------------------------------------------------
 
 class HarpoonState(str, Enum):
-    STANDBY = "STANDBY"          # FOCUS 존 없음 or 가격 멀리
-    ZONE_READY = "ZONE_READY"    # 가격이 존 ATR×0.5 이내
-    STALKING = "STALKING"        # M1 PA 패턴 대기
-    FIRED = "FIRED"              # 스캘프 진입 완료
-    COOLDOWN = "COOLDOWN"        # 스캘프 종료 후 대기
+    STANDBY = "STANDBY"          # No FOCUS zone, or price is far away
+    ZONE_READY = "ZONE_READY"    # Price within zone ATR×0.5
+    STALKING = "STALKING"        # Waiting for an M1 PA pattern
+    FIRED = "FIRED"              # Scalp entry completed
+    COOLDOWN = "COOLDOWN"        # Waiting after scalp closed
 
 
 @dataclass
 class HarpoonConfig:
-    enabled: bool = False               # ★ 2026-04-23 부모 결정 ① 번복: HARPOON 당분간 OFF (양쪽 서버 동일). runtime 파일 소실 시 True 기동 방지.
+    enabled: bool = False               # ★ 2026-04-23 owner decision ① reversal: HARPOON OFF for now (same on both servers). Prevents True boot if the runtime file is lost.
     leverage: int = 20
-    budget_pct: float = 10.0            # FOCUS 예산의 10%
-    budget_usdt: float = 0.0            # 직접 지정 시 (0=auto from FOCUS)
+    budget_pct: float = 10.0            # 10% of the FOCUS budget
+    budget_usdt: float = 0.0            # When set directly (0=auto from FOCUS)
     tp_atr_mult: float = 0.15           # TP = ATR × 0.15
     sl_atr_mult: float = 0.10           # SL = ATR × 0.10
-    risk_pct: float = 0.5              # 스캘프당 예산의 0.5% 리스크
-    zone_proximity_atr: float = 0.5     # 존 근접 판정: ATR × 0.5
+    risk_pct: float = 0.5              # 0.5% risk of budget per scalp
+    zone_proximity_atr: float = 0.5     # Zone proximity test: ATR × 0.5
     max_scalps_per_hour: int = 5
     max_daily_scalps: int = 15
-    max_consecutive_loss: int = 3       # 연속 손실 → 1시간 정지
-    max_daily_loss_pct: float = 2.0     # 일일 최대 손실 %
-    tick_interval_sec: float = 5.0      # STALKING/ZONE_READY 틱 간격
-    standby_interval_sec: float = 30.0  # STANDBY 틱 간격
-    cooldown_sec: float = 30.0          # 스캘프 후 쿨다운
-    entry_tf: str = "1"                 # M1 타임프레임
-    spread_max_atr_pct: float = 2.0     # 최대 스프레드 (ATR %)
-    server_side_tpsl: bool = True       # 서버사이드 TP/SL 필수
-    # ── ADX Filter (독립 임계값) ──
-    min_adx: int = 0                       # 0=FOCUS dormant_adx_threshold 상속, >0=하푼 독립 판단
-    # ── Dynamic Trailing SL (스캘퍼용 — FOCUS보다 타이트) ──
-    dynamic_trailing: bool = False         # 동적 트레일링 ON/OFF
-    breakeven_trigger_pct: float = 0.08    # 0.08% 수익 시 SL→손익분기 (스캘퍼용 빠른 잠금)
-    trailing_preserve_pct: float = 50.0    # 최고수익의 50% 보존
-    # ★ Stage 0 (2026-04-22 부모 B 결정, 동생 plan v3 통합) ★
-    # paper_mode + 9 방어 통합. 형 letter #11 검수 기준 동일 패턴 (Phase K/L).
-    # default OFF — 부모 승인 후 활성. paper_mode=True 면 진입 0건, 통계만.
-    paper_mode: bool = False               # ★ 2026-04-23 부모 지시: paper 개념 제거 — ON=실거래, OFF=완전 정지
-    # Stage 0-1: B11 regime_lock 통합 (FOCUS focus_mgr._get_btc_regime_lock_reason)
-    respect_b11_regime_lock: bool = True   # BULL → SHORT 차단, BEAR → LONG 차단
-    # Stage 0-2: min_adx 강화 (기존 min_adx field 의 default 만 0 → 20 으로)
-    # ↑ 기존 필드 유지 (사용자가 0 설정 시 fallback 으로만 변경)
-    min_adx_v2: int = 20                   # Stage 0-2 권장값 (기존 min_adx=0 일 때 사용)
-    # Stage 0-3: J v2 ADX 하락 skip 공유 (FOCUS adx_slope_check_enabled)
-    respect_focus_adx_slope: bool = True   # FOCUS J v2 켜져 있으면 같은 기준 적용
-    # Stage 0-4: Morning Guard 시간 자동 standby
-    respect_morning_guard: bool = True     # 06:50~morning_guard_end 구간 자동 standby
-    # Stage 0-5: coin_loss_cap 공유
-    respect_coin_loss_cap: bool = True     # FOCUS 의 24h 누적 손실 cap 공유
-    # Stage 0-6: HARPOON 전용 Fast-Reject (forensic 04-14 peak 0% 패턴)
-    fast_reject_v2_enabled: bool = True    # 진입 후 60초 peak 0% + 손실 → 즉시 컷
+    max_consecutive_loss: int = 3       # Consecutive losses → 1 hour pause
+    max_daily_loss_pct: float = 2.0     # Max daily loss %
+    tick_interval_sec: float = 5.0      # STALKING/ZONE_READY tick interval
+    standby_interval_sec: float = 30.0  # STANDBY tick interval
+    cooldown_sec: float = 30.0          # Cooldown after a scalp
+    entry_tf: str = "1"                 # M1 timeframe
+    spread_max_atr_pct: float = 2.0     # Max spread (ATR %)
+    server_side_tpsl: bool = True       # Server-side TP/SL required
+    # ── ADX Filter (independent threshold) ──
+    min_adx: int = 0                       # 0=inherit FOCUS dormant_adx_threshold, >0=Harpoon independent decision
+    # ── Dynamic Trailing SL (for scalpers — tighter than FOCUS) ──
+    dynamic_trailing: bool = False         # Dynamic trailing ON/OFF
+    breakeven_trigger_pct: float = 0.08    # At 0.08% profit, SL→breakeven (fast lock for scalpers)
+    trailing_preserve_pct: float = 50.0    # Preserve 50% of peak profit
+    # ★ Stage 0 (2026-04-22 owner decision B, sibling plan v3 integration) ★
+    # paper_mode + 9 defenses integrated. Same review pattern as this agent's letter #11 (Phase K/L).
+    # default OFF — enabled after owner approval. paper_mode=True means 0 entries, stats only.
+    paper_mode: bool = False               # ★ 2026-04-23 owner directive: paper concept removed — ON=live trading, OFF=fully halted
+    # Stage 0-1: B11 regime_lock integration (FOCUS focus_mgr._get_btc_regime_lock_reason)
+    respect_b11_regime_lock: bool = True   # BULL → block SHORT, BEAR → block LONG
+    # Stage 0-2: strengthen min_adx (only the default of the existing min_adx field 0 → 20)
+    # ↑ Keep the existing field (only used as a fallback when the user sets 0)
+    min_adx_v2: int = 20                   # Stage 0-2 recommended value (used when existing min_adx=0)
+    # Stage 0-3: share J v2 ADX-decline skip (FOCUS adx_slope_check_enabled)
+    respect_focus_adx_slope: bool = True   # If FOCUS J v2 is on, apply the same criteria
+    # Stage 0-4: Morning Guard auto-standby window
+    respect_morning_guard: bool = True     # Auto-standby during 06:50~morning_guard_end
+    # Stage 0-5: share coin_loss_cap
+    respect_coin_loss_cap: bool = True     # Share FOCUS's 24h cumulative loss cap
+    # Stage 0-6: HARPOON-only Fast-Reject (forensic 04-14 peak 0% pattern)
+    fast_reject_v2_enabled: bool = True    # 60s after entry, peak 0% + loss → immediate cut
     fast_reject_v2_max_sec: float = 60.0
     fast_reject_v2_peak_threshold_pct: float = 0.05
     fast_reject_v2_pnl_pct: float = -0.05
-    # Stage 0-7: 첫 SL 후 30분 재진입 cooldown
-    post_sl_cooldown_min: float = 30.0     # 0 = 비활성
-    # Stage 0-9: Morning Guard 시간 확장 (HARPOON 만, 옵션 B)
+    # Stage 0-7: 30 min re-entry cooldown after the first SL
+    post_sl_cooldown_min: float = 30.0     # 0 = disabled
+    # Stage 0-9: extend Morning Guard window (HARPOON only, option B)
     morning_extended_end_hour_kst: float = 10.5  # FOCUS 09:30 → HARPOON 10:30
-    # Stage 0-10: 진입 신호 강화 (PA 2건 합의)
-    pa_double_confirm_enabled: bool = False         # default OFF (paper 1주 후 검토)
+    # Stage 0-10: strengthen entry signal (agreement of 2 PA patterns)
+    pa_double_confirm_enabled: bool = False         # default OFF (review after 1 week of paper)
     pa_double_confirm_window_sec: float = 60.0
 
     # ═══════════════════════════════════════════════════════════════════
-    # ★ Phase M (2026-04-24) — Multi-Market + Budget 분리 완전 탈바꿈
-    #   부모님 결정: HARPOON 을 "FOCUS 보조" 에서 "독립 멀티마켓 엔진" 으로
-    #   편지 #23 plan 참조
+    # ★ Phase M (2026-04-24) — Multi-Market + Budget separation, full overhaul
+    #   Owner decision: turn HARPOON from a "FOCUS sub" into an
+    #   "independent multi-market engine". See letter #23 plan.
     # ═══════════════════════════════════════════════════════════════════
 
-    # [Phase M.A] Scan Universe — HARPOON 자체 스캔 대상
+    # [Phase M.A] Scan Universe — HARPOON's own scan targets
     scan_universe: str = "all"              # "all" / "top20" / "top50" / "custom"
-    scan_blacklist: List[str] = field(default_factory=list)     # 제외 코인
-    scan_whitelist: List[str] = field(default_factory=list)     # 전용 코인 (비면 all 또는 universe 사용)
-    scan_min_volume_usdt_24h: float = 1_000_000.0  # 유동성 바닥 (최소 거래대금)
+    scan_blacklist: List[str] = field(default_factory=list)     # Excluded coins
+    scan_whitelist: List[str] = field(default_factory=list)     # Dedicated coins (if empty, use all or universe)
+    scan_min_volume_usdt_24h: float = 1_000_000.0  # Liquidity floor (min turnover)
 
-    # [Phase M.B] Multi-position 관리
-    max_concurrent_scalps: int = 3          # 동시 보유 최대 스캘프 수
-    max_same_direction_scalps: int = 2      # 같은 방향 최대
-    cooldown_per_coin_sec: float = 300.0    # 같은 코인 재진입 쿨다운
+    # [Phase M.B] Multi-position management
+    max_concurrent_scalps: int = 3          # Max concurrent scalps held
+    max_same_direction_scalps: int = 2      # Max in the same direction
+    cooldown_per_coin_sec: float = 300.0    # Re-entry cooldown for the same coin
 
-    # [Phase M.C] FOCUS 조율
-    respect_focus_coin_lock: bool = True    # FOCUS 보유 코인은 HARPOON skip
-    respect_focus_direction_lock: bool = True  # FOCUS 반대 방향 스캘프 금지
+    # [Phase M.C] FOCUS coordination
+    respect_focus_coin_lock: bool = True    # HARPOON skips coins FOCUS holds
+    respect_focus_direction_lock: bool = True  # Forbid scalps opposite to FOCUS direction
     coin_exclusive_priority: str = "first_come"  # "first_come"/"focus"/"harpoon"
-    focus_entry_freeze_sec: float = 30.0    # FOCUS 진입 직후 N초 HARPOON skip
+    focus_entry_freeze_sec: float = 30.0    # HARPOON skips for N sec right after a FOCUS entry
 
-    # [Phase M.D] HARPOON 자체 신호 임계
-    min_adx_self: int = 20                   # HARPOON 자체 ADX 임계 (min_adx=0 inherit 과 별개)
-    min_conviction_self: float = 50.0        # [2026-05-17 100점 ×10] 5→50. HARPOON 자체 conviction (FOCUS scanner_min 과 별개)
+    # [Phase M.D] HARPOON's own signal thresholds
+    min_adx_self: int = 20                   # HARPOON's own ADX threshold (separate from min_adx=0 inherit)
+    min_conviction_self: float = 50.0        # [2026-05-17 100-pt scale ×10] 5→50. HARPOON's own conviction (separate from FOCUS scanner_min)
     pa_patterns_allowed: List[str] = field(default_factory=lambda: [
         "ENGULFING", "PIN_BAR", "BOS_BULLISH", "BOS_BEARISH",
-        "STAR_V2", "SQUEEZE_BREAK"   # HARPOON 우대 — 빠른 reversal/breakout
+        "STAR_V2", "SQUEEZE_BREAK"   # HARPOON favors these — fast reversal/breakout
     ])
 
-    # ★ [2026-04-24 부모 지시] HARPOON-Specific PA Weight Override
-    # 부모 직관: "하푼이 잡아야 할 신호 ≠ 포커스 먹이감"
-    # FOCUS conviction 점수에 PA 가산할 때 HARPOON caller 이면 이 값 사용.
-    # FOCUS pa_weight (focus_config.json) 와 별개.
+    # ★ [2026-04-24 owner directive] HARPOON-Specific PA Weight Override
+    # Owner intuition: "the signal Harpoon should catch ≠ FOCUS's prey"
+    # When adding PA to the FOCUS conviction score, use these values if the caller is HARPOON.
+    # Separate from FOCUS pa_weight (focus_config.json).
     #
-    # 패턴별 우대 (HARPOON 단기 스캘퍼 관점):
-    #   PIN_BAR        — M5 짧은 wick reject : HARPOON 우대 (FOCUS 1 → 2)
-    #   ENGULFING      — 강한 모멘텀 2봉     : HARPOON 우대 (FOCUS 2 → 3)
-    #   STAR_V1        — H4 큰 reversal       : FOCUS 먹이 (HARPOON 1)
-    #   STAR_V2        — 추세전환 3봉         : 둘 다 강 (3)
-    #   SQUEEZE_BREAK  — 압축 → 폭발          : HARPOON 우대 (3)
-    #   BOS_BULLISH/BEARISH — 지지/저항 돌파  : HARPOON 우대 (3)
+    # Per-pattern preference (HARPOON short-term scalper view):
+    #   PIN_BAR        — M5 short wick reject : HARPOON favors (FOCUS 1 → 2)
+    #   ENGULFING      — strong momentum 2-bar : HARPOON favors (FOCUS 2 → 3)
+    #   STAR_V1        — H4 big reversal       : FOCUS prey (HARPOON 1)
+    #   STAR_V2        — trend reversal 3-bar  : strong for both (3)
+    #   SQUEEZE_BREAK  — compression → breakout : HARPOON favors (3)
+    #   BOS_BULLISH/BEARISH — support/resistance break : HARPOON favors (3)
     pa_weight_pin_bar: int = 2
     pa_weight_engulfing: int = 3
     pa_weight_star_v1: int = 1
@@ -148,15 +149,15 @@ class HarpoonConfig:
     pa_zone_proximity_atr: float = 0.5
     pa_location_penalty_far: float = 0.5
 
-    # [Phase M.E] Zone 계산 소스
-    zone_source: str = "self"                # "self" (자체 계산) / "focus" (FOCUS zone 공유)
-    zone_lookback_bars: int = 50             # zone 계산 lookback
+    # [Phase M.E] Zone calculation source
+    zone_source: str = "self"                # "self" (self-calculated) / "focus" (share FOCUS zone)
+    zone_lookback_bars: int = 50             # zone calc lookback
 
-    # [Phase M.F] ★ HARPOON Standalone Mode (2026-04-24 부모 직접 요청)
-    #   기본 False: FOCUS Sub-scalper (FOCUS enabled=True 필요)
-    #   True: FOCUS 무관 단독 가동 (FOCUS 꺼져도 HARPOON 동작)
-    #   단점 (부모 인지): FOCUS Shared guards 무력화, 시장 맥락 정보 빈약
-    #   장점: 24/7 풀가동, FOCUS 사각지대 메움, Phase M 순수 검증
+    # [Phase M.F] ★ HARPOON Standalone Mode (2026-04-24 direct owner request)
+    #   Default False: FOCUS Sub-scalper (requires FOCUS enabled=True)
+    #   True: runs standalone regardless of FOCUS (HARPOON works even if FOCUS is off)
+    #   Cons (owner aware): FOCUS shared guards disabled, sparse market context
+    #   Pros: 24/7 full operation, fills FOCUS blind spots, pure Phase M validation
     harpoon_standalone_mode: bool = False
 
 
@@ -170,19 +171,19 @@ class ScalpPosition:
     sl: float = 0.0
     atr_used: float = 0.0
     entry_ts: float = 0.0
-    scalp_id: int = 0          # 일련번호
+    scalp_id: int = 0          # serial number
     # ── Dynamic Trailing SL ──
-    peak_profit_price: float = 0.0   # 최고 수익 가격
-    breakeven_locked: bool = False   # SL이 손익분기로 이동됨
-    original_sl: float = 0.0        # 원본 SL
-    # ★ Phase M.G (2026-04-24) — BE Stall Exit / Pre-BE Stall 용 타임스탬프
-    last_peak_update_ts: float = 0.0  # peak_profit_price 최근 갱신 시각
-    be_locked_ts: float = 0.0          # BE 락 시각
+    peak_profit_price: float = 0.0   # peak profit price
+    breakeven_locked: bool = False   # SL moved to breakeven
+    original_sl: float = 0.0        # original SL
+    # ★ Phase M.G (2026-04-24) — timestamps for BE Stall Exit / Pre-BE Stall
+    last_peak_update_ts: float = 0.0  # last time peak_profit_price was updated
+    be_locked_ts: float = 0.0          # time the BE lock was set
 
 
 @dataclass
 class ScalpRecord:
-    """완료된 스캘프 기록."""
+    """Record of a completed scalp."""
     scalp_id: int = 0
     market: str = ""
     direction: str = ""
@@ -196,10 +197,10 @@ class ScalpRecord:
 
 
 # ---------------------------------------------------------------------------
-# FOCUS state whitelist — Harpoon이 활성화될 수 있는 FOCUS 상태
+# FOCUS state whitelist — FOCUS states in which Harpoon may activate
 # ---------------------------------------------------------------------------
-# v2: DORMANT 제거 — ADX<15 횡보장에서 스캘핑도 수수료 손실
-# ALERT(횡보 끝 징조)부터 활성화
+# v2: DORMANT removed — scalping also bleeds fees in ADX<15 ranging markets
+# Activate from ALERT (sign the range is ending) onward
 FOCUS_ACTIVE_STATES = {"ALERT", "HUNT"}
 
 
@@ -209,14 +210,14 @@ FOCUS_ACTIVE_STATES = {"ALERT", "HUNT"}
 
 class HarpoonManager:
     """
-    FOCUS 하위 스캘핑 전략 매니저.
+    FOCUS sub-strategy scalping manager.
 
-    FOCUS의 존/h4_sig/ATR을 읽기 전용으로 소비하며,
-    존 근처에서 M1 PA 패턴으로 고배율 단타를 반복한다.
+    Consumes FOCUS zone/h4_sig/ATR read-only and repeats high-leverage scalps
+    with M1 PA patterns near the zones.
     """
 
     def __init__(self, focus_manager: Any = None, system: Any = None):
-        self.focus = focus_manager      # FocusManager (읽기 전용)
+        self.focus = focus_manager      # FocusManager (read-only)
         self.system = system
         self._lock = threading.RLock()
 
@@ -226,7 +227,7 @@ class HarpoonManager:
         # State
         self.state = HarpoonState.STANDBY
         self.current_scalp: Optional[ScalpPosition] = None
-        self.target_zone: Optional[Dict] = None    # 현재 타겟 존
+        self.target_zone: Optional[Dict] = None    # current target zone
         self.target_direction: str = ""
 
         # Counters
@@ -242,18 +243,18 @@ class HarpoonManager:
         self.cooldown_start_ts: float = 0.0
         self.hour_reset_ts: float = 0.0
         self.daily_reset_ts: float = 0.0
-        self.loss_pause_until: float = 0.0   # 연속 손실 시 정지 해제 시각
+        self.loss_pause_until: float = 0.0   # time the pause lifts after consecutive losses
 
         # History
-        self.recent_scalps: List[Dict] = []  # 최근 50개 기록
+        self.recent_scalps: List[Dict] = []  # last 50 records
 
         # ═══════════════════════════════════════════════════════════════════
         # ★ Phase M.B (2026-04-24) — Multi-position management
-        #   current_scalp 병렬 유지 (기존 로직 영향 X). Phase 4+ 에서 점진 전환.
+        #   Keep current_scalp in parallel (no impact on existing logic). Gradual transition in Phase 4+.
         # ═══════════════════════════════════════════════════════════════════
-        self.active_scalps: List[ScalpPosition] = []     # 동시 보유 스캘프 (신규)
+        self.active_scalps: List[ScalpPosition] = []     # concurrently held scalps (new)
         self.last_scalp_exit_by_coin: Dict[str, float] = {}  # {MARKET: last_exit_ts} — cooldown_per_coin
-        self._post_sl_cooldown_by_coin: Dict[tuple, float] = {}  # {(MKT, DIR): expire_ts} — post_sl_cooldown_min 공유
+        self._post_sl_cooldown_by_coin: Dict[tuple, float] = {}  # {(MKT, DIR): expire_ts} — shared post_sl_cooldown_min
 
         # Trade client (lazy init)
         self._client = None
@@ -272,15 +273,15 @@ class HarpoonManager:
 
     @property
     def effective_budget(self) -> float:
-        """Harpoon 실효 예산 계산."""
+        """Compute Harpoon's effective budget."""
         if self.config.budget_usdt > 0:
             return self.config.budget_usdt
-        # FOCUS 예산에서 자동 배분
+        # Auto-allocate from the FOCUS budget
         if self.focus:
             focus_budget = getattr(self.focus, 'budget_usdt', 0) or 0
             if focus_budget > 0:
                 return focus_budget * (self.config.budget_pct / 100.0)
-            # budget=0이면 시스템 잔고에서 배분
+            # If budget=0, allocate from the system balance
             if self.system:
                 try:
                     bal = getattr(self.system, '_cached_balance', {})
@@ -328,15 +329,15 @@ class HarpoonManager:
 
     def tick(self) -> Dict[str, Any]:
         """
-        Harpoon 메인 틱. FocusManager의 _scan_loop 또는 별도 루프에서 호출.
+        Harpoon main tick. Called from FocusManager's _scan_loop or a separate loop.
 
         Returns:
-            상태 정보 dict
+            status info dict
         """
         if not self.config.enabled:
             return {"state": "DISABLED"}
 
-        # E-STOP 체크
+        # E-STOP check
         if self.system and bool(getattr(self.system, 'emergency_stop', False)):
             self._emergency_close()
             return {"state": "EMERGENCY_STOP"}
@@ -352,7 +353,7 @@ class HarpoonManager:
                 return {"state": self.state.value, "skipped": True}
             self.last_tick_ts = now
 
-            # ★ FOCUS 충돌 방어: HARPOON 포지션 보유 중 FOCUS가 실제 포지션 진입 시 즉시 청산
+            # ★ FOCUS conflict defense: if FOCUS enters a real position while HARPOON holds one, close immediately
             if self.current_scalp and self._has_focus_conflict():
                 logger.warning(
                     "[HARPOON] FOCUS conflict! Closing scalp %s %s immediately",
@@ -363,13 +364,13 @@ class HarpoonManager:
                 self.state = HarpoonState.STANDBY
                 return {"state": "STANDBY", "reason": "focus_conflict_close"}
 
-            # FOCUS 연동 체크
+            # FOCUS linkage check
             if not self._is_focus_compatible():
                 if self.state != HarpoonState.STANDBY:
                     self.state = HarpoonState.STANDBY
                 return {"state": "STANDBY", "reason": "focus_incompatible"}
 
-            # 안전장치 체크
+            # Guard check
             guard = self._check_guards(now)
             if guard:
                 return {"state": self.state.value, "guard": guard}
@@ -390,17 +391,17 @@ class HarpoonManager:
             except Exception as exc:
                 logger.error("[HARPOON] tick error: %s", exc, exc_info=True)
 
-            # ★ Phase M.F (2026-04-24): Multi-market / Multi-position 추가 처리
-            #   기존 state dispatch 이후에 실행 — primary (current_scalp) 는 기존대로,
-            #   additional scalps 는 아래에서 별도 처리.
+            # ★ Phase M.F (2026-04-24): Multi-market / Multi-position extra handling
+            #   Runs after the existing state dispatch — primary (current_scalp) as before,
+            #   additional scalps handled separately below.
             try:
-                # 1) Additional scalps Bybit 서버 상태 확인 (secondary 청산 감지)
+                # 1) Check Bybit server state for additional scalps (detect secondary exits)
                 cleared_count = self._monitor_additional_scalps(now)
                 if cleared_count > 0:
                     result["multi_cleared"] = cleared_count
 
-                # 2) 추가 진입 시도 (max_concurrent>1 이고 슬롯 남아있을 때만)
-                #    paper_mode 또는 FOCUS 비호환이면 _try_extra_entries 내부에서 skip
+                # 2) Try extra entries (only if max_concurrent>1 and slots remain)
+                #    Skipped inside _try_extra_entries if paper_mode or FOCUS-incompatible
                 if self._is_focus_compatible() and self.state not in (HarpoonState.COOLDOWN,):
                     entered_count = self._try_extra_entries(now)
                     if entered_count > 0:
@@ -419,15 +420,15 @@ class HarpoonManager:
     # ------------------------------------------------------------------
 
     def _is_focus_compatible(self) -> bool:
-        """FOCUS 상태가 Harpoon 활성화에 적합한지 확인.
+        """Check whether the FOCUS state is suitable for Harpoon activation.
 
-        v2: ADX 필터 추가 — FOCUS의 ADX가 dormant_adx_threshold 미만이면
-        Harpoon도 정지 (횡보장에서 스캘핑 = 수수료 손실).
+        v2: ADX filter added — if FOCUS's ADX is below dormant_adx_threshold,
+        Harpoon also halts (scalping in a ranging market = fee loss).
 
-        ★ Phase M.F (2026-04-24 부모 직접 요청): Standalone 모드 지원.
-           harpoon_standalone_mode=True 면 FOCUS 체크 우회 → HARPOON 단독 가동.
+        ★ Phase M.F (2026-04-24 direct owner request): Standalone mode support.
+           If harpoon_standalone_mode=True, bypass the FOCUS check → HARPOON runs standalone.
         """
-        # ★ Standalone 모드: FOCUS 체크 전부 우회
+        # ★ Standalone mode: bypass all FOCUS checks
         if getattr(self.config, "harpoon_standalone_mode", False):
             return True
 
@@ -442,30 +443,30 @@ class HarpoonManager:
 
         state_val = focus_state.value if hasattr(focus_state, 'value') else str(focus_state)
 
-        # FOCUS가 포지션 보유 중이면 레버리지 충돌 → 정지
+        # If FOCUS holds a position, leverage conflict → halt
         if state_val in ("POSITIONED", "CAUTION"):
             return False
 
-        # FOCUS가 쿨다운이면 시장 불리 → 정지
+        # If FOCUS is in cooldown, market unfavorable → halt
         if state_val == "COOLDOWN":
             return False
 
-        # v2→v3: ADX 필터 — 하푼 전용 min_adx > 0이면 독립 임계, 아니면 FOCUS 상속
+        # v2→v3: ADX filter — if Harpoon-specific min_adx > 0, use independent threshold, else inherit FOCUS
         focus_config = getattr(self.focus, 'config', None)
         if focus_config and getattr(focus_config, 'adx_filter_enabled', False):
             last_adx = getattr(self.focus, '_last_adx_value', 0)
-            # 하푼 독립 임계값 우선, 없으면(0) FOCUS dormant_adx_threshold 상속
+            # Prefer Harpoon's independent threshold; if absent (0), inherit FOCUS dormant_adx_threshold
             harpoon_min = self.config.min_adx
             threshold = harpoon_min if harpoon_min > 0 else getattr(focus_config, 'dormant_adx_threshold', 15)
             if last_adx > 0 and last_adx < threshold:
-                return False  # 횡보장 — 스캘핑도 위험
+                return False  # ranging market — scalping is also risky
 
         return state_val in FOCUS_ACTIVE_STATES
 
     def _has_focus_conflict(self) -> bool:
-        """FOCUS가 실제로 포지션 보유 중 → 레버리지 충돌."""
+        """FOCUS actually holds a position → leverage conflict."""
         if not self.focus:
-            return False  # FOCUS 없음 = 충돌 없음
+            return False  # No FOCUS = no conflict
         state_val = getattr(self.focus, 'state', None)
         if state_val and hasattr(state_val, 'value'):
             state_val = state_val.value
@@ -476,20 +477,20 @@ class HarpoonManager:
     # ------------------------------------------------------------------
 
     def _check_guards(self, now: float) -> Optional[str]:
-        """안전장치 체크. 위반 시 사유 문자열 반환."""
-        # 연속 손실 정지
+        """Guard check. Returns a reason string on violation."""
+        # Consecutive-loss pause
         if self.loss_pause_until > now:
             return f"consecutive_loss_pause_until_{int(self.loss_pause_until - now)}s"
 
-        # 시간당 스캘프 제한
+        # Per-hour scalp limit
         if self.scalps_this_hour >= self.config.max_scalps_per_hour:
             return "max_scalps_per_hour"
 
-        # 일일 스캘프 제한
+        # Daily scalp limit
         if self.scalps_today >= self.config.max_daily_scalps:
             return "max_daily_scalps"
 
-        # 일일 손실 제한
+        # Daily loss limit
         budget = self.effective_budget
         if budget > 0:
             loss_pct = abs(min(0, self.daily_pnl)) / budget * 100
@@ -499,20 +500,20 @@ class HarpoonManager:
         return None
 
     # ------------------------------------------------------------------
-    # ★ Stage 0 (2026-04-22 부모 B 결정, 동생 plan v3 통합) ★
-    # 진입 직전 9 가드 + paper_mode JSONL 기록
-    # B11/J v2/Morning Guard/coin_loss_cap = FOCUS 공유
-    # Fast-Reject v2 / 재진입 cooldown / Morning Guard 확장 = HARPOON 독자
-    # ★ 형 letter FAIL (2026-04-22 22:42) 수정:
-    #   - _get_focus_adx 신규 메서드 (Stage 0-2 활성화)
-    #   - 0-3 J v2 최소 구현 (stub → 활성)
+    # ★ Stage 0 (2026-04-22 owner decision B, sibling plan v3 integration) ★
+    # 9 guards right before entry + paper_mode JSONL logging
+    # B11/J v2/Morning Guard/coin_loss_cap = shared with FOCUS
+    # Fast-Reject v2 / re-entry cooldown / Morning Guard extension = HARPOON-specific
+    # ★ Fix for this agent's letter FAIL (2026-04-22 22:42):
+    #   - _get_focus_adx new method (enables Stage 0-2)
+    #   - 0-3 J v2 minimal implementation (stub → active)
     # ------------------------------------------------------------------
 
     def _get_focus_adx(self) -> float:
-        """FOCUS 의 최근 H4 ADX 값 조회 (Stage 0-2/0-3 용).
+        """Get FOCUS's latest H4 ADX value (for Stage 0-2/0-3).
 
-        ★ 형 letter FAIL (2026-04-22 22:42) 수정 — 누락 메서드 추가.
-        FOCUS 가 _last_adx_value 필드로 노출 (이미 L355 등에서 사용 중).
+        ★ Fix for this agent's letter FAIL (2026-04-22 22:42) — added missing method.
+        FOCUS exposes it via the _last_adx_value field (already used at L355 etc.).
         """
         try:
             if not self.focus:
@@ -523,14 +524,14 @@ class HarpoonManager:
 
     def _check_stage0_gates(self, market: str, direction: str,
                             atr: float, price: float) -> tuple:
-        """진입 직전 Stage 0 9 가드 통합 검사.
+        """Combined check of the 9 Stage 0 guards right before entry.
 
         Returns: (blocked: bool, reason: str)
         """
         cfg = self.config
-        focus_mgr = self.focus  # FocusManager reference (있을 때만)
+        focus_mgr = self.focus  # FocusManager reference (only when present)
 
-        # Stage 0-1: B11 regime_lock 통합
+        # Stage 0-1: B11 regime_lock integration
         if getattr(cfg, "respect_b11_regime_lock", True) and focus_mgr is not None:
             try:
                 if hasattr(focus_mgr, "_get_btc_regime_lock_reason"):
@@ -540,21 +541,21 @@ class HarpoonManager:
             except Exception as exc:
                 logger.debug("[HARPOON] B11 check failed: %s", exc)
 
-        # Stage 0-2: min_adx 강화 (기본 0 → 20 fallback)
+        # Stage 0-2: strengthen min_adx (default 0 → 20 fallback)
         try:
             adx_threshold = cfg.min_adx if cfg.min_adx > 0 else getattr(cfg, "min_adx_v2", 20)
             current_adx = self._get_focus_adx() if hasattr(self, "_get_focus_adx") else 0
             if current_adx > 0 and current_adx < adx_threshold:
                 return True, f"adx_below_threshold: {current_adx:.1f} < {adx_threshold}"
         except Exception:
-            pass  # ADX fetch 실패 시 통과 (안전 fallback)
+            pass  # On ADX fetch failure, pass (safe fallback)
 
-        # Stage 0-3: FOCUS J v2 공유 (★ 형 letter FAIL 4-4 적용)
+        # Stage 0-3: share FOCUS J v2 (★ applies this agent's letter FAIL 4-4)
         if getattr(cfg, "respect_focus_adx_slope", True) and focus_mgr is not None:
             try:
                 if getattr(focus_mgr.config, "adx_slope_check_enabled", False):
-                    # FOCUS J v2 가 ON 이면 HARPOON 도 시장 식어감 시 skip
-                    # 최소 구현: ADX 가 J v2 기준 (FOCUS scanner_min_adx) 이하면 차단
+                    # If FOCUS J v2 is ON, HARPOON also skips when the market is cooling
+                    # Minimal impl: block if ADX is below the J v2 threshold (FOCUS scanner_min_adx)
                     adx = self._get_focus_adx()
                     j_threshold = float(getattr(focus_mgr.config, "scanner_min_adx", 18.0))
                     if adx > 0 and adx < j_threshold:
@@ -562,24 +563,24 @@ class HarpoonManager:
             except Exception:
                 pass
 
-        # Stage 0-4: Morning Guard 자동 standby + Stage 0-9 시간 확장 (HARPOON 만)
+        # Stage 0-4: Morning Guard auto-standby + Stage 0-9 time extension (HARPOON only)
         if getattr(cfg, "respect_morning_guard", True) and focus_mgr is not None:
             try:
                 from datetime import datetime, timezone, timedelta
                 kst_now = datetime.now(tz=timezone(timedelta(hours=9)))
                 hour = kst_now.hour + kst_now.minute / 60.0
-                # FOCUS Morning Guard 시간대 (06:50 ~ end_hour) + HARPOON 확장 시간
+                # FOCUS Morning Guard window (06:50 ~ end_hour) + HARPOON extension
                 mg_enabled = getattr(focus_mgr.config, "morning_guard_enabled", True)
                 if mg_enabled:
                     fg_end = float(getattr(focus_mgr.config, "morning_guard_end_hour_kst", 9.5))
                     hp_end = float(getattr(cfg, "morning_extended_end_hour_kst", fg_end))
-                    end_hour = max(fg_end, hp_end)  # HARPOON 더 보수적 (긴 시간)
+                    end_hour = max(fg_end, hp_end)  # HARPOON more conservative (longer window)
                     if 6.83 <= hour <= end_hour:  # 06:50~
                         return True, f"morning_guard_active (KST {hour:.2f}h, end={end_hour})"
             except Exception as exc:
                 logger.debug("[HARPOON] Morning Guard check failed: %s", exc)
 
-        # Stage 0-5: coin_loss_cap 공유
+        # Stage 0-5: share coin_loss_cap
         if getattr(cfg, "respect_coin_loss_cap", True) and focus_mgr is not None:
             try:
                 if (getattr(focus_mgr.config, "coin_loss_cap_enabled", True)
@@ -591,7 +592,7 @@ class HarpoonManager:
             except Exception as exc:
                 logger.debug("[HARPOON] coin_loss_cap check failed: %s", exc)
 
-        # Stage 0-7: 재진입 30분 cooldown (HARPOON 자체 SL/Fast-Reject 후)
+        # Stage 0-7: 30 min re-entry cooldown (after HARPOON's own SL/Fast-Reject)
         cd_min = float(getattr(cfg, "post_sl_cooldown_min", 30.0))
         if cd_min > 0:
             cd_sec = cd_min * 60.0
@@ -606,7 +607,7 @@ class HarpoonManager:
         return False, "all_passed"
 
     def _log_paper_entry(self, market: str, direction: str, price: float, atr: float) -> None:
-        """paper_mode 진입 시도 JSONL 기록 (Phase K 패턴)."""
+        """Log a paper_mode entry attempt to JSONL (Phase K pattern)."""
         try:
             log_path = os.path.join("runtime", "harpoon_paper_log.jsonl")
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -628,7 +629,7 @@ class HarpoonManager:
             logger.debug("[HARPOON] paper log failed: %s", exc)
 
     def _record_post_sl(self, market: str, direction: str) -> None:
-        """SL/Fast-Reject 발생 시 cooldown map 갱신 (Stage 0-7)."""
+        """Update the cooldown map when SL/Fast-Reject fires (Stage 0-7)."""
         if not hasattr(self, "_post_sl_cooldown_map"):
             self._post_sl_cooldown_map = {}
         self._post_sl_cooldown_map[(market.upper(), direction.upper())] = time.time()
@@ -638,8 +639,8 @@ class HarpoonManager:
     # ------------------------------------------------------------------
 
     def _handle_standby(self, now: float) -> Dict:
-        """STANDBY: zone 에 가격이 근접하는지 감시.
-        ★ Phase M.E + M.F: standalone 모드면 자체 zone 계산, 아니면 FOCUS zones."""
+        """STANDBY: watch whether price approaches a zone.
+        ★ Phase M.E + M.F: standalone mode computes its own zones, otherwise FOCUS zones."""
         market = self._get_focus_market()
         if not market:
             return {"reason": "no_market"}
@@ -657,10 +658,10 @@ class HarpoonManager:
 
         proximity = atr * self.config.zone_proximity_atr
 
-        # 가장 가까운 존 찾기 (양방향 — 존 타입이 방향 결정)
+        # Find the nearest zone (both directions — zone type decides direction)
         best_zone = self._find_nearest_zone(price, "", zones, proximity)
         if best_zone:
-            # ★ 존 타입에 따라 스캘프 방향 결정: SUPPORT→LONG, RESISTANCE→SHORT
+            # ★ Zone type decides scalp direction: SUPPORT→LONG, RESISTANCE→SHORT
             z_type = best_zone.get("type", "").upper()
             if "RESISTANCE" in z_type:
                 scalp_dir = "SHORT"
@@ -682,7 +683,7 @@ class HarpoonManager:
         return {"reason": "no_nearby_zone"}
 
     def _handle_zone_ready(self, now: float) -> Dict:
-        """ZONE_READY: 존 근처 도달, M1 PA 대기 시작."""
+        """ZONE_READY: reached near the zone, start waiting for M1 PA."""
         market = self._get_focus_market()
         if not market:
             self.state = HarpoonState.STANDBY
@@ -697,7 +698,7 @@ class HarpoonManager:
             self.state = HarpoonState.STANDBY
             return {"reason": "no_atr"}
 
-        # 존에서 멀어졌는지 체크
+        # Check whether price moved away from the zone
         proximity = atr * self.config.zone_proximity_atr
         if self.target_zone:
             zone_mid = (self.target_zone.get("price_low", 0) + self.target_zone.get("price_high", 0)) / 2
@@ -707,7 +708,7 @@ class HarpoonManager:
                 self.target_zone = None
                 return {"reason": "price_moved_away"}
 
-        # ── M5 추세 필터 (FOCUS의 H1 체크와 동일 역할) ──
+        # ── M5 trend filter (same role as FOCUS's H1 check) ──
         m5_trend = self._check_m5_trend(market, self.target_direction)
         if m5_trend == "opposed":
             logger.debug(
@@ -716,7 +717,7 @@ class HarpoonManager:
             )
             return {"waiting": "m5_opposed"}
 
-        # M1 PA 패턴 체크
+        # M1 PA pattern check
         pa_signal = self._check_m1_pa(market, self.target_direction)
         if pa_signal:
             self.state = HarpoonState.STALKING
@@ -727,7 +728,7 @@ class HarpoonManager:
         return {"waiting": "m1_pa"}
 
     def _handle_stalking(self, now: float) -> Dict:
-        """STALKING: M1 PA 확인됨, 진입 실행."""
+        """STALKING: M1 PA confirmed, execute entry."""
         market = self._get_focus_market()
         if not market:
             self.state = HarpoonState.STANDBY
@@ -742,23 +743,23 @@ class HarpoonManager:
             self.state = HarpoonState.STANDBY
             return {"reason": "no_atr"}
 
-        # ── M5 추세 재확인 (진입 직전) ──
+        # ── M5 trend re-check (right before entry) ──
         m5_trend = self._check_m5_trend(market, self.target_direction)
         if m5_trend == "opposed":
             logger.info("[HARPOON] STALKING → ZONE_READY: M5 trend opposed to %s", self.target_direction)
             self.state = HarpoonState.ZONE_READY
             return {"reason": "m5_opposed", "transition": "ZONE_READY"}
 
-        # ★ M17 FIX: 진입 전 M1 PA 신선도 재확인 (stale signal 방지)
+        # ★ M17 FIX: re-check M1 PA freshness before entry (prevent stale signal)
         pa_recheck = self._check_m1_pa(market, self.target_direction)
         if not pa_recheck:
             self.state = HarpoonState.ZONE_READY
             logger.info("[HARPOON] STALKING → ZONE_READY: M1 PA no longer valid")
             return {"reason": "pa_stale", "transition": "ZONE_READY"}
 
-        # ★★★ Stage 0 (2026-04-22 부모 B 결정, plan v3 통합) ★★★
-        # 진입 직전 9 가드 + paper_mode 마지막 게이트.
-        # 형 letter #11 검수 기준 동일 패턴, default safe (paper_mode=True).
+        # ★★★ Stage 0 (2026-04-22 owner decision B, plan v3 integration) ★★★
+        # 9 guards right before entry + paper_mode final gate.
+        # Same review pattern as this agent's letter #11, default safe (paper_mode=True).
         stage0_blocked, stage0_reason = self._check_stage0_gates(market, self.target_direction, atr, price)
         if stage0_blocked:
             logger.info("[HARPOON] STAGE 0 BLOCK: %s %s — %s", market, self.target_direction, stage0_reason)
@@ -766,18 +767,18 @@ class HarpoonManager:
             self.cooldown_start_ts = now
             return {"reason": "stage0_blocked", "detail": stage0_reason}
 
-        # ★ paper_mode 마지막 게이트 (Phase K 패턴: 진입 직전 차단 + JSONL 기록만)
+        # ★ paper_mode final gate (Phase K pattern: block right before entry + JSONL log only)
         if getattr(self.config, "paper_mode", True):
             self._log_paper_entry(market, self.target_direction, price, atr)
             logger.info(
-                "[HARPOON] PAPER skip: %s %s @ $%.4f atr=$%.4f (실거래 X, JSONL 기록만)",
+                "[HARPOON] PAPER skip: %s %s @ $%.4f atr=$%.4f (no live trade, JSONL log only)",
                 market, self.target_direction, price, atr,
             )
             self.state = HarpoonState.COOLDOWN
             self.cooldown_start_ts = now
             return {"reason": "paper_mode_skip", "market": market, "direction": self.target_direction}
 
-        # 진입 실행
+        # Execute entry
         try:
             result = self._execute_scalp_entry(market, self.target_direction, price, atr)
             if result and result.get("success"):
@@ -790,7 +791,7 @@ class HarpoonManager:
                 self._save_config()
                 return {"transition": "FIRED", **result}
             else:
-                # 진입 실패 → 쿨다운
+                # Entry failed → cooldown
                 self.state = HarpoonState.COOLDOWN
                 self.cooldown_start_ts = now
                 return {"reason": "entry_failed", "detail": result}
@@ -801,7 +802,7 @@ class HarpoonManager:
             return {"reason": "entry_error", "error": str(exc)}
 
     def _handle_fired(self, now: float) -> Dict:
-        """FIRED: 포지션 보유 중, TP/SL 모니터링."""
+        """FIRED: holding a position, monitoring TP/SL."""
         if not self.current_scalp:
             self.state = HarpoonState.STANDBY
             return {"reason": "no_scalp_position"}
@@ -811,10 +812,10 @@ class HarpoonManager:
         if not price:
             return {"reason": "no_price"}
 
-        # ★ Bybit 실포지션 확인 — 서버사이드 TP/SL로 이미 청산됐으면 고스트 방지
+        # ★ Check real Bybit position — prevent ghost if server-side TP/SL already closed it
         if not hasattr(self, '_last_bybit_check_ts'):
             self._last_bybit_check_ts = 0.0
-        if now - self._last_bybit_check_ts >= 10.0:  # 10초마다 체크
+        if now - self._last_bybit_check_ts >= 10.0:  # check every 10s
             self._last_bybit_check_ts = now
             try:
                 from app.core.constants import BYBIT_POSITION_LIST
@@ -824,10 +825,10 @@ class HarpoonManager:
                 pos_list = resp.get("result", {}).get("list", [])
                 has_position = any(float(p.get("size", 0)) > 0 for p in pos_list)
                 if not has_position:
-                    # Bybit에 포지션 없음 → 서버사이드 TP/SL로 이미 청산됨
+                    # No position on Bybit → already closed by server-side TP/SL
                     scalp = self.current_scalp
                     entry = scalp.entry_price
-                    # TP/SL 중 어느 쪽이 체결됐는지 추정 → 해당 가격을 exit_price로 사용
+                    # Estimate which of TP/SL filled → use that price as exit_price
                     if scalp.direction == "LONG":
                         _tp_hit = price >= scalp.tp if scalp.tp else False
                         exit_price = scalp.tp if _tp_hit else (scalp.sl if scalp.sl else price)
@@ -861,15 +862,15 @@ class HarpoonManager:
                     if len(self.recent_scalps) > 50:
                         self.recent_scalps = self.recent_scalps[-50:]
 
-                    # ── 카운터 업데이트 ──
+                    # ── Counter update ──
                     self.scalps_today += 1
                     self.scalps_this_hour += 1
                     self.daily_pnl += pnl
                     self.total_pnl += pnl
                     if pnl < 0:
                         self.consecutive_losses += 1
-                        # ★ Stage 0-7 hook (2026-04-22 형 letter FAIL 4-3 수정):
-                        # SL/Fast-Reject 발생 시 (market, direction) 30분 cooldown 기록
+                        # ★ Stage 0-7 hook (2026-04-22 fix for this agent's letter FAIL 4-3):
+                        # On SL/Fast-Reject, record a 30 min cooldown for (market, direction)
                         try:
                             self._record_post_sl(scalp.market, scalp.direction)
                         except Exception as exc:
@@ -877,7 +878,7 @@ class HarpoonManager:
                     else:
                         self.consecutive_losses = 0
 
-                    # ── 장부 기록 (journal + ledger) ──
+                    # ── Bookkeeping (journal + ledger) ──
                     try:
                         from app.manager.trade_journal import journal
                         _peak = 0.0
@@ -919,7 +920,7 @@ class HarpoonManager:
             except Exception as exc:
                 logger.debug("[HARPOON] Bybit position check failed: %s", exc)
 
-        # ── Dynamic Trailing SL (exit 체크 전에 SL 갱신) ──
+        # ── Dynamic Trailing SL (update SL before the exit check) ──
         if self.config.dynamic_trailing:
             self._apply_scalp_trailing_sl(self.current_scalp, price)
 
@@ -927,7 +928,7 @@ class HarpoonManager:
 
         targets = ScalpTargets(
             tp=self.current_scalp.tp,
-            sl=self.current_scalp.sl,  # dynamic trailing이 갱신했을 수 있음
+            sl=self.current_scalp.sl,  # dynamic trailing may have updated it
             atr_used=self.current_scalp.atr_used,
         )
 
@@ -937,14 +938,14 @@ class HarpoonManager:
             result = self._execute_scalp_exit(exit_reason, price)
             return {"exit": exit_reason, **result}
 
-        # Timeout: 5분 이상 보유 시 시장가 청산
+        # Timeout: market-close if held for more than 5 min
         hold_time = now - self.current_scalp.entry_ts
-        if hold_time > 300:  # 5분
+        if hold_time > 300:  # 5 min
             logger.warning("[HARPOON] scalp timeout (%.0fs), closing at market", hold_time)
             result = self._execute_scalp_exit("TIMEOUT", price)
             return {"exit": "TIMEOUT", **result}
 
-        # 현재 PnL 표시
+        # Show current PnL
         entry = self.current_scalp.entry_price
         if self.current_scalp.direction == "LONG":
             unrealized = (price - entry) * self.current_scalp.qty
@@ -955,26 +956,26 @@ class HarpoonManager:
                 "hold_sec": round(hold_time, 1)}
 
     # ------------------------------------------------------------------
-    # Dynamic Trailing SL (스캘퍼 전용)
+    # Dynamic Trailing SL (scalper-only)
     # ------------------------------------------------------------------
 
     def _apply_scalp_trailing_sl(self, scalp: ScalpPosition, price: float):
-        """스캘퍼용 동적 트레일링 SL. FOCUS와 동일 구조, 파라미터만 타이트.
+        """Dynamic trailing SL for scalpers. Same structure as FOCUS, just tighter params.
 
-        Stage 1: profit >= breakeven_trigger_pct → SL → 진입가 (손익분기 잠금)
-        Stage 2: 이후 최고수익의 trailing_preserve_pct%를 보존하도록 SL 추적
+        Stage 1: profit >= breakeven_trigger_pct → SL → entry price (breakeven lock)
+        Stage 2: afterward, trail SL to preserve trailing_preserve_pct% of peak profit
         """
-        # 원본 SL 기록 (최초 1회)
+        # Record original SL (first time only)
         if scalp.original_sl <= 0:
             scalp.original_sl = scalp.sl
 
-        # 수익률 계산
+        # Compute return
         if scalp.direction == "LONG":
             pnl_pct = (price / scalp.entry_price - 1) * 100 if scalp.entry_price > 0 else 0
         else:
             pnl_pct = (1 - price / scalp.entry_price) * 100 if scalp.entry_price > 0 else 0
 
-        # 최고 수익 가격 추적
+        # Track peak profit price
         if scalp.direction == "LONG":
             if price > scalp.peak_profit_price:
                 scalp.peak_profit_price = price
@@ -985,7 +986,7 @@ class HarpoonManager:
         trigger_pct = self.config.breakeven_trigger_pct
         preserve_ratio = self.config.trailing_preserve_pct / 100.0
 
-        # ── Stage 1: 손익분기 잠금 ──
+        # ── Stage 1: breakeven lock ──
         if not scalp.breakeven_locked and pnl_pct >= trigger_pct:
             new_sl = scalp.entry_price
             should_lock = False
@@ -998,7 +999,7 @@ class HarpoonManager:
                 old_sl = scalp.sl
                 scalp.sl = new_sl
                 scalp.breakeven_locked = True
-                scalp.be_locked_ts = time.time()  # ★ Phase M.G: BE Stall Exit 용
+                scalp.be_locked_ts = time.time()  # ★ Phase M.G: for BE Stall Exit
                 logger.info(
                     "[HARPOON] BREAKEVEN LOCK %s %s: SL $%.2f->$%.2f (profit +%.3f%%)",
                     scalp.direction, scalp.market, old_sl, scalp.sl, pnl_pct,
@@ -1007,7 +1008,7 @@ class HarpoonManager:
                 self._save_config()
                 return
 
-        # ── Stage 2: 수익 추적 ──
+        # ── Stage 2: profit trailing ──
         if scalp.breakeven_locked and scalp.peak_profit_price > 0:
             if scalp.direction == "LONG":
                 peak_gain = scalp.peak_profit_price / scalp.entry_price - 1
@@ -1039,7 +1040,7 @@ class HarpoonManager:
                     self._save_config()
 
     def _update_scalp_bybit_sl(self, scalp: ScalpPosition):
-        """Bybit에 SL만 업데이트 (TP 유지). 실패 시 1회 재시도."""
+        """Update only the SL on Bybit (keep TP). Retry once on failure."""
         for _try in range(2):
             try:
                 self._get_client().set_trading_stop(
@@ -1053,7 +1054,7 @@ class HarpoonManager:
                     import time as _t; _t.sleep(0.5)
 
     def _handle_cooldown(self, now: float) -> Dict:
-        """COOLDOWN: 스캘프 종료 후 대기."""
+        """COOLDOWN: wait after a scalp closes."""
         elapsed = now - self.cooldown_start_ts
         if elapsed >= self.config.cooldown_sec:
             self.state = HarpoonState.STANDBY
@@ -1067,23 +1068,23 @@ class HarpoonManager:
     # ------------------------------------------------------------------
 
     def _get_focus_zones(self) -> List[Dict]:
-        # ★ A2 FIX: shallow copy — 레이스 방지
+        # ★ A2 FIX: shallow copy — prevent race
         if not self.focus:
             return []
         zones = getattr(self.focus, 'zones', []) or []
         return list(zones)
 
     # ═══════════════════════════════════════════════════════════════════
-    # ★ Phase M.E (2026-04-24) — 자체 zone 계산 (Standalone 모드 지원)
+    # ★ Phase M.E (2026-04-24) — self zone calculation (Standalone mode support)
     # ═══════════════════════════════════════════════════════════════════
 
     def _compute_self_zones(self, market: str) -> List[Dict]:
-        """HARPOON 자체 M1 lookback zone 계산.
+        """HARPOON's own M1 lookback zone calculation.
 
-        FOCUS 의존 없이 M1 N봉 (zone_lookback_bars, default 50) 에서
-        Swing High (저항) / Swing Low (지지) 클러스터링.
+        Without depending on FOCUS, cluster Swing Highs (resistance) /
+        Swing Lows (support) over M1 N bars (zone_lookback_bars, default 50).
 
-        Returns: FOCUS zones 와 동일 구조 List[Dict]
+        Returns: List[Dict] with the same structure as FOCUS zones
           [{type: "SUPPORT"/"RESISTANCE", price_low, price_high, strength}]
         """
         if not market:
@@ -1096,7 +1097,7 @@ class HarpoonManager:
             if not klines or len(klines) < 10:
                 return []
 
-            # OHLC 추출 (Bybit 형식: [ts, open, high, low, close, volume, ...])
+            # Extract OHLC (Bybit format: [ts, open, high, low, close, volume, ...])
             highs = []
             lows = []
             closes = []
@@ -1110,14 +1111,14 @@ class HarpoonManager:
             if len(highs) < 10 or len(lows) < 10:
                 return []
 
-            # ATR 추정 (단순화: high-low 평균)
+            # Estimate ATR (simplified: mean of high-low)
             ranges = [h - l for h, l in zip(highs, lows)]
             atr = sum(ranges) / len(ranges) if ranges else 0
             if atr <= 0:
                 return []
-            tolerance = atr * 0.3   # 가격 클러스터링 tolerance
+            tolerance = atr * 0.3   # price clustering tolerance
 
-            # Swing High / Low 추출 (앞뒤 2봉 비교)
+            # Extract Swing High / Low (compare 2 bars on each side)
             swing_highs = []
             swing_lows = []
             for i in range(2, len(highs) - 2):
@@ -1126,7 +1127,7 @@ class HarpoonManager:
                 if lows[i] <= min(lows[i-2], lows[i-1], lows[i+1], lows[i+2]):
                     swing_lows.append(lows[i])
 
-            # 가격 클러스터링 (가까운 가격 묶기)
+            # Price clustering (group nearby prices)
             def cluster(prices: list, tol: float) -> List[List[float]]:
                 if not prices:
                     return []
@@ -1137,7 +1138,7 @@ class HarpoonManager:
                         clusters[-1].append(p)
                     else:
                         clusters.append([p])
-                # 큰 클러스터 우선 (자주 닿은 곳 = 강한 zone)
+                # Larger clusters first (touched often = strong zone)
                 clusters.sort(key=len, reverse=True)
                 return clusters
 
@@ -1145,17 +1146,17 @@ class HarpoonManager:
             low_clusters = cluster(swing_lows, tolerance)
 
             zones = []
-            # 상위 3개 RESISTANCE
+            # Top 3 RESISTANCE
             for cl in high_clusters[:3]:
-                if len(cl) < 2:  # 최소 2개 swing 모인 곳만
+                if len(cl) < 2:  # only where at least 2 swings gathered
                     continue
                 zones.append({
                     "type": "RESISTANCE",
                     "price_low": min(cl),
                     "price_high": max(cl),
-                    "strength": min(1.0, len(cl) / 5.0),  # 5개 모이면 strength 1.0
+                    "strength": min(1.0, len(cl) / 5.0),  # strength 1.0 when 5 gather
                 })
-            # 상위 3개 SUPPORT
+            # Top 3 SUPPORT
             for cl in low_clusters[:3]:
                 if len(cl) < 2:
                     continue
@@ -1171,12 +1172,12 @@ class HarpoonManager:
             return []
 
     def _get_zones_for_harpoon(self, market: str = "") -> List[Dict]:
-        """Phase M.E + M.F (2026-04-24 부모 명시):
-        Standalone 모드일 때만 자체 zone 계산. 기본은 FOCUS zones 사용.
+        """Phase M.E + M.F (2026-04-24 owner-specified):
+        Compute self zones only in standalone mode. Default uses FOCUS zones.
 
-        - harpoon_standalone_mode = True: 자체 M1 lookback 계산 (FOCUS 무관)
-                                          fallback: 자체 결과 없으면 FOCUS zones
-        - harpoon_standalone_mode = False (default): FOCUS zones 그대로 (기존 동작)
+        - harpoon_standalone_mode = True: self M1 lookback calc (independent of FOCUS)
+                                          fallback: if no self result, FOCUS zones
+        - harpoon_standalone_mode = False (default): FOCUS zones as-is (existing behavior)
         """
         cfg = self.config
         standalone = bool(getattr(cfg, "harpoon_standalone_mode", False))
@@ -1185,10 +1186,10 @@ class HarpoonManager:
                 market = self._get_focus_market()
             zones = self._compute_self_zones(market)
             if not zones:
-                # fallback: FOCUS zones 시도 (FOCUS 가 켜져 있다면)
+                # fallback: try FOCUS zones (if FOCUS is on)
                 zones = self._get_focus_zones()
             return zones
-        # 기본 (Sub-scalper) — FOCUS zones 사용
+        # Default (Sub-scalper) — use FOCUS zones
         return self._get_focus_zones()
 
     def _get_focus_market(self) -> str:
@@ -1196,7 +1197,7 @@ class HarpoonManager:
             return ""
         market = getattr(self.focus, 'selected_market', "") or ""
         if not market:
-            # ★ FOCUS IDLE일 때 lock_market fallback
+            # ★ lock_market fallback when FOCUS is IDLE
             cfg = getattr(self.focus, 'config', None)
             if cfg:
                 market = getattr(cfg, 'lock_market', "") or ""
@@ -1205,26 +1206,26 @@ class HarpoonManager:
     def _get_focus_direction(self) -> str:
         if not self.focus:
             return ""
-        # [2026-05-15] FOCUS h4_sig→primary_sig 개명 — 구 속성 fallback 유지
+        # [2026-05-15] FOCUS h4_sig→primary_sig renamed — keep old-attribute fallback
         sig = getattr(self.focus, 'primary_sig', None) or getattr(self.focus, 'h4_sig', None)
         if sig and isinstance(sig, dict):
             return sig.get("direction", "")
         return ""
 
     # ═══════════════════════════════════════════════════════════════════
-    # ★ Phase M.A (2026-04-24) — Multi-Market Scanner (독립 scan universe)
+    # ★ Phase M.A (2026-04-24) — Multi-Market Scanner (independent scan universe)
     # ═══════════════════════════════════════════════════════════════════
 
     def _get_scan_universe(self) -> List[str]:
-        """HARPOON 스캔 대상 마켓 리스트 반환.
+        """Return the list of markets HARPOON scans.
 
         Priority:
-          1. whitelist 비어있지 않음 → whitelist 만 스캔
-          2. scan_universe == "custom" → whitelist 필수 (비면 빈 리스트)
-          3. scan_universe == "top20" / "top50" → FOCUS scanner_pool 또는 Bybit 상위 N
-          4. scan_universe == "all" → FOCUS scanner 에 등록된 전체 pool
+          1. whitelist non-empty → scan only the whitelist
+          2. scan_universe == "custom" → whitelist required (empty list if missing)
+          3. scan_universe == "top20" / "top50" → FOCUS scanner_pool or Bybit top N
+          4. scan_universe == "all" → the full pool registered in the FOCUS scanner
 
-        blacklist 는 최종 단계에서 제외.
+        blacklist is excluded in the final step.
         """
         cfg = self.config
         universe_mode = (getattr(cfg, "scan_universe", "all") or "all").lower()
@@ -1233,23 +1234,23 @@ class HarpoonManager:
 
         candidates: List[str] = []
 
-        # 1) whitelist 우선
+        # 1) whitelist first
         if whitelist:
             candidates = list(whitelist)
         elif universe_mode == "custom":
-            # custom 인데 whitelist 비면 스캔 X
+            # custom but empty whitelist → no scan
             return []
         else:
-            # 2) FOCUS scanner pool 상속 (top_n 반영)
-            # FOCUS 가 이미 유동성/등급 필터 적용한 리스트 — 재사용
+            # 2) Inherit FOCUS scanner pool (apply top_n)
+            # FOCUS already applied liquidity/grade filters — reuse the list
             try:
                 if self.focus:
-                    # FOCUS scanner 가 평가하는 전체 풀 참조
+                    # Reference the full pool the FOCUS scanner evaluates
                     pool = getattr(self.focus, "_scanner_market_pool", None)
                     if pool and isinstance(pool, (list, tuple)):
                         candidates = [str(m).upper() for m in pool]
                     else:
-                        # fallback: scan_list endpoint 용 캐시
+                        # fallback: cache for the scan_list endpoint
                         scan_cache = getattr(self.focus, "_last_scan_list", None)
                         if scan_cache and isinstance(scan_cache, (list, tuple)):
                             candidates = [str(item.get("market","")).upper() if isinstance(item, dict) else str(item).upper()
@@ -1257,18 +1258,18 @@ class HarpoonManager:
             except Exception as exc:
                 logger.debug("[HARPOON] scan universe fetch from focus failed: %s", exc)
 
-            # top_n 제한
+            # top_n limit
             if universe_mode == "top20":
                 candidates = candidates[:20]
             elif universe_mode == "top50":
                 candidates = candidates[:50]
-            # "all" 은 제한 없음
+            # "all" has no limit
 
-        # 3) blacklist 제외
+        # 3) Exclude blacklist
         if blacklist_set:
             candidates = [m for m in candidates if m not in blacklist_set]
 
-        # 4) 중복 제거 + 빈값 제거
+        # 4) Dedup + drop empties
         seen = set()
         result = []
         for m in candidates:
@@ -1278,9 +1279,9 @@ class HarpoonManager:
         return result
 
     def _get_harpoon_candidates(self) -> List[Dict[str, Any]]:
-        """HARPOON 스캔 후보 리스트 반환 (Phase 1 — 1차 필터만).
+        """Return HARPOON's scan candidate list (Phase 1 — first-pass filter only).
 
-        각 후보는 dict 형태:
+        Each candidate is a dict:
           {
             "market": str,
             "direction": "LONG"/"SHORT",
@@ -1291,22 +1292,22 @@ class HarpoonManager:
             "atr": float,
           }
 
-        필터 순서:
-          1. scan universe (blacklist/whitelist 포함) — _get_scan_universe
-          2. 유동성 (min_volume_usdt_24h) — Phase 2 에서 Bybit API 통합
-          3. ADX 바닥 (min_adx_self 또는 min_adx inherit)
-          4. Conviction 바닥 (min_conviction_self)
-          5. PA 패턴 허용 리스트 (pa_patterns_allowed)
+        Filter order:
+          1. scan universe (incl. blacklist/whitelist) — _get_scan_universe
+          2. liquidity (min_volume_usdt_24h) — Bybit API integration in Phase 2
+          3. ADX floor (min_adx_self or min_adx inherit)
+          4. Conviction floor (min_conviction_self)
+          5. PA pattern allow-list (pa_patterns_allowed)
 
-        Phase 1 범위: universe + PA 패턴 필터만. 실제 신호 재사용 (FOCUS scanner 결과).
-        Phase 2~3 에서: 자체 PA 감지 + 유동성 + TP/SL 계산.
+        Phase 1 scope: universe + PA pattern filter only. Reuses real signals (FOCUS scanner results).
+        In Phase 2~3: self PA detection + liquidity + TP/SL calculation.
         """
         cfg = self.config
         universe = self._get_scan_universe()
         if not universe:
             return []
 
-        # FOCUS scanner 가 이미 평가한 최신 결과 재사용
+        # Reuse the FOCUS scanner's latest already-evaluated results
         scan_list = []
         try:
             if self.focus:
@@ -1318,10 +1319,10 @@ class HarpoonManager:
             return []
 
         min_adx = int(getattr(cfg, "min_adx_self", 20))
-        # min_adx=0 이면 FOCUS dormant 상속
+        # If min_adx=0, inherit FOCUS dormant
         if min_adx <= 0:
             min_adx = int(getattr(cfg, "min_adx", 0)) or 15
-        min_conv = float(getattr(cfg, "min_conviction_self", 50.0))  # [2026-05-17 100점 ×10] 5→50
+        min_conv = float(getattr(cfg, "min_conviction_self", 50.0))  # [2026-05-17 100-pt scale ×10] 5→50
         pa_allowed = set(getattr(cfg, "pa_patterns_allowed", []) or [])
 
         candidates = []
@@ -1331,22 +1332,22 @@ class HarpoonManager:
             mkt = str(item.get("market", "")).upper()
             if mkt not in universe:
                 continue
-            # 신호 없으면 skip (HOLD)
+            # Skip if no signal (HOLD)
             sig = str(item.get("signal", "")).upper()
             if sig not in ("BUY", "SELL"):
                 continue
             direction = "LONG" if sig == "BUY" else "SHORT"
-            # ADX / Conviction 필터
+            # ADX / Conviction filter
             adx = float(item.get("adx", 0) or 0)
             if adx < min_adx:
                 continue
             conv = int(item.get("conviction", 0) or 0)
 
             # ★ [2026-04-24] HARPOON-Specific PA Weight Override
-            # FOCUS conviction 은 caller="focus" 가중치로 계산됨.
-            # HARPOON 우대 패턴 (PIN_BAR/ENGULFING/SQUEEZE/BOS) 은 추가 가산,
-            # FOCUS 우대 패턴 (STAR_V1) 은 차감.
-            # delta = HARPOON_w - FOCUS_w (이미 포함된 것과의 차이만 더함).
+            # FOCUS conviction is computed with caller="focus" weights.
+            # HARPOON-favored patterns (PIN_BAR/ENGULFING/SQUEEZE/BOS) get an extra bump,
+            # FOCUS-favored patterns (STAR_V1) get a deduction.
+            # delta = HARPOON_w - FOCUS_w (add only the difference from what's already included).
             pa_name = str(item.get("pa_pattern", "") or "").upper()
             if pa_name and self.focus:
                 try:
@@ -1369,9 +1370,9 @@ class HarpoonManager:
                         "BOS_BULLISH": int(getattr(cfg, "pa_weight_bos", 3)),
                         "BOS_BEARISH": int(getattr(cfg, "pa_weight_bos", 3)),
                     }
-                    # [2026-05-17 100점 ×10] PA weight 자체는 0~6 (FOCUS _compute_pa_weight 와 동일 스케일).
-                    # 신규 conviction 은 0~100 (PA_score × 5 가 conviction 의 PA 기여분).
-                    # → delta 도 ×5 해서 100점 체계와 일치. (예: PA delta 1 → conv delta 5)
+                    # [2026-05-17 100-pt scale ×10] PA weight itself is 0~6 (same scale as FOCUS _compute_pa_weight).
+                    # New conviction is 0~100 (PA_score × 5 is conviction's PA contribution).
+                    # → ×5 the delta too to match the 100-pt system. (e.g. PA delta 1 → conv delta 5)
                     delta = (harpoon_w_map.get(pa_name, 0) - focus_w_map.get(pa_name, 0)) * 5
                     if delta != 0:
                         conv_adjusted = max(0.0, float(conv) + float(delta))
@@ -1384,11 +1385,11 @@ class HarpoonManager:
 
             if conv < min_conv:
                 continue
-            # PA 패턴 허용 리스트
+            # PA pattern allow-list
             pa = pa_name
             if pa_allowed and pa not in pa_allowed:
                 continue
-            # 후보 수집
+            # Collect candidate
             candidates.append({
                 "market": mkt,
                 "direction": direction,
@@ -1399,13 +1400,13 @@ class HarpoonManager:
                 "atr": float(item.get("atr", 0) or 0),
             })
 
-        # conviction 내림차순 정렬 (강한 신호 우선)
+        # Sort by conviction descending (strong signals first)
         candidates.sort(key=lambda x: (-x["conviction"], -x["adx"]))
 
-        # ★ Phase M.C: FOCUS 조율 필터 적용
+        # ★ Phase M.C: apply FOCUS coordination filter
         candidates = self._filter_candidates_by_focus_coordination(candidates)
 
-        # ★ Phase M.B: Multi-position 체크 (신규 진입 가능한 후보만)
+        # ★ Phase M.B: Multi-position check (only candidates that can newly enter)
         filtered = []
         for c in candidates:
             can_open, reason = self._can_open_new_scalp(c.get("market", ""), c.get("direction", ""))
@@ -1417,12 +1418,12 @@ class HarpoonManager:
         return filtered
 
     # ═══════════════════════════════════════════════════════════════════
-    # ★ Phase M.C (2026-04-24) — FOCUS 조율 로직
-    #   부모님 결정: HARPOON 완전 탈바꿈 + FOCUS 동시 작동 안전
+    # ★ Phase M.C (2026-04-24) — FOCUS coordination logic
+    #   Owner decision: full HARPOON overhaul + safe concurrent operation with FOCUS
     # ═══════════════════════════════════════════════════════════════════
 
     def _get_focus_held_markets(self) -> List[tuple]:
-        """FOCUS 가 보유한 (market, direction) 리스트 조회.
+        """Get the list of (market, direction) FOCUS holds.
         read-only helper on focus_manager side."""
         try:
             if not self.focus:
@@ -1435,8 +1436,8 @@ class HarpoonManager:
         return []
 
     def _is_focus_coin_locked(self, market: str) -> bool:
-        """FOCUS 가 이 코인 보유 중이면 True (respect_focus_coin_lock 시 HARPOON skip).
-        코인 exclusive 규칙 — 한 코인 = 한 엔진."""
+        """True if FOCUS holds this coin (HARPOON skips when respect_focus_coin_lock).
+        Coin-exclusive rule — one coin = one engine."""
         if not market:
             return False
         if not getattr(self.config, "respect_focus_coin_lock", True):
@@ -1446,8 +1447,8 @@ class HarpoonManager:
         return any(m == mkt_u for (m, _d) in held)
 
     def _is_focus_direction_conflict(self, market: str, direction: str) -> bool:
-        """FOCUS 가 이 코인에 반대 방향 포지션 있으면 True.
-        양방향 헤지 방지 (respect_focus_direction_lock)."""
+        """True if FOCUS holds an opposite-direction position on this coin.
+        Prevents two-way hedging (respect_focus_direction_lock)."""
         if not market or not direction:
             return False
         if not getattr(self.config, "respect_focus_direction_lock", True):
@@ -1461,8 +1462,8 @@ class HarpoonManager:
         return False
 
     def _is_focus_entry_freeze_active(self) -> bool:
-        """FOCUS 가 최근 진입한지 focus_entry_freeze_sec 이내면 True.
-        FOCUS 진입 직후 HARPOON 잠시 skip — race condition 방지."""
+        """True if FOCUS entered within the last focus_entry_freeze_sec.
+        HARPOON briefly skips right after a FOCUS entry — prevents race condition."""
         freeze_sec = float(getattr(self.config, "focus_entry_freeze_sec", 30.0))
         if freeze_sec <= 0:
             return False
@@ -1486,28 +1487,28 @@ class HarpoonManager:
     # ═══════════════════════════════════════════════════════════════════
 
     def _get_active_scalps(self) -> List[ScalpPosition]:
-        """현재 활성 스캘프 리스트.
-        Phase 3 (병렬 유지): current_scalp 가 있으면 그것을 포함하여 반환.
-        Phase 4+ 에서 active_scalps 직접 관리로 전환."""
+        """Current active scalp list.
+        Phase 3 (kept in parallel): if current_scalp exists, include it in the return.
+        Phase 4+ switches to managing active_scalps directly."""
         result = list(self.active_scalps) if self.active_scalps else []
         if self.current_scalp and not any(s.market == self.current_scalp.market for s in result):
             result.append(self.current_scalp)
         return result
 
     def _count_active_scalps(self) -> int:
-        """현재 활성 스캘프 수."""
+        """Number of currently active scalps."""
         return len(self._get_active_scalps())
 
     def _count_same_direction_scalps(self, direction: str) -> int:
-        """같은 방향 활성 스캘프 수."""
+        """Number of active scalps in the same direction."""
         if not direction:
             return 0
         dir_u = direction.upper()
         return sum(1 for s in self._get_active_scalps() if (s.direction or "").upper() == dir_u)
 
     def _is_coin_on_cooldown(self, market: str) -> bool:
-        """코인별 쿨다운 체크 (cooldown_per_coin_sec).
-        같은 코인 재진입 방지 — FOCUS coin_repeat_brake 와 유사하지만 HARPOON 독립."""
+        """Per-coin cooldown check (cooldown_per_coin_sec).
+        Prevents same-coin re-entry — similar to FOCUS coin_repeat_brake but HARPOON-independent."""
         if not market:
             return False
         cooldown = float(getattr(self.config, "cooldown_per_coin_sec", 300.0))
@@ -1519,8 +1520,8 @@ class HarpoonManager:
         return (time.time() - last_exit) < cooldown
 
     def _is_coin_on_post_sl_cooldown(self, market: str, direction: str) -> bool:
-        """Stage 0-7 post_sl_cooldown_min 체크 (SL 후 동일 setup 차단).
-        기존 _record_post_sl 과 연동."""
+        """Stage 0-7 post_sl_cooldown_min check (block the same setup after an SL).
+        Works with the existing _record_post_sl."""
         if not market or not direction:
             return False
         cooldown_min = float(getattr(self.config, "post_sl_cooldown_min", 30.0))
@@ -1533,46 +1534,46 @@ class HarpoonManager:
         return time.time() < expire_ts
 
     def _can_open_new_scalp(self, market: str, direction: str) -> tuple:
-        """신규 스캘프 진입 가능 여부.
+        """Whether a new scalp entry is allowed.
         Returns: (can_open: bool, reason: str)
 
-        체크 순서:
-          1. max_concurrent_scalps (동시 총 수)
-          2. max_same_direction_scalps (같은 방향 수)
-          3. cooldown_per_coin_sec (코인별 쿨다운)
-          4. post_sl_cooldown (SL 후 동일 setup)
-          5. 이미 같은 코인 보유 중 (중복 진입 방지)
+        Check order:
+          1. max_concurrent_scalps (total concurrent count)
+          2. max_same_direction_scalps (same-direction count)
+          3. cooldown_per_coin_sec (per-coin cooldown)
+          4. post_sl_cooldown (same setup after SL)
+          5. already holding the same coin (prevent duplicate entry)
         """
         cfg = self.config
         mkt_u = (market or "").upper()
         dir_u = (direction or "").upper()
 
-        # 1) 총 동시 스캘프 수
+        # 1) Total concurrent scalp count
         max_concurrent = int(getattr(cfg, "max_concurrent_scalps", 3))
         current_count = self._count_active_scalps()
         if current_count >= max_concurrent:
             return False, f"max_concurrent({current_count}/{max_concurrent})"
 
-        # 2) 같은 방향 수
+        # 2) Same-direction count
         max_same_dir = int(getattr(cfg, "max_same_direction_scalps", 2))
         same_dir_count = self._count_same_direction_scalps(dir_u)
         if same_dir_count >= max_same_dir:
             return False, f"max_same_direction({same_dir_count}/{max_same_dir})"
 
-        # 3) 코인별 쿨다운
+        # 3) Per-coin cooldown
         if self._is_coin_on_cooldown(mkt_u):
             return False, "coin_cooldown"
 
-        # 4) Post-SL 쿨다운 (Stage 0-7)
+        # 4) Post-SL cooldown (Stage 0-7)
         if self._is_coin_on_post_sl_cooldown(mkt_u, dir_u):
             return False, "post_sl_cooldown"
 
-        # 5) 중복 진입 방지 — 이미 보유 중인 코인
+        # 5) Prevent duplicate entry — coin already held
         for s in self._get_active_scalps():
             if (s.market or "").upper() == mkt_u:
                 return False, f"coin_already_held({(s.direction or '').upper()})"
 
-        # 6) ★ Phase M.E: 공유 가드 (FOCUS B8/B10/coin_loss_cap/manual_exit_penalty)
+        # 6) ★ Phase M.E: shared guards (FOCUS B8/B10/coin_loss_cap/manual_exit_penalty)
         shared_blocked, shared_reason = self._check_shared_guards(mkt_u, dir_u)
         if shared_blocked:
             return False, shared_reason
@@ -1580,11 +1581,11 @@ class HarpoonManager:
         return True, "ok"
 
     # ═══════════════════════════════════════════════════════════════════
-    # ★ Phase M.D (2026-04-24) — Budget 분리 (FOCUS/HARPOON pool 분리)
+    # ★ Phase M.D (2026-04-24) — Budget separation (separate FOCUS/HARPOON pool)
     # ═══════════════════════════════════════════════════════════════════
 
     def _get_focus_total_margin(self) -> float:
-        """FOCUS 가 사용 중인 총 margin 조회 (read-only)."""
+        """Get the total margin FOCUS is using (read-only)."""
         try:
             if not self.focus:
                 return 0.0
@@ -1596,7 +1597,7 @@ class HarpoonManager:
         return 0.0
 
     def _get_harpoon_used_margin(self) -> float:
-        """HARPOON 활성 스캘프들이 사용 중인 총 margin 합산."""
+        """Sum of total margin used by HARPOON's active scalps."""
         try:
             total = 0.0
             for s in self._get_active_scalps():
@@ -1612,50 +1613,50 @@ class HarpoonManager:
             return 0.0
 
     def _get_harpoon_total_budget_pool(self) -> float:
-        """HARPOON 자체 총 예산 pool (= 기존 effective_budget property).
-        budget_pct 또는 budget_usdt 직접 지정값."""
+        """HARPOON's own total budget pool (= existing effective_budget property).
+        budget_pct or directly-set budget_usdt value."""
         return float(self.effective_budget or 0)
 
     def _get_harpoon_available_budget(self) -> float:
-        """HARPOON 잔여 가용 예산 = total_pool - used_margin."""
+        """HARPOON remaining available budget = total_pool - used_margin."""
         pool = self._get_harpoon_total_budget_pool()
         used = self._get_harpoon_used_margin()
         return max(0.0, pool - used)
 
     def _compute_per_scalp_budget(self, market: str, conviction: int = 5) -> float:
-        """신규 스캘프당 예산 계산 (Multi-position 고려).
+        """Compute per-new-scalp budget (Multi-position aware).
 
-        공식: 잔여 HARPOON 가용 예산 / 잔여 슬롯 수
-          - 잔여 가용 = total_pool - used_margin (다른 스캘프들이 쓰는 것 차감)
-          - 잔여 슬롯 = max_concurrent_scalps - 현재 active 수
-          - risk_pct 고려한 micro-adjustment
+        Formula: remaining HARPOON available budget / remaining slot count
+          - remaining available = total_pool - used_margin (subtract what other scalps use)
+          - remaining slots = max_concurrent_scalps - current active count
+          - micro-adjustment considering risk_pct
 
-        최소 $5 (Bybit 최소 주문) / 최대 잔여 가용
+        Min $5 (Bybit min order) / max remaining available
         """
         cfg = self.config
         available = self._get_harpoon_available_budget()
         if available < 5.0:
-            return 0.0  # 진입 불가
+            return 0.0  # cannot enter
 
         max_concurrent = int(getattr(cfg, "max_concurrent_scalps", 3))
         current_count = self._count_active_scalps()
         remaining_slots = max(1, max_concurrent - current_count)
 
-        # 잔여 예산을 잔여 슬롯에 균등 분배
+        # Distribute remaining budget evenly across remaining slots
         per_scalp = available / remaining_slots
 
-        # ★ [2026-04-24] PA Weight 통합 (FOCUS conviction 0~10 → 0~16 확장)
-        #   부모 결정 "PA=공식, fee=변수" → 강한 PA 일수록 size ↑ 로 fee 희석
-        #   tier 매핑 (full size 기준):
-        #     conviction <  5  → skip (수수료 못 이김, return 0.0)
-        #     [2026-05-17 100점 ×10 마이그] 옛 5/7/10/13/16 → 50/70/100/130/160 (단순 ×10)
-        #     conviction 50~70   → 0.5x  (약한 신호: ADX/BB만, PA 없음)
-        #     conviction 71~100  → 0.8x  (전통적 강신호: ADX+BB+MACD+trend)
-        #     conviction 101~130 → 1.1x  (전통 + Pat 1/2 PA)
-        #     conviction 131~160 → 1.4x  (전통 + Pat 3 PA + zone — full conviction)
+        # ★ [2026-04-24] PA Weight integration (FOCUS conviction 0~10 → 0~16 expanded)
+        #   Owner decision "PA=formula, fee=variable" → stronger PA → larger size to dilute fee
+        #   tier mapping (full-size basis):
+        #     conviction <  5  → skip (can't beat fees, return 0.0)
+        #     [2026-05-17 100-pt ×10 migration] old 5/7/10/13/16 → 50/70/100/130/160 (simple ×10)
+        #     conviction 50~70   → 0.5x  (weak signal: ADX/BB only, no PA)
+        #     conviction 71~100  → 0.8x  (traditional strong signal: ADX+BB+MACD+trend)
+        #     conviction 101~130 → 1.1x  (traditional + Pat 1/2 PA)
+        #     conviction 131~160 → 1.4x  (traditional + Pat 3 PA + zone — full conviction)
         risk_pct = float(getattr(cfg, "risk_pct", 0.5))
         if conviction < 50:
-            return 0.0  # 수수료 BEP 못 넘김 — skip
+            return 0.0  # can't clear fee BEP — skip
         elif conviction <= 70:
             conv_scale = 0.5
         elif conviction <= 100:
@@ -1666,15 +1667,15 @@ class HarpoonManager:
             conv_scale = 1.4
         per_scalp = per_scalp * conv_scale
 
-        # 최종: 최소 $5, 최대 available
+        # Final: min $5, max available
         return max(5.0, min(per_scalp, available))
 
     # ═══════════════════════════════════════════════════════════════════
-    # ★ Phase M.E (2026-04-24) — Shared Guards 통합 (FOCUS 가드 공유)
+    # ★ Phase M.E (2026-04-24) — Shared Guards integration (share FOCUS guards)
     # ═══════════════════════════════════════════════════════════════════
 
     def _get_focus_shared_guard_state(self, market: str, direction: str) -> dict:
-        """FOCUS 의 공유 가드 상태 조회 (read-only).
+        """Get FOCUS's shared guard state (read-only).
         FOCUS._get_shared_guard_state_for_harpoon() wrapper."""
         try:
             if not self.focus:
@@ -1687,26 +1688,26 @@ class HarpoonManager:
         return {}
 
     def _check_shared_guards(self, market: str, direction: str) -> tuple:
-        """공유 가드 통합 체크 (Phase M.E).
+        """Combined shared-guard check (Phase M.E).
 
-        체크 항목 (FOCUS 상태 공유):
-          1. profit_exit_block (B10) — 같은 방향 수익 streak 후 차단
-          2. direction_exhaustion (B8) — 15분 내 2회 profit exit 후 차단
-          3. coin_loss_cap — 24h 누적 -$20+ 코인 차단
-          4. manual_exit_penalty — 부모님이 수동 청산한 코인 1.5h 차단
-          5. (coin_repeat 정보는 참고만, 차단 결정 X — HARPOON 은 자체 cooldown 사용)
+        Checks (sharing FOCUS state):
+          1. profit_exit_block (B10) — block after a same-direction profit streak
+          2. direction_exhaustion (B8) — block after 2 profit exits within 15 min
+          3. coin_loss_cap — block coins with -$20+ cumulative over 24h
+          4. manual_exit_penalty — block a coin the owner manually closed for 1.5h
+          5. (coin_repeat info is reference only, no block decision — HARPOON uses its own cooldown)
 
-        부모님 결정: HARPOON 이 FOCUS 가드 우회하면 안 됨. 양쪽 합산.
+        Owner decision: HARPOON must not bypass FOCUS guards. Combine both.
 
         Returns: (blocked: bool, reason: str)
         """
         cfg = self.config
 
-        # 부모님이 명시 OFF 한 경우 skip
+        # Skip if the owner explicitly turned these OFF
         if not getattr(cfg, "respect_coin_loss_cap", True) \
            and not getattr(cfg, "respect_focus_adx_slope", True) \
            and not getattr(cfg, "respect_b11_regime_lock", True):
-            # 가드 모두 OFF — shared guard 도 skip
+            # All guards OFF — skip the shared guard too
             return (False, "")
 
         state = self._get_focus_shared_guard_state(market, direction)
@@ -1723,55 +1724,55 @@ class HarpoonManager:
         if de_blocked:
             return (True, f"shared_direction_exhaustion: {de_reason[:80]}")
 
-        # 3) coin_loss_cap (24h 누적, respect_coin_loss_cap 설정에 따름)
+        # 3) coin_loss_cap (24h cumulative, per the respect_coin_loss_cap setting)
         if getattr(cfg, "respect_coin_loss_cap", True):
             cap_blocked, cap_reason = state.get("coin_loss_cap_blocked", (False, ""))
             if cap_blocked:
                 return (True, f"shared_coin_loss_cap: {cap_reason[:80]}")
 
-        # 4) manual_exit_penalty (부모 수동 청산 후)
+        # 4) manual_exit_penalty (after an owner manual exit)
         if state.get("manual_exit_penalty_active", False):
-            return (True, f"shared_manual_exit_penalty: {market} 수동 청산 페널티 active")
+            return (True, f"shared_manual_exit_penalty: {market} manual-exit penalty active")
 
         return (False, "")
 
     def _record_scalp_exit(self, market: str, direction: str, result: str):
-        """스캘프 청산 시 cooldown timer 기록 + active_scalps 정리.
-        result: "TP" / "SL" / "MANUAL" / "server_sl" / "pre_be_stall" 등"""
+        """On scalp exit, record cooldown timers + clean up active_scalps.
+        result: "TP" / "SL" / "MANUAL" / "server_sl" / "pre_be_stall" etc."""
         if not market:
             return
         mkt_u = market.upper()
         now = time.time()
-        # 코인별 cooldown 기록 (모든 청산 공통)
+        # Record per-coin cooldown (common to all exits)
         self.last_scalp_exit_by_coin[mkt_u] = now
-        # SL 계열은 post_sl_cooldown 추가
+        # SL-type exits add post_sl_cooldown
         result_lower = (result or "").lower()
         if direction and ("sl" in result_lower or "reject" in result_lower):
             cooldown_min = float(getattr(self.config, "post_sl_cooldown_min", 30.0))
             if cooldown_min > 0:
                 key = (mkt_u, direction.upper())
                 self._post_sl_cooldown_by_coin[key] = now + cooldown_min * 60
-        # active_scalps 에서 제거
+        # Remove from active_scalps
         self.active_scalps = [s for s in self.active_scalps if (s.market or "").upper() != mkt_u]
 
     # ═══════════════════════════════════════════════════════════════════
-    # ★ Phase M.F (2026-04-24) — Multi-market / Multi-position 실진입
-    #   설계 원칙:
-    #     - current_scalp = "primary" — 기존 단일 path 유지 (dynamic trailing 등 full)
-    #     - active_scalps[others] = "secondary" — Bybit 서버사이드 TP/SL 에만 의존
-    #     - 기존 state machine 은 primary 관리용
-    #     - 신규 함수는 tick 끝에서 추가 처리
+    # ★ Phase M.F (2026-04-24) — Multi-market / Multi-position real entry
+    #   Design principles:
+    #     - current_scalp = "primary" — keep the existing single path (full dynamic trailing etc.)
+    #     - active_scalps[others] = "secondary" — rely only on Bybit server-side TP/SL
+    #     - the existing state machine manages the primary
+    #     - new functions do extra handling at the end of tick
     # ═══════════════════════════════════════════════════════════════════
 
     # ═══════════════════════════════════════════════════════════════════
-    # ★ Phase M.G (2026-04-24) — Multi-scalp 가드 3종 (generic helpers)
+    # ★ Phase M.G (2026-04-24) — 3 multi-scalp guards (generic helpers)
     #   Dynamic Trailing / Fast-Reject v2 / Pre-BE Stall Exit
-    #   pos-generic 으로 설계 — Primary + Secondary 양쪽 적용 가능
+    #   Designed pos-generic — applicable to both Primary and Secondary
     # ═══════════════════════════════════════════════════════════════════
 
     def _check_fast_reject_v2_for_scalp(self, scalp: ScalpPosition, price: float, now: float) -> tuple:
-        """Fast-Reject v2: 진입 후 N초 내 peak 0% + PnL 손실 → 즉시 청산.
-        Stage 0-6 forensic 04-14 peak 0% 패턴 직접 대응.
+        """Fast-Reject v2: peak 0% + PnL loss within N sec of entry → immediate exit.
+        Directly addresses the Stage 0-6 forensic 04-14 peak 0% pattern.
         Returns: (should_exit: bool, reason: str)"""
         cfg = self.config
         if not getattr(cfg, "fast_reject_v2_enabled", True):
@@ -1782,41 +1783,41 @@ class HarpoonManager:
         elapsed = now - (scalp.entry_ts or 0)
         if elapsed <= 0 or elapsed > max_sec:
             return (False, "")
-        # peak 수익 계산
+        # Compute peak profit
         peak_pct = 0.0
         if scalp.peak_profit_price > 0 and scalp.entry_price > 0:
             if scalp.direction == "LONG":
                 peak_pct = (scalp.peak_profit_price / scalp.entry_price - 1) * 100
             else:
                 peak_pct = (1 - scalp.peak_profit_price / scalp.entry_price) * 100
-        # 현재 pnl
+        # Current pnl
         if scalp.direction == "LONG":
             pnl_pct = (price / scalp.entry_price - 1) * 100 if scalp.entry_price > 0 else 0
         else:
             pnl_pct = (1 - price / scalp.entry_price) * 100 if scalp.entry_price > 0 else 0
-        # 조건: peak 아직 threshold 미달 AND pnl 손실
+        # Condition: peak still below threshold AND pnl in loss
         if peak_pct < peak_thr_pct and pnl_pct <= pnl_pct_thr:
             return (True, f"fast_reject_v2_{int(elapsed)}s_peak{peak_pct:.2f}%_pnl{pnl_pct:.2f}%")
         return (False, "")
 
     def _check_pre_be_stall_exit_for_scalp(self, scalp: ScalpPosition, price: float, now: float) -> tuple:
-        """Pre-BE Stall Exit (FOCUS 와 동일 개념, HARPOON 포팅).
-        BE 락 전 + peak ≥ min_profit + N초 무갱신 → 청산.
-        AUTO 모드: 진입 코인 ATR < 임계 일 때만 발동.
+        """Pre-BE Stall Exit (same concept as FOCUS, ported to HARPOON).
+        Before BE lock + peak ≥ min_profit + no update for N sec → exit.
+        AUTO mode: fires only when the entered coin's ATR < threshold.
 
-        HARPOON config 에 별도 필드 없으면 FOCUS 의 pre_be_stall_* 필드 참조하거나 기본값 적용.
+        If HARPOON config has no dedicated field, reference FOCUS's pre_be_stall_* fields or apply defaults.
         Returns: (should_exit: bool, reason: str)"""
         cfg = self.config
-        # HARPOON 전용 pre_be_stall 설정이 없어서 default AUTO/0.10%/60s 기본 적용
+        # No HARPOON-specific pre_be_stall setting, so apply default AUTO/0.10%/60s
         mode = (getattr(cfg, "pre_be_stall_exit_mode", "AUTO") or "AUTO").upper()
         if mode == "OFF":
             return (False, "")
         if scalp.breakeven_locked:
-            return (False, "")  # BE 락 이후는 BE Stall Exit 담당
+            return (False, "")  # after BE lock, BE Stall Exit handles it
         min_profit_pct = float(getattr(cfg, "pre_be_stall_min_profit_pct", 0.10))
         stall_sec = float(getattr(cfg, "pre_be_stall_sec", 60.0))
         vol_thr_pct = float(getattr(cfg, "pre_be_stall_volatility_threshold_pct", 2.0))
-        # peak 수익
+        # peak profit
         peak_pct = 0.0
         if scalp.peak_profit_price > 0 and scalp.entry_price > 0:
             if scalp.direction == "LONG":
@@ -1825,22 +1826,22 @@ class HarpoonManager:
                 peak_pct = (1 - scalp.peak_profit_price / scalp.entry_price) * 100
         if peak_pct < min_profit_pct:
             return (False, "")
-        # peak 갱신 후 경과 시간 — scalp 에 last_peak_update_ts 없으니 entry_ts 대체
-        # (ScalpPosition 은 last_peak_update_ts 필드 없음 — 단순화)
-        # entry_ts 로부터 일단 측정 (첫 peak 이후 stall_sec 지났는지)
+        # Elapsed since last peak update — scalp has no last_peak_update_ts, so use entry_ts
+        # (ScalpPosition has no last_peak_update_ts field — simplified)
+        # Measure from entry_ts for now (whether stall_sec passed since the first peak)
         elapsed = now - (scalp.entry_ts or now)
         if elapsed < stall_sec:
             return (False, "")
-        # AUTO 모드: ATR 기준 횡보 판정
+        # AUTO mode: judge ranging by ATR
         if mode == "AUTO":
             coin_atr_pct = (scalp.atr_used / scalp.entry_price * 100) if scalp.entry_price > 0 else 0
             if coin_atr_pct >= vol_thr_pct:
-                return (False, "")  # 급변동 — 추세 따라감
+                return (False, "")  # high volatility — follow the trend
         return (True, f"pre_be_stall_{int(elapsed)}s_peak+{peak_pct:.2f}%")
 
     def _update_scalp_peak_price(self, scalp: ScalpPosition, price: float, now: float = None) -> bool:
-        """scalp 의 peak_profit_price 업데이트 + timestamp 기록.
-        Returns: True if peak 갱신됨."""
+        """Update the scalp's peak_profit_price + record timestamp.
+        Returns: True if peak was updated."""
         if now is None:
             now = time.time()
         updated = False
@@ -1857,8 +1858,8 @@ class HarpoonManager:
         return updated
 
     def _check_be_stall_exit_for_scalp(self, scalp: ScalpPosition, price: float, now: float) -> tuple:
-        """BE Stall Exit (Phase M.G generic): BE 락 후 30초 무갱신 시 청산.
-        수수료 가드: pnl ≥ 0.15% OR peak ≥ 0.30% 충족해야 발동.
+        """BE Stall Exit (Phase M.G generic): exit if no update for 30 sec after BE lock.
+        Fee guard: fires only if pnl ≥ 0.15% OR peak ≥ 0.30%.
         Returns: (should_exit: bool, reason: str)"""
         cfg = self.config
         if not getattr(cfg, "be_stall_exit_enabled", True):
@@ -1870,7 +1871,7 @@ class HarpoonManager:
         elapsed = now - ref_ts
         if elapsed < stall_sec:
             return (False, "")
-        # 수수료 가드
+        # Fee guard
         if scalp.direction == "LONG":
             pnl_pct = (price / scalp.entry_price - 1) * 100 if scalp.entry_price > 0 else 0
             peak_pct = (scalp.peak_profit_price / scalp.entry_price - 1) * 100 if scalp.peak_profit_price > 0 and scalp.entry_price > 0 else 0
@@ -1878,13 +1879,13 @@ class HarpoonManager:
             pnl_pct = (1 - price / scalp.entry_price) * 100 if scalp.entry_price > 0 else 0
             peak_pct = (1 - scalp.peak_profit_price / scalp.entry_price) * 100 if scalp.peak_profit_price > 0 and scalp.entry_price > 0 else 0
         if pnl_pct < 0.15 and peak_pct < 0.30:
-            return (False, "")  # 수수료 가드 미달
+            return (False, "")  # below fee guard
         return (True, f"be_stall_{int(elapsed)}s_peak+{peak_pct:.2f}%")
 
     def _check_timeout_for_scalp(self, scalp: ScalpPosition, now: float) -> tuple:
-        """5분 Timeout 체크 (Phase M.G generic).
+        """5 min Timeout check (Phase M.G generic).
         Returns: (should_exit: bool, reason: str)"""
-        TIMEOUT_SEC = 300.0  # 5분
+        TIMEOUT_SEC = 300.0  # 5 min
         if not scalp.entry_ts or scalp.entry_ts <= 0:
             return (False, "")
         hold = now - scalp.entry_ts
@@ -1893,12 +1894,12 @@ class HarpoonManager:
         return (False, "")
 
     def _close_secondary_scalp(self, scalp: ScalpPosition, reason: str, price: float) -> bool:
-        """Secondary scalp 시장가 청산 (Primary 의 _execute_scalp_exit 간소화 버전).
+        """Market-close a secondary scalp (simplified version of Primary's _execute_scalp_exit).
 
-        - Bybit market order 시장가 청산
-        - active_scalps 에서 제거
-        - Journal + recent_scalps 기록
-        - Counters 업데이트
+        - Bybit market order close
+        - remove from active_scalps
+        - record Journal + recent_scalps
+        - update counters
         """
         if not scalp or not scalp.market:
             return False
@@ -1906,7 +1907,7 @@ class HarpoonManager:
         now = time.time()
         try:
             client = self._get_client()
-            # 시장가 청산 주문 (direction 반대)
+            # Market close order (opposite of direction)
             close_side = "Sell" if scalp.direction == "LONG" else "Buy"
             _params = {
                 "category": "linear", "symbol": market, "side": close_side,
@@ -1918,7 +1919,7 @@ class HarpoonManager:
             logger.warning("[HARPOON M.G] secondary close order failed %s: %s", market, exc)
             return False
 
-        # PnL 계산
+        # Compute PnL
         if scalp.direction == "LONG":
             pnl = (price - scalp.entry_price) * scalp.qty
         else:
@@ -1947,7 +1948,7 @@ class HarpoonManager:
         if len(self.recent_scalps) > 50:
             self.recent_scalps = self.recent_scalps[-50:]
 
-        # Cooldown + active_scalps 제거 + counters
+        # Cooldown + remove from active_scalps + counters
         self._record_scalp_exit(market, scalp.direction, reason)
         self.scalps_today += 1
         self.daily_pnl += pnl
@@ -1961,37 +1962,37 @@ class HarpoonManager:
         return True
 
     def _try_extra_entries(self, now: float) -> int:
-        """추가 multi-market 진입 시도.
-        Returns: 이번 tick 에 새로 진입한 스캘프 수.
+        """Try extra multi-market entries.
+        Returns: number of scalps newly entered this tick.
 
-        동작:
-          1. Candidates 리스트 조회 (Phase M.A scanner)
-          2. 각 후보마다 _can_open_new_scalp 체크 (Multi-position + Shared guards)
-          3. 통과 후보는 _execute_scalp_entry 호출 (기존 함수 재사용)
-          4. active_scalps 에 자동 등록 (이미 _execute_scalp_entry 내부에서)
+        Behavior:
+          1. Fetch the candidate list (Phase M.A scanner)
+          2. For each candidate, run _can_open_new_scalp (Multi-position + Shared guards)
+          3. Passing candidates call _execute_scalp_entry (reuse the existing function)
+          4. Auto-register in active_scalps (already inside _execute_scalp_entry)
 
-        주의:
-          - primary (current_scalp) 는 기존 state machine 이 진입 담당
-          - 이 함수는 "추가" 진입만 (secondary)
-          - scan_universe 가 "all" 이 아니거나 max_concurrent>1 일 때만 의미 있음
+        Note:
+          - primary (current_scalp) entry is handled by the existing state machine
+          - this function handles "extra" entries only (secondary)
+          - only meaningful when scan_universe != "all" or max_concurrent>1
         """
         cfg = self.config
         max_concurrent = int(getattr(cfg, "max_concurrent_scalps", 3))
         if max_concurrent <= 1:
-            return 0  # 단일 포지션 모드 — 추가 진입 없음
+            return 0  # single-position mode — no extra entries
 
-        # 이미 최대 보유 중이면 skip
+        # Skip if already at max held
         if self._count_active_scalps() >= max_concurrent:
             return 0
 
-        # 후보 리스트 조회
+        # Fetch candidate list
         candidates = self._get_harpoon_candidates()
         if not candidates:
             return 0
 
-        # paper_mode 시 skip (기존 _handle_stalking 의 paper 로직 재사용 필요하나 여기선 skip)
+        # Skip in paper_mode (would need to reuse _handle_stalking's paper logic; skip here)
         if getattr(cfg, "paper_mode", False):
-            # Paper: log 만 기록
+            # Paper: log only
             for c in candidates[:max_concurrent - self._count_active_scalps()]:
                 self._log_paper_entry(c["market"], c["direction"], c.get("price", 0), c.get("atr", 0))
             return 0
@@ -2006,7 +2007,7 @@ class HarpoonManager:
             atr = float(c.get("atr", 0) or 0)
             if not (market and direction and price > 0 and atr > 0):
                 continue
-            # _can_open_new_scalp 재확인 (이미 candidates 필터에서 체크했지만 race condition 방지)
+            # Re-check _can_open_new_scalp (already checked in the candidate filter, but prevent race condition)
             can_open, reason = self._can_open_new_scalp(market, direction)
             if not can_open:
                 logger.debug("[HARPOON M.F] extra entry skip: %s %s — %s", market, direction, reason)
@@ -2026,14 +2027,14 @@ class HarpoonManager:
         return entered
 
     def _monitor_additional_scalps(self, now: float) -> int:
-        """Additional scalps (current_scalp 외 active_scalps) Bybit 서버 상태 확인.
-        Returns: 이번 tick 에 정리된 스캘프 수.
+        """Check Bybit server state for additional scalps (active_scalps other than current_scalp).
+        Returns: number of scalps cleaned up this tick.
 
-        동작:
-          - current_scalp 은 _handle_fired 에서 담당 (skip)
-          - 나머지 active_scalps 는 Bybit 포지션 조회
-          - Bybit 에 포지션 없으면 → 서버사이드 TP/SL 로 청산됨 → active_scalps 제거 + journal 기록
-          - 서버사이드 TP/SL 기준이라 peak_profit / trailing 등은 못 함 (secondary 제약)
+        Behavior:
+          - current_scalp is handled in _handle_fired (skip)
+          - check Bybit positions for the remaining active_scalps
+          - if no position on Bybit → closed by server-side TP/SL → remove from active_scalps + journal
+          - based on server-side TP/SL, so peak_profit / trailing etc. aren't possible (secondary constraint)
         """
         if not self.active_scalps:
             return 0
@@ -2061,44 +2062,44 @@ class HarpoonManager:
                 pos_list = resp.get("result", {}).get("list", [])
                 has_position = any(float(p.get("size", 0)) > 0 for p in pos_list)
                 if has_position:
-                    # ★ Phase M.G: Secondary 가드 완전 적용 (6종 모두 Primary 와 동일)
+                    # ★ Phase M.G: full Secondary guards (all 6 same as Primary)
                     current_price = self._get_current_price(market)
                     if current_price:
-                        # 1) peak 갱신 (last_peak_update_ts 자동 기록)
+                        # 1) update peak (auto-records last_peak_update_ts)
                         self._update_scalp_peak_price(s, current_price, now)
-                        # 2) 5분 Timeout
+                        # 2) 5 min Timeout
                         to_exit, to_reason = self._check_timeout_for_scalp(s, now)
                         if to_exit:
                             self._close_secondary_scalp(s, to_reason, current_price)
                             cleared += 1
                             continue
-                        # 3) Fast-Reject v2 (60초 peak 0% + 손실)
+                        # 3) Fast-Reject v2 (60s peak 0% + loss)
                         fr_exit, fr_reason = self._check_fast_reject_v2_for_scalp(s, current_price, now)
                         if fr_exit:
                             self._close_secondary_scalp(s, fr_reason, current_price)
                             cleared += 1
                             continue
-                        # 4) Pre-BE Stall Exit (BE 전, peak +0.10%+60초 무갱신)
+                        # 4) Pre-BE Stall Exit (before BE, peak +0.10% + no update for 60s)
                         pb_exit, pb_reason = self._check_pre_be_stall_exit_for_scalp(s, current_price, now)
                         if pb_exit:
                             self._close_secondary_scalp(s, pb_reason, current_price)
                             cleared += 1
                             continue
-                        # 5) BE Stall Exit (BE 락 후 30초 무갱신 + 수수료 가드)
+                        # 5) BE Stall Exit (no update for 30s after BE lock + fee guard)
                         be_exit, be_reason = self._check_be_stall_exit_for_scalp(s, current_price, now)
                         if be_exit:
                             self._close_secondary_scalp(s, be_reason, current_price)
                             cleared += 1
                             continue
-                        # 6) Dynamic Trailing SL (server SL 업데이트, BE 락 자동 처리)
+                        # 6) Dynamic Trailing SL (update server SL, auto-handle BE lock)
                         if getattr(self.config, "dynamic_trailing", False):
                             try:
                                 self._apply_scalp_trailing_sl(s, current_price)
                             except Exception as exc:
                                 logger.debug("[HARPOON M.G] trailing secondary %s failed: %s", market, exc)
-                    continue  # 포지션 유지 중 — 서버사이드 TP/SL 대기
+                    continue  # position still held — wait for server-side TP/SL
 
-                # 포지션 없음 → 서버사이드 TP/SL 로 청산됨 → 정리
+                # No position → closed by server-side TP/SL → clean up
                 price = self._get_current_price(market) or s.entry_price
                 if s.direction == "LONG":
                     tp_hit = price >= s.tp if s.tp else False
@@ -2107,7 +2108,7 @@ class HarpoonManager:
                 exit_price = (s.tp if tp_hit else s.sl) if s.sl else price
                 exit_reason = "SERVER_TP_MULTI" if tp_hit else "SERVER_SL_MULTI"
 
-                # PnL 계산
+                # Compute PnL
                 if s.direction == "LONG":
                     pnl = (exit_price - s.entry_price) * s.qty
                 else:
@@ -2131,7 +2132,7 @@ class HarpoonManager:
                 except Exception as exc:
                     logger.debug("[HARPOON M.F] journal append failed: %s", exc)
 
-                # recent_scalps 기록
+                # Record recent_scalps
                 record = ScalpRecord(
                     scalp_id=s.scalp_id, market=market, direction=s.direction,
                     entry_price=s.entry_price, exit_price=exit_price, qty=s.qty,
@@ -2142,10 +2143,10 @@ class HarpoonManager:
                 if len(self.recent_scalps) > 50:
                     self.recent_scalps = self.recent_scalps[-50:]
 
-                # Cooldown 기록
+                # Record cooldown
                 self._record_scalp_exit(market, s.direction, exit_reason)
 
-                # Counters 업데이트
+                # Update counters
                 self.scalps_today += 1
                 self.daily_pnl += pnl
                 self.total_pnl += pnl
@@ -2164,8 +2165,8 @@ class HarpoonManager:
         return cleared
 
     def _clear_current_scalp_from_active(self):
-        """current_scalp 을 active_scalps 에서 제거 (id 또는 market 기준).
-        Phase M.B: exit 경로 4곳에서 호출 — active_scalps 정합성 유지."""
+        """Remove current_scalp from active_scalps (by id or market).
+        Phase M.B: called from the 4 exit paths — keeps active_scalps consistent."""
         if not self.current_scalp:
             return
         sc_id = getattr(self.current_scalp, "scalp_id", 0)
@@ -2176,19 +2177,19 @@ class HarpoonManager:
         ]
 
     def _filter_candidates_by_focus_coordination(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """HARPOON 후보 리스트에서 FOCUS 조율 조건 통과한 것만 반환.
+        """Return only candidates from the HARPOON list that pass FOCUS coordination.
 
-        필터 순서:
-          1. focus_entry_freeze_sec 활성 시: 전체 후보 차단 (방금 FOCUS 진입함)
-          2. respect_focus_coin_lock: FOCUS 보유 코인 skip
-          3. respect_focus_direction_lock: FOCUS 반대 방향 skip
-          4. coin_exclusive_priority: 향후 Phase 3+ 에서 HARPOON↔HARPOON 충돌 처리
+        Filter order:
+          1. when focus_entry_freeze_sec active: block all candidates (FOCUS just entered)
+          2. respect_focus_coin_lock: skip coins FOCUS holds
+          3. respect_focus_direction_lock: skip FOCUS-opposite directions
+          4. coin_exclusive_priority: handle HARPOON↔HARPOON conflicts later in Phase 3+
         """
         if not candidates:
             return candidates
         cfg = self.config
 
-        # 1) Focus entry freeze (최근 FOCUS 진입 직후)
+        # 1) Focus entry freeze (right after a recent FOCUS entry)
         if self._is_focus_entry_freeze_active():
             logger.debug("[HARPOON] focus_entry_freeze active — all candidates skipped")
             return []
@@ -2199,12 +2200,12 @@ class HarpoonManager:
             mkt = c.get("market", "")
             direction = c.get("direction", "")
 
-            # 2) Coin lock — FOCUS 가 같은 코인 보유 중
+            # 2) Coin lock — FOCUS holds the same coin
             if self._is_focus_coin_locked(mkt):
                 skip_log.append(f"{mkt}:focus_holds")
                 continue
 
-            # 3) Direction conflict — FOCUS 가 같은 코인에 반대 방향 보유 (중복이지만 명시적)
+            # 3) Direction conflict — FOCUS holds the opposite direction on the same coin (redundant but explicit)
             if self._is_focus_direction_conflict(mkt, direction):
                 skip_log.append(f"{mkt}:focus_dir_conflict")
                 continue
@@ -2216,8 +2217,8 @@ class HarpoonManager:
         return filtered
 
     def _get_focus_atr(self) -> float:
-        """FOCUS의 H4 ATR 값 가져오기. 모든 소스에서 시도."""
-        # 1) FOCUS primary_sig [2026-05-15 h4_sig→primary_sig, 구 속성 fallback]
+        """Get FOCUS's H4 ATR value. Try all sources."""
+        # 1) FOCUS primary_sig [2026-05-15 h4_sig→primary_sig, old-attr fallback]
         if self.focus:
             sig = getattr(self.focus, 'primary_sig', None) or getattr(self.focus, 'h4_sig', None)
             if sig and isinstance(sig, dict):
@@ -2230,7 +2231,7 @@ class HarpoonManager:
                 atr = getattr(p, 'atr_used', 0) or 0
                 if atr > 0:
                     return float(atr)
-        # 3) ★ Fallback: 직접 kline에서 ATR 계산 (FOCUS h4_sig 없어도 독립 동작)
+        # 3) ★ Fallback: compute ATR directly from kline (works independently even without FOCUS h4_sig)
         try:
             market = self._get_focus_market()
             if market and self.focus:
@@ -2253,10 +2254,10 @@ class HarpoonManager:
     def _find_nearest_zone(
         self, price: float, direction: str, zones: List[Dict], proximity: float,
     ) -> Optional[Dict]:
-        """가장 가까운 존 찾기 — 스캘퍼는 존 타입에 따라 방향 결정.
+        """Find the nearest zone — the scalper decides direction by zone type.
 
-        SUPPORT 존 → LONG, RESISTANCE 존 → SHORT.
-        direction 인자는 레거시 호환용 (빈 문자열이면 양방향 탐색).
+        SUPPORT zone → LONG, RESISTANCE zone → SHORT.
+        The direction arg is for legacy compatibility (empty string searches both directions).
         """
         best = None
         best_dist = float("inf")
@@ -2270,7 +2271,7 @@ class HarpoonManager:
             if z_mid <= 0:
                 continue
 
-            # 존 타입이 없으면 건너뛰기
+            # Skip if there's no zone type
             if "SUPPORT" not in z_type.upper() and "RESISTANCE" not in z_type.upper():
                 continue
 
@@ -2286,7 +2287,7 @@ class HarpoonManager:
     # ------------------------------------------------------------------
 
     def _check_m1_pa(self, market: str, direction: str) -> Optional[Dict]:
-        """M1 타임프레임에서 PA 패턴 감지."""
+        """Detect PA patterns on the M1 timeframe."""
         try:
             client = self._get_client()
             klines_raw = client.get_kline(market, interval=self.config.entry_tf, limit=50)
@@ -2312,7 +2313,7 @@ class HarpoonManager:
             if len(candles) < 10:
                 return None
 
-            # ── M1 추세+모멘텀 필터 (역추세 PA 차단) ──
+            # ── M1 trend+momentum filter (block counter-trend PA) ──
             m1_trend_opposed = False
             m1_momentum_opposed = False
             try:
@@ -2325,7 +2326,7 @@ class HarpoonManager:
             except Exception:
                 pass
 
-            # M1 모멘텀: 최근 5봉 중 4봉+ 반대 방향이면 모멘텀 역행
+            # M1 momentum: if 4+ of the last 5 bars are in the opposite direction, momentum is against us
             recent5 = candles[-5:]
             bearish_count = sum(1 for c in recent5 if c.close < c.open)
             if direction == "LONG" and bearish_count >= 4:
@@ -2333,17 +2334,17 @@ class HarpoonManager:
             elif direction == "SHORT" and (5 - bearish_count) >= 4:
                 m1_momentum_opposed = True
 
-            # 추세+모멘텀 모두 역행이면 PA 신호 무시
+            # If both trend and momentum oppose, ignore the PA signal
             if m1_trend_opposed and m1_momentum_opposed:
                 logger.debug("[HARPOON] M1 PA blocked: trend+momentum opposed to %s", direction)
                 return None
 
-            # ★ zone_prices=None — Harpoon은 이미 zone proximity를 별도 검증하므로
-            # PA 패턴에서 위치 필터링 생략 (zone_tup=(low,high) 전달 시
-            # detect_pa_patterns가 (support,resistance)로 오해석하여 유효 신호 차단됨)
+            # ★ zone_prices=None — Harpoon already verifies zone proximity separately,
+            # so skip location filtering in the PA patterns (passing zone_tup=(low,high)
+            # makes detect_pa_patterns misread it as (support,resistance) and block valid signals)
             signals = detect_pa_patterns(candles, zone_prices=None)
 
-            # 방향 일치하는 최신 신호 찾기
+            # Find the latest signal matching the direction
             for sig in reversed(signals):
                 sig_dir = getattr(sig, 'direction', '') or ''
                 if isinstance(sig, dict):
@@ -2352,7 +2353,7 @@ class HarpoonManager:
                 if sig_dir.upper() == direction.upper():
                     conf = getattr(sig, 'confidence', 0) if not isinstance(sig, dict) else sig.get('confidence', 0)
                     pattern = getattr(sig, 'pattern', '') if not isinstance(sig, dict) else sig.get('pattern', '')
-                    if conf >= 0.4:  # 스캘프는 신뢰도 문턱 낮춤
+                    if conf >= 0.4:  # scalps use a lower confidence threshold
                         return {
                             "pattern": str(pattern),
                             "direction": direction,
@@ -2365,16 +2366,16 @@ class HarpoonManager:
             return None
 
     # ------------------------------------------------------------------
-    # M5 trend filter (Harpoon의 상위 TF 필터 — FOCUS의 H1 역할)
+    # M5 trend filter (Harpoon's higher-TF filter — plays FOCUS's H1 role)
     # ------------------------------------------------------------------
 
     def _check_m5_trend(self, market: str, direction: str) -> Optional[str]:
-        """M5 추세 확인 — Harpoon 상위 TF 필터.
+        """Check M5 trend — Harpoon's higher-TF filter.
 
-        FOCUS가 H1으로 추세를 확인하듯, Harpoon은 M5로 확인.
-        LONG 시도 중 M5 DOWNTREND → 차단, SHORT 시도 중 M5 UPTREND → 차단.
+        Just as FOCUS confirms trend with H1, Harpoon confirms with M5.
+        M5 DOWNTREND while attempting LONG → block, M5 UPTREND while attempting SHORT → block.
 
-        Returns: "aligned" | "neutral" | "opposed" | None (API 실패)
+        Returns: "aligned" | "neutral" | "opposed" | None (API failure)
         """
         try:
             client = self._get_client()
@@ -2425,14 +2426,14 @@ class HarpoonManager:
     def _execute_scalp_entry(
         self, market: str, direction: str, price: float, atr: float,
     ) -> Dict[str, Any]:
-        """스캘프 진입 실행."""
-        # ★ 진입 직전 FOCUS 충돌 재확인 (STALKING 진행 중 FOCUS가 포지션 잡았을 수 있음)
+        """Execute a scalp entry."""
+        # ★ Re-check FOCUS conflict right before entry (FOCUS may have taken a position during STALKING)
         if self._has_focus_conflict():
             return {"success": False, "reason": "focus_conflict_at_entry"}
 
         from app.strategy.greenpen.harpoon_tp import compute_scalp_targets, compute_scalp_size
 
-        # TP/SL 계산
+        # Compute TP/SL
         targets = compute_scalp_targets(
             entry_price=price,
             direction=direction,
@@ -2444,7 +2445,7 @@ class HarpoonManager:
         if targets.tp <= 0 or targets.sl <= 0:
             return {"success": False, "reason": "invalid_targets"}
 
-        # 포지션 사이징
+        # Position sizing
         budget = self.effective_budget
         sizing = compute_scalp_size(
             budget_usdt=budget,
@@ -2457,12 +2458,12 @@ class HarpoonManager:
         if sizing.qty <= 0:
             return {"success": False, "reason": "zero_qty"}
 
-        # ★ Bybit qty step/min 보정 (Qty invalid 방지)
-        # ★ category="linear" — Harpoon은 USDT Perpetual 사용, spot qty_step과 다름!
+        # ★ Bybit qty step/min adjustment (prevent Qty invalid)
+        # ★ category="linear" — Harpoon uses USDT Perpetual, differs from spot qty_step!
         try:
             from app.integrations.bybit_instrument_cache import BybitInstrumentCache
             _cat = "linear"
-            BybitInstrumentCache.load(category=_cat)  # linear 캐시 보장
+            BybitInstrumentCache.load(category=_cat)  # ensure linear cache
             raw_qty = sizing.qty
             sizing.qty = BybitInstrumentCache.adjust_qty(market, sizing.qty, category=_cat)
             min_q = BybitInstrumentCache.get_min_qty(market, category=_cat)
@@ -2484,12 +2485,12 @@ class HarpoonManager:
                            market, exc)
             return {"success": False, "reason": f"cache_adjust_failed_{market}"}
 
-        # 최소 주문 체크
+        # Min order check
         min_notional = 5.0  # USDT
         if sizing.notional < min_notional:
             return {"success": False, "reason": f"notional_too_small_{sizing.notional}"}
 
-        # ★ 마진 캡: notional/leverage가 가용 잔고 초과 시 스킵
+        # ★ Margin cap: skip if notional/leverage exceeds available balance
         margin_needed = sizing.notional / max(1, float(self.config.leverage))
         try:
             equity = float(getattr(self.system, '_last_equity_usdt', 0) or 0)
@@ -2504,15 +2505,15 @@ class HarpoonManager:
         try:
             client = self._get_client()
 
-            # 레버리지 설정
+            # Set leverage
             try:
                 client.set_leverage(market, self.config.leverage)
             except Exception as exc:
-                # 이미 설정된 경우 무시 (110043 에러)
+                # Ignore if already set (110043 error)
                 if "110043" not in str(exc):
                     logger.warning("[HARPOON] set_leverage failed: %s", exc)
 
-            # 시장가 주문
+            # Market order
             side = "Buy" if direction.upper() == "LONG" else "Sell"
             order = client.place_order(
                 market=market,
@@ -2524,7 +2525,7 @@ class HarpoonManager:
             if not order:
                 return {"success": False, "reason": "order_failed"}
 
-            # 서버사이드 TP/SL 설정
+            # Set server-side TP/SL
             if self.config.server_side_tpsl:
                 try:
                     client.set_trading_stop(
@@ -2535,7 +2536,7 @@ class HarpoonManager:
                 except Exception as exc:
                     logger.warning("[HARPOON] set_trading_stop failed: %s", exc)
 
-            # 포지션 기록
+            # Record position
             self.current_scalp = ScalpPosition(
                 market=market,
                 direction=direction,
@@ -2548,10 +2549,10 @@ class HarpoonManager:
                 scalp_id=self._next_scalp_id,
             )
             self._next_scalp_id += 1
-            # ★ Phase M.B: active_scalps 동기화 (중복 방지)
+            # ★ Phase M.B: sync active_scalps (prevent duplicates)
             if not any(s.scalp_id == self.current_scalp.scalp_id for s in self.active_scalps):
                 self.active_scalps.append(self.current_scalp)
-            # ★ Phase M.G: last_peak_update_ts 초기화 (Pre-BE/BE Stall Exit 기준 시각)
+            # ★ Phase M.G: init last_peak_update_ts (reference time for Pre-BE/BE Stall Exit)
             self.current_scalp.last_peak_update_ts = time.time()
 
             logger.info(
@@ -2569,13 +2570,13 @@ class HarpoonManager:
                     )
             except Exception:
                 pass
-            # 🔱 텔레그램 진입 알림 (부모님 "하푼 연결" · OMA_HARPOON_ALERTS=0 으로 끔)
+            # 🔱 Telegram entry alert (owner "connect Harpoon" · disable with OMA_HARPOON_ALERTS=0)
             try:
                 if self.system and hasattr(self.system, '_send_telegram_safe') and os.getenv("OMA_HARPOON_ALERTS", "1").strip().lower() not in ("0", "false", "no", "off"):
-                    self.system._send_telegram_safe(f"🔱 [HARPOON] 진입 {direction} {market}\n@ ${price:.4f} qty={sizing.qty:.4f}\nTP=${targets.tp:.4f} SL=${targets.sl:.4f} | {self.config.leverage}x ${budget:.0f}")
+                    self.system._send_telegram_safe(f"🔱 [HARPOON] ENTRY {direction} {market}\n@ ${price:.4f} qty={sizing.qty:.4f}\nTP=${targets.tp:.4f} SL=${targets.sl:.4f} | {self.config.leverage}x ${budget:.0f}")
             except Exception:
                 pass
-            # ── 장부 기록 ──
+            # ── Bookkeeping ──
             try:
                 from app.manager.trade_journal import journal
                 journal.record_entry(
@@ -2603,7 +2604,7 @@ class HarpoonManager:
     # ------------------------------------------------------------------
 
     def _execute_scalp_exit(self, reason: str, price: float) -> Dict[str, Any]:
-        """스캘프 청산 실행."""
+        """Execute a scalp exit."""
         if not self.current_scalp:
             self.state = HarpoonState.COOLDOWN
             self.cooldown_start_ts = time.time()
@@ -2614,7 +2615,7 @@ class HarpoonManager:
             client = self._get_client()
             close_side = "Sell" if scalp.direction == "LONG" else "Buy"
 
-            # ★ C5: reduceOnly + reduce_only 모두 전달 (API 호환성 보장)
+            # ★ C5: pass both reduceOnly + reduce_only (ensure API compatibility)
             order = client.place_order(
                 market=scalp.market,
                 side=close_side,
@@ -2624,13 +2625,13 @@ class HarpoonManager:
                 reduce_only=True,
             )
 
-            # PnL 계산
+            # Compute PnL
             if scalp.direction == "LONG":
                 pnl = (price - scalp.entry_price) * scalp.qty
             else:
                 pnl = (scalp.entry_price - price) * scalp.qty
 
-            # Fee 차감 (approximate)
+            # Fee deduction (approximate)
             fee = price * scalp.qty * 0.00055 * 2  # taker fee round trip
             pnl -= fee
 
@@ -2662,8 +2663,8 @@ class HarpoonManager:
 
             if is_loss:
                 self.consecutive_losses += 1
-                # ★ Stage 0-7 hook (2026-04-22 형 letter FAIL 4-3 수정):
-                # SL/Fast-Reject 발생 시 (market, direction) 30분 cooldown 기록
+                # ★ Stage 0-7 hook (2026-04-22 fix for this agent's letter FAIL 4-3):
+                # On SL/Fast-Reject, record a 30 min cooldown for (market, direction)
                 try:
                     _mkt = scalp.market if hasattr(scalp, 'market') else market
                     _dir = scalp.direction if hasattr(scalp, 'direction') else direction
@@ -2671,7 +2672,7 @@ class HarpoonManager:
                 except Exception as exc:
                     logger.debug("[HARPOON] _record_post_sl failed: %s", exc)
                 if self.consecutive_losses >= self.config.max_consecutive_loss:
-                    self.loss_pause_until = time.time() + 3600  # 1시간 정지
+                    self.loss_pause_until = time.time() + 3600  # pause 1 hour
                     logger.warning(
                         "[HARPOON] %d consecutive losses → paused 1 hour",
                         self.consecutive_losses,
@@ -2684,7 +2685,7 @@ class HarpoonManager:
                 reason, scalp.market, scalp.direction,
                 scalp.entry_price, price, pnl, duration, self.scalps_today,
             )
-            # ── 장부 기록 ──
+            # ── Bookkeeping ──
             try:
                 from app.manager.trade_journal import journal
                 _peak = 0.0
@@ -2714,10 +2715,10 @@ class HarpoonManager:
                     )
             except Exception:
                 pass
-            # 🔱 텔레그램 청산 알림 (PnL+사유 · OMA_HARPOON_ALERTS=0 으로 끔)
+            # 🔱 Telegram exit alert (PnL+reason · disable with OMA_HARPOON_ALERTS=0)
             try:
                 if self.system and hasattr(self.system, '_send_telegram_safe') and os.getenv("OMA_HARPOON_ALERTS", "1").strip().lower() not in ("0", "false", "no", "off"):
-                    self.system._send_telegram_safe(f"🔱 [HARPOON] 청산 {scalp.direction} {scalp.market}\n진입 ${scalp.entry_price:.4f} → 청산 ${price:.4f}\nPnL ${pnl:+.2f} | {reason} | {duration:.0f}초")
+                    self.system._send_telegram_safe(f"🔱 [HARPOON] EXIT {scalp.direction} {scalp.market}\nentry ${scalp.entry_price:.4f} → exit ${price:.4f}\nPnL ${pnl:+.2f} | {reason} | {duration:.0f}s")
             except Exception:
                 pass
 
@@ -2726,14 +2727,14 @@ class HarpoonManager:
             self.current_scalp = None
             self.state = HarpoonState.COOLDOWN
             self.cooldown_start_ts = time.time()
-            self._exit_retry_count = 0  # ★ H12: 성공 시 리셋
+            self._exit_retry_count = 0  # ★ H12: reset on success
             self._save_config()
 
             return {"success": True, "pnl": round(pnl, 4), "duration": round(duration, 1)}
 
         except Exception as exc:
             logger.error("[HARPOON] exit order error: %s", exc, exc_info=True)
-            # ★ H12 FIX: 재시도 cap — 5회 초과 시 포지션 포기
+            # ★ H12 FIX: retry cap — abandon the position after 5 attempts
             self._exit_retry_count = getattr(self, '_exit_retry_count', 0) + 1
             if self._exit_retry_count >= 5:
                 logger.critical("[HARPOON] Exit failed 5x — abandoning scalp, forcing COOLDOWN")
@@ -2750,10 +2751,10 @@ class HarpoonManager:
     # ------------------------------------------------------------------
 
     def _emergency_close(self):
-        """긴급 청산."""
+        """Emergency close."""
         if self.current_scalp:
             price = self._get_current_price(self.current_scalp.market)
-            # ★ C3 FIX: price=0이면 entry_price fallback (PnL 오염 방지)
+            # ★ C3 FIX: if price=0, fall back to entry_price (prevent PnL contamination)
             if not price or price <= 0:
                 price = self.current_scalp.entry_price
             self._execute_scalp_exit("EMERGENCY", price)
@@ -2763,14 +2764,14 @@ class HarpoonManager:
     # ------------------------------------------------------------------
 
     def _maybe_reset_counters(self, now: float):
-        """시간/일 카운터 리셋."""
-        # 시간 리셋
+        """Reset hourly/daily counters."""
+        # Hourly reset
         if now - self.hour_reset_ts >= 3600:
             self.scalps_this_hour = 0
             self.hour_reset_ts = now
 
-        # 일일 리셋 (07:00 KST = 22:00 UTC)
-        # ★ H11 FIX: utcnow() deprecated → now(UTC) 사용
+        # Daily reset (07:00 KST = 22:00 UTC)
+        # ★ H11 FIX: utcnow() deprecated → use now(UTC)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         reset_hour_utc = 22
         today_reset = now_utc.replace(hour=reset_hour_utc, minute=0, second=0, microsecond=0)
@@ -2789,7 +2790,7 @@ class HarpoonManager:
     # ------------------------------------------------------------------
 
     def _save_config(self):
-        """설정 + 상태 저장."""
+        """Save config + state."""
         data = {
             "config": asdict(self.config),
             "state": {
@@ -2806,7 +2807,7 @@ class HarpoonManager:
                 "current_scalp": asdict(self.current_scalp) if self.current_scalp else None,
                 "target_zone": self.target_zone,
                 "target_direction": self.target_direction,
-                "recent_scalps": self.recent_scalps[-20:],  # 최근 20개만 저장
+                "recent_scalps": self.recent_scalps[-20:],  # save only the last 20
             },
         }
         try:
@@ -2816,14 +2817,14 @@ class HarpoonManager:
             logger.warning("[HARPOON] save config failed: %s", exc)
 
     def _load_config(self):
-        """설정 + 상태 복원."""
+        """Restore config + state."""
         if not os.path.exists(CONFIG_PATH):
             return
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            # Config — ★ M19 FIX: bool 필드 특별 처리 (bool("false")==True 방지)
+            # Config — ★ M19 FIX: special handling for bool fields (prevent bool("false")==True)
             cfg = data.get("config", {})
             for k, v in cfg.items():
                 if hasattr(self.config, k):
@@ -2863,7 +2864,7 @@ class HarpoonManager:
                 self._clear_current_scalp_from_active()  # Phase M.B sync
                 self.current_scalp = None
 
-            # ★ 부팅 시 TP/SL 복구 — 재시작하면 Bybit 서버사이드 TP/SL 증발 방지
+            # ★ Restore TP/SL on boot — prevent Bybit server-side TP/SL from vanishing on restart
             if self.current_scalp and self.current_scalp.market:
                 try:
                     from app.integrations.bybit_trade import BybitTradeClient
@@ -2890,7 +2891,7 @@ class HarpoonManager:
     # ------------------------------------------------------------------
 
     def get_status(self) -> Dict[str, Any]:
-        """API/대시보드용 상태 반환."""
+        """Return status for the API/dashboard."""
         with self._lock:
             focus_state = ""
             focus_market = ""
@@ -2940,7 +2941,7 @@ class HarpoonManager:
             }
 
     def update_config(self, patch: Dict) -> Dict:
-        """API로 설정 업데이트."""
+        """Update config via the API."""
         with self._lock:
             for k, v in patch.items():
                 if hasattr(self.config, k):

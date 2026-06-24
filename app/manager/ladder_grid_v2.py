@@ -62,13 +62,13 @@ class LadderGridV2:
 
     def __init__(self, mgr: LadderManager) -> None:
         self.mgr = mgr
-        self._state_cache: Optional[Dict[str, Any]] = None  # [FIX H3] 인메모리 캐시 — tick마다 반복 파일 I/O 방지
+        self._state_cache: Optional[Dict[str, Any]] = None  # [FIX H3] in-memory cache — avoids repeated file I/O every tick
 
     # --------------------------------------------------------
     # Tick size helper
     # --------------------------------------------------------
     def get_tick_size(self, price: float) -> float:
-        """Bybit USDT 마켓 공식 호가 단위."""
+        """Official Bybit USDT market tick size (price step)."""
         try:
             p = Decimal(str(price))
             if p <= 0:
@@ -1151,7 +1151,7 @@ class LadderGridV2:
                 order_usdt_use = min(int(float(effective_remaining_budget)), int(order_usdt))
             if order_usdt_use <= 0 or price <= 0:
                 continue
-            # 주문 직전 가격을 한 번 더 호가 단위로 보정 (BUY는 floor)
+            # Re-align the price to the tick size right before ordering (BUY rounds down/floor)
             price_tick = self.mgr.round_to_tick(price, side="buy")
             if price_tick <= 0:
                 continue
@@ -1162,7 +1162,7 @@ class LadderGridV2:
             )
             if qty_dec <= 0:
                 continue
-            # Bybit는 volume을 소수점 8자리 내림 처리하므로, 그 결과 기준으로 최소 주문금액을 재검증한다.
+            # Bybit floors volume to 8 decimal places, so re-validate the minimum order amount against that floored result.
             usdt_total = float(price_dec * qty_dec)
             if usdt_total < float(min_order_usdt):
                 qty_dec = qty_dec + Decimal("0.00000001")
@@ -2148,7 +2148,7 @@ class LadderGridV2:
     # State I/O
     # --------------------------------------------------------
     def _load_state(self) -> Dict[str, Any]:
-        if self._state_cache is not None:  # [FIX H3] 캐시 히트 — 파일 I/O 생략
+        if self._state_cache is not None:  # [FIX H3] cache hit — skip file I/O
             return dict(self._state_cache)
         try:
             if not os.path.exists(STATE_PATH):
@@ -2157,14 +2157,14 @@ class LadderGridV2:
             with open(STATE_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 result = data if isinstance(data, dict) else {}
-                self._state_cache = result  # [FIX H3] 최초 로딩 시 캐시 저장
+                self._state_cache = result  # [FIX H3] store cache on first load
                 return dict(result)
         except (OSError, json.JSONDecodeError, ValueError):
             logger.warning("LadderGridV2._load_state suppressed exception", exc_info=True)
             return {}
 
     def _save_state(self, state: Dict[str, Any]) -> None:
-        self._state_cache = dict(state)  # [FIX H3] 캐시 즉시 갱신 — 다음 _load_state가 파일 안 읽어도 됨
+        self._state_cache = dict(state)  # [FIX H3] refresh cache immediately — next _load_state need not read the file
         try:
             from app.core.io_utils import safe_write_json
             safe_write_json(STATE_PATH, state)
@@ -2636,7 +2636,7 @@ class LadderGridV2:
             return u.get_balance(currency, include_locked=False)
         except Exception as exc:
             logger.error("[GRID] _get_available_qty FAILED for %s: %s", market, exc, exc_info=True)
-            return -1.0  # 호출자가 음수를 보고 에러 상황임을 인지
+            return -1.0  # negative return signals an error condition to the caller
 
     def _get_position_qty(self, market: str) -> float:
         try:

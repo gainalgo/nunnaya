@@ -26,14 +26,14 @@ except (ImportError, AttributeError, TypeError):
 
 # ---- In-memory cache to avoid spamming Bybit ----
 _candle_cache: Dict[str, Tuple[float, List[dict]]] = {}
-_CACHE_TTL_SEC = 600.0  # refresh every ~10min (429 방지 — ATR/VWAP는 느리게 변함)
+_CACHE_TTL_SEC = 600.0  # refresh every ~10min (avoid 429 — ATR/VWAP change slowly)
 
-# ---- Global cooldown: 429 발생 시 일정 시간 전체 요청 차단 ----
+# ---- Global cooldown: block all requests for a while when 429 occurs ----
 _last_fetch_ts: float = 0.0
-_FETCH_MIN_INTERVAL: float = 0.15  # 최소 150ms 간격
-_FETCH_BOOT_INTERVAL: float = 1.0  # 부팅 후 60초간 요청 간격 (429 방지)
-_backoff_until: float = 0.0  # 429 발생 시 백오프 종료 시점
-_module_init_ts: float = time.time()  # 모듈 로드 시점 (부팅 감지용)
+_FETCH_MIN_INTERVAL: float = 0.15  # minimum 150ms interval
+_FETCH_BOOT_INTERVAL: float = 1.0  # request interval for first 60s after boot (avoid 429)
+_backoff_until: float = 0.0  # backoff end timestamp when 429 occurs
+_module_init_ts: float = time.time()  # module load time (for boot detection)
 
 
 def _fetch_candles(
@@ -51,13 +51,13 @@ def _fetch_candles(
     if cached and (now - cached[0]) < _CACHE_TTL_SEC:
         return cached[1]
 
-    # 429 백오프 중이면 캐시(stale) 반환
+    # during 429 backoff, return stale cache
     if now < _backoff_until:
         if cached:
             return cached[1]
         return []
 
-    # 최소 간격 유지 (부팅 60초간은 넓은 간격 → 429 방지)
+    # keep minimum interval (wider interval during first 60s of boot → avoid 429)
     _min_interval = _FETCH_BOOT_INTERVAL if (now - _module_init_ts) < 60.0 else _FETCH_MIN_INTERVAL
     elapsed = now - _last_fetch_ts
     if elapsed < _min_interval:
@@ -75,7 +75,7 @@ def _fetch_candles(
             return data
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
         if "429" in str(e):
-            _backoff_until = time.time() + 10.0  # 429 → 10초 전체 차단
+            _backoff_until = time.time() + 10.0  # 429 → block all for 10s
             logger.warning("_fetch_candles(%s, %dm) 429 → 10s backoff", market, timeframe_minutes)
         else:
             logger.warning("_fetch_candles(%s, %dm) failed: %s", market, timeframe_minutes, e)

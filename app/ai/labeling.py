@@ -1,14 +1,14 @@
 # ============================================================
 # File: app/ai/labeling.py
-# Autocoin OS v3-H — 실제 거래 결과 기반 라벨링
+# Autocoin OS v3-H — labeling based on actual trade outcomes
 # ============================================================
 """
-기존 방식: 5분 후 가격 상승 여부 예측 (노이즈 많음)
-개선 방식: 실제 FILL_BUY → FILL_SELL 거래 결과를 라벨로 사용
+Old approach: predict whether price rises 5 minutes later (noisy)
+New approach: use actual FILL_BUY → FILL_SELL trade outcomes as labels
 
-라벨 정의:
-- target=1: 수익 거래 (profit_pct > 0)
-- target=0: 손실 거래 (profit_pct <= 0)
+Label definition:
+- target=1: profitable trade (profit_pct > 0)
+- target=0: losing trade (profit_pct <= 0)
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TradeRecord:
-    """매수-매도 쌍을 나타내는 거래 기록"""
+    """Trade record representing a buy-sell pair"""
     market: str
     buy_ts: float
     buy_price: float
@@ -38,7 +38,7 @@ class TradeRecord:
     profit_pct: Optional[float] = None
     profit_usdt: Optional[float] = None
     
-    # 매수 시점의 market snapshot (features)
+    # market snapshot at buy time (features)
     snapshot: Dict[str, Any] = field(default_factory=dict)
     
     @property
@@ -61,12 +61,12 @@ class TradeRecord:
 
 class TradeLabeler:
     """
-    실제 거래(FILL_BUY → FILL_SELL)를 추적하여 라벨 생성.
-    
-    장점:
-    1. 실제 수익/손실 기반 라벨 → 노이즈 감소
-    2. 슬리피지, 수수료 반영된 현실적 라벨
-    3. 전략별(reason) 성능 분석 가능
+    Tracks actual trades (FILL_BUY → FILL_SELL) to generate labels.
+
+    Advantages:
+    1. Labels based on real profit/loss → less noise
+    2. Realistic labels reflecting slippage and fees
+    3. Enables per-strategy (reason) performance analysis
     """
     
     def __init__(self, ledger_dir: str = "runtime"):
@@ -76,7 +76,7 @@ class TradeLabeler:
     
     def extract_trades(self, days: float = 14.0) -> List[TradeRecord]:
         """
-        trade_ledger에서 FILL_BUY/FILL_SELL 쌍을 추출하여 완료된 거래 목록 생성.
+        Extract FILL_BUY/FILL_SELL pairs from trade_ledger to build a list of completed trades.
         """
         self._open_positions.clear()
         self._completed_trades.clear()
@@ -117,7 +117,7 @@ class TradeLabeler:
         return self._completed_trades
     
     def _handle_fill_buy(self, ts: float, market: str, data: Dict[str, Any]):
-        """매수 체결 처리"""
+        """Handle buy fill"""
         avg_price = float(data.get("avg_price") or 0.0)
         qty = float(data.get("qty") or 0.0)
         reason = str(data.get("reason") or "")
@@ -125,7 +125,7 @@ class TradeLabeler:
         if avg_price <= 0 or qty <= 0:
             return
         
-        # 기존 포지션이 있으면 평균 단가 업데이트 (분할 매수)
+        # If a position already exists, update the average price (scaled-in buy)
         if market in self._open_positions:
             pos = self._open_positions[market]
             total_qty = pos.buy_qty + qty
@@ -141,7 +141,7 @@ class TradeLabeler:
             )
     
     def _handle_fill_sell(self, ts: float, market: str, data: Dict[str, Any]):
-        """매도 체결 처리"""
+        """Handle sell fill"""
         avg_price = float(data.get("avg_price") or 0.0)
         qty = float(data.get("qty") or 0.0)
         reason = str(data.get("reason") or "")
@@ -151,13 +151,13 @@ class TradeLabeler:
         if avg_price <= 0:
             return
         
-        # 매칭되는 매수 포지션 찾기
+        # Find the matching buy position
         if market not in self._open_positions:
-            return  # 매수 없이 매도 (orphan 등)
+            return  # sell without a buy (orphan, etc.)
         
         pos = self._open_positions[market]
         
-        # 거래 완료 처리
+        # Mark the trade as completed
         pos.sell_ts = ts
         pos.sell_price = avg_price
         pos.sell_reason = reason
@@ -165,7 +165,7 @@ class TradeLabeler:
         if profit_pct is not None:
             pos.profit_pct = float(profit_pct)
         else:
-            # 직접 계산
+            # compute directly
             if pos.buy_price > 0:
                 pos.profit_pct = ((avg_price - pos.buy_price) / pos.buy_price) * 100.0
         
@@ -174,9 +174,9 @@ class TradeLabeler:
         
         self._completed_trades.append(pos)
         
-        # 부분 매도 처리
+        # Handle partial sell
         remaining_qty = pos.buy_qty - qty
-        if remaining_qty > 0.01:  # 의미있는 잔량
+        if remaining_qty > 0.01:  # meaningful remaining quantity
             self._open_positions[market] = TradeRecord(
                 market=market,
                 buy_ts=pos.buy_ts,
@@ -188,7 +188,7 @@ class TradeLabeler:
             del self._open_positions[market]
     
     def get_trade_stats(self) -> Dict[str, Any]:
-        """거래 통계 요약"""
+        """Summary of trade statistics"""
         if not self._completed_trades:
             return {"total": 0}
         
@@ -202,11 +202,11 @@ class TradeLabeler:
         avg_win = sum(p for p in profits if p > 0) / max(1, wins)
         avg_loss = sum(p for p in profits if p <= 0) / max(1, losses)
         
-        # Hold duration 분석
+        # Hold duration analysis
         durations = [t.hold_duration_sec for t in self._completed_trades if t.hold_duration_sec]
         avg_duration_min = (sum(durations) / len(durations) / 60.0) if durations else 0.0
         
-        # 전략별 통계
+        # Per-strategy statistics
         strategy_stats: Dict[str, Dict[str, Any]] = {}
         for t in self._completed_trades:
             strategy = t.buy_reason or "unknown"
@@ -236,15 +236,15 @@ def match_snapshot_to_trade(
     window_sec: float = 300.0
 ) -> Optional[Dict[str, Any]]:
     """
-    거래의 매수 시점과 가장 가까운 snapshot을 매칭.
-    
+    Match the snapshot closest to the trade's buy time.
+
     Args:
-        trade: 거래 기록
-        snapshots: AUTOLOOP_SNAPSHOT 등의 리스트 (ts, market 포함)
-        window_sec: 매칭 허용 시간 윈도우 (초)
-    
+        trade: trade record
+        snapshots: list of AUTOLOOP_SNAPSHOT etc. (including ts, market)
+        window_sec: allowed matching time window (seconds)
+
     Returns:
-        가장 가까운 snapshot 또는 None
+        the closest snapshot, or None
     """
     candidates = [
         s for s in snapshots
@@ -255,5 +255,5 @@ def match_snapshot_to_trade(
     if not candidates:
         return None
     
-    # 가장 가까운 snapshot 선택
+    # select the closest snapshot
     return min(candidates, key=lambda s: abs(float(s.get("ts") or 0) - trade.buy_ts))

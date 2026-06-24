@@ -2,10 +2,10 @@
 # File: app/manager/time_based_strategy.py
 # Autocoin OS v3-H — Time-Based Strategy Selector
 # ------------------------------------------------------------
-# 목적:
-# - 시간대별 최적 전략 자동 선택
-# - 활발한 시간대 → 단타 전략 (LIGHTNING, PINGPONG)
-# - 조용한 시간대 → 장기 전략 (LADDER, GAZUA)
+# Purpose:
+# - Automatically select the optimal strategy per time slot
+# - Active hours → scalping strategies (LIGHTNING, PINGPONG)
+# - Quiet hours → long-term strategies (LADDER, GAZUA)
 # ============================================================
 
 from __future__ import annotations
@@ -17,20 +17,20 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 class MarketSession(Enum):
-    """시장 세션."""
+    """Market session."""
     ASIA_MORNING = "asia_morning"        # 09:00-12:00 KST
     ASIA_AFTERNOON = "asia_afternoon"    # 12:00-18:00 KST
-    EUROPE_OPEN = "europe_open"          # 18:00-22:00 KST (EU 오전)
-    US_OPEN = "us_open"                  # 22:00-02:00 KST (US 오전)
-    OVERNIGHT = "overnight"              # 02:00-09:00 KST (조용한 시간)
+    EUROPE_OPEN = "europe_open"          # 18:00-22:00 KST (EU morning)
+    US_OPEN = "us_open"                  # 22:00-02:00 KST (US morning)
+    OVERNIGHT = "overnight"              # 02:00-09:00 KST (quiet hours)
 
 
 @dataclass
 class TimeSlot:
-    """시간대 설정."""
+    """Time slot configuration."""
     session: MarketSession
     start_hour: int  # 0-23
-    end_hour: int    # 0-23 (end < start면 다음날로 간주)
+    end_hour: int    # 0-23 (if end < start, treated as next day)
     preferred_strategies: List[str]
     avoid_strategies: List[str]
     volatility_expected: str  # "high", "medium", "low"
@@ -39,7 +39,7 @@ class TimeSlot:
 
 @dataclass
 class StrategyRecommendation:
-    """전략 추천 결과."""
+    """Strategy recommendation result."""
     current_session: MarketSession
     recommended_strategies: List[str]
     avoid_strategies: List[str]
@@ -50,21 +50,21 @@ class StrategyRecommendation:
 
 
 class TimeBasedStrategySelector:
-    """시간대 기반 전략 선택기.
-    
-    시간대별 특성:
-    - 아시아 오전 (09-12): 중간 변동성, PINGPONG/AUTOLOOP
-    - 아시아 오후 (12-18): 낮은 변동성, LADDER/GAZUA
-    - 유럽 오픈 (18-22): 높은 변동성, LIGHTNING/PINGPONG
-    - 미국 오픈 (22-02): 최고 변동성, LIGHTNING
-    - 새벽 (02-09): 낮은 변동성, LADDER/GAZUA
+    """Time-of-day based strategy selector.
+
+    Characteristics per time slot:
+    - Asia morning (09-12): medium volatility, PINGPONG/AUTOLOOP
+    - Asia afternoon (12-18): low volatility, LADDER/GAZUA
+    - Europe open (18-22): high volatility, LIGHTNING/PINGPONG
+    - US open (22-02): peak volatility, LIGHTNING
+    - Overnight (02-09): low volatility, LADDER/GAZUA
     """
 
     def __init__(self):
         self.time_slots = self._init_time_slots()
 
     def _init_time_slots(self) -> List[TimeSlot]:
-        """시간대 설정 초기화."""
+        """Initialize time slot configuration."""
         return [
             TimeSlot(
                 session=MarketSession.ASIA_MORNING,
@@ -73,7 +73,7 @@ class TimeBasedStrategySelector:
                 preferred_strategies=["PINGPONG", "AUTOLOOP"],
                 avoid_strategies=["LIGHTNING"],
                 volatility_expected="medium",
-                description="아시아 오전장, 중간 변동성",
+                description="Asia morning session, medium volatility",
             ),
             TimeSlot(
                 session=MarketSession.ASIA_AFTERNOON,
@@ -82,7 +82,7 @@ class TimeBasedStrategySelector:
                 preferred_strategies=["PINGPONG", "LADDER", "GAZUA"],
                 avoid_strategies=["LIGHTNING"],
                 volatility_expected="low",
-                description="아시아 오후장, 낮은 변동성",
+                description="Asia afternoon session, low volatility",
             ),
             TimeSlot(
                 session=MarketSession.EUROPE_OPEN,
@@ -91,16 +91,16 @@ class TimeBasedStrategySelector:
                 preferred_strategies=["LIGHTNING", "PINGPONG"],
                 avoid_strategies=["GAZUA"],
                 volatility_expected="high",
-                description="유럽 오픈, 높은 변동성",
+                description="Europe open, high volatility",
             ),
             TimeSlot(
                 session=MarketSession.US_OPEN,
                 start_hour=22,
-                end_hour=2,  # 다음날 02시
+                end_hour=2,  # 02:00 next day
                 preferred_strategies=["LIGHTNING", "PINGPONG"],
                 avoid_strategies=["LADDER", "GAZUA"],
                 volatility_expected="high",
-                description="미국 오픈, 최고 변동성",
+                description="US open, peak volatility",
             ),
             TimeSlot(
                 session=MarketSession.OVERNIGHT,
@@ -109,35 +109,35 @@ class TimeBasedStrategySelector:
                 preferred_strategies=["LADDER", "GAZUA", "AUTOLOOP"],
                 avoid_strategies=["LIGHTNING"],
                 volatility_expected="low",
-                description="새벽, 저점 매집 시간",
+                description="Overnight, dip-accumulation hours",
             ),
         ]
 
     def get_current_session(self, ts: Optional[float] = None) -> TimeSlot:
-        """현재 시간대 반환."""
+        """Return the current time slot."""
         lt = time.localtime(ts or time.time())
         current_hour = lt.tm_hour
-        
+
         for slot in self.time_slots:
             if self._is_in_slot(current_hour, slot.start_hour, slot.end_hour):
                 return slot
-        
-        # 기본값 (찾지 못한 경우)
+
+        # Fallback (if no slot matched)
         return self.time_slots[0]
 
     def _is_in_slot(self, current: int, start: int, end: int) -> bool:
-        """시간이 슬롯에 포함되는지 확인."""
+        """Check whether the hour falls within the slot."""
         if start <= end:
             return start <= current < end
         else:
-            # 자정을 넘는 경우 (예: 22-02)
+            # Spanning midnight (e.g. 22-02)
             return current >= start or current < end
 
     def get_recommendation(self, ts: Optional[float] = None) -> StrategyRecommendation:
-        """현재 시간대 기반 전략 추천."""
+        """Recommend a strategy based on the current time slot."""
         slot = self.get_current_session(ts)
-        
-        # 다음 세션까지 남은 시간
+
+        # Minutes remaining until the next session
         lt = time.localtime(ts or time.time())
         current_minutes = lt.tm_hour * 60 + lt.tm_min
         
@@ -164,17 +164,17 @@ class TimeBasedStrategySelector:
         current_strategy: str,
         ts: Optional[float] = None,
     ) -> Tuple[bool, Optional[str], str]:
-        """전략 전환 필요 여부.
-        
+        """Whether a strategy switch is needed.
+
         Returns:
             (should_switch, suggested_strategy, reason)
         """
         current_strategy = current_strategy.upper()
         rec = self.get_recommendation(ts)
-        
-        # 현재 전략이 피해야 할 목록에 있는지
+
+        # Whether the current strategy is in the avoid list
         if current_strategy in rec.avoid_strategies:
-            # 추천 전략 중 첫 번째로 전환
+            # Switch to the first recommended strategy
             if rec.recommended_strategies:
                 return (
                     True, 
@@ -182,11 +182,11 @@ class TimeBasedStrategySelector:
                     f"time_avoid:{current_strategy}→{rec.recommended_strategies[0]}:{rec.reason}",
                 )
         
-        # 현재 전략이 추천 목록에 있으면 유지
+        # Keep the current strategy if it is in the recommended list
         if current_strategy in rec.recommended_strategies:
             return (False, None, "strategy_optimal")
-        
-        # 추천 전략도 피해야 할 전략도 아닌 경우 → 유지
+
+        # Neither recommended nor avoided → keep current
         return (False, None, "strategy_neutral")
 
     def filter_candidates_by_time(
@@ -194,14 +194,14 @@ class TimeBasedStrategySelector:
         candidates: List[Dict[str, Any]],
         ts: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
-        """시간대에 맞는 후보만 필터링."""
+        """Keep only candidates suited to the current time slot."""
         rec = self.get_recommendation(ts)
-        
+
         filtered = []
         for c in candidates:
             strategy = str(c.get("strategy", "")).upper()
             if strategy not in rec.avoid_strategies:
-                # 추천 전략이면 점수 부스트
+                # Boost the score if it is a recommended strategy
                 if strategy in rec.recommended_strategies:
                     c = dict(c)
                     c["time_boost"] = 1.2
@@ -211,7 +211,7 @@ class TimeBasedStrategySelector:
         return filtered
 
     def get_strategy_schedule(self) -> List[Dict[str, Any]]:
-        """24시간 전략 스케줄 반환."""
+        """Return the 24-hour strategy schedule."""
         schedule = []
         for slot in self.time_slots:
             schedule.append({
@@ -227,17 +227,17 @@ class TimeBasedStrategySelector:
 
 
 def get_optimal_strategy_for_time(hour: int) -> Tuple[str, str]:
-    """특정 시간대의 최적 전략 반환.
-    
+    """Return the optimal strategy for a specific hour.
+
     Args:
-        hour: 0-23 시간
-        
+        hour: hour 0-23
+
     Returns:
         (strategy, reason)
     """
     selector = TimeBasedStrategySelector()
-    
-    # 임시 timestamp 생성
+
+    # Build a temporary timestamp
     import calendar
     lt = time.localtime()
     fake_ts = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hour, 0, 0, 0, 0, -1))

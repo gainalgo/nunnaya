@@ -25,20 +25,20 @@ logger = logging.getLogger(__name__)
 
 
 class LightningPlugin(StrategyPlugin):
-    """Lightning v2 — 국면 적응형 돌파 엔진.
+    """Lightning v2 — regime-adaptive breakout engine.
 
-    3-Regime × 상태 머신:
-      TREND_BURST  : 평시 돌파 스윙 (WATCH → PROBE → ACTIVE → ARM_TRAIL)
-      SHOCK_DIVERGE: BTC 급락 시 역행 생존 스윙 (contrarian 연동)
-      RECOVERY     : 반등 초입 재탑승 (BTC Leading 확인)
-      DRIFT        : BTC 서서히 하락 → 보수적 TREND (threshold ×1.5)
+    3-Regime × state machine:
+      TREND_BURST  : normal breakout swing (WATCH → PROBE → ACTIVE → ARM_TRAIL)
+      SHOCK_DIVERGE: contrarian survival swing on BTC crash (contrarian linkage)
+      RECOVERY     : re-entry at the start of a bounce (BTC Leading confirmation)
+      DRIFT        : BTC slowly declining → conservative TREND (threshold ×1.5)
 
-    [2026-02-23] v1 → v2 전면 개편.
+    [2026-02-23] v1 → v2 full rewrite.
     """
 
     name: str = "lightning"
 
-    # ── 상태 상수 ──
+    # ── state constants ──
     _ST_IDLE = "IDLE"
     _ST_WATCH = "WATCH"
     _ST_PROBE = "PROBE"
@@ -47,7 +47,7 @@ class LightningPlugin(StrategyPlugin):
 
     _MAX_DAILY_SHOTS = 10
 
-    # ── ATR% 버킷별 파라미터 ──
+    # ── per-ATR% bucket parameters ──
     _ATR_BUCKETS = [
         # (atr_pct_max, burst_window, atr_burst_mult, min_confidence, watch_timeout, confirm_wait)
         (1.5,  20, 5.0, 0.55, 90.0,  300.0),
@@ -55,7 +55,7 @@ class LightningPlugin(StrategyPlugin):
         (999,  10, 3.5, 0.70, 45.0,  120.0),
     ]
 
-    # ── 성과 통계 (모듈 레벨) ──
+    # ── performance stats (module level) ──
     _stats: Dict[str, int] = {
         "probe": 0, "confirm": 0, "win": 0, "loss": 0, "abort": 0,
     }
@@ -85,7 +85,7 @@ class LightningPlugin(StrategyPlugin):
             "win_rate": round(s["win"] / total_exits * 100 if total_exits > 0 else 0.0, 1),
         }
 
-    # ── 상태 헬퍼 ──
+    # ── state helpers ──
     def _get_state(self, ctx: Any) -> str:
         return str(ctx.get_var("lt_state", self._ST_IDLE))
 
@@ -93,7 +93,7 @@ class LightningPlugin(StrategyPlugin):
         ctx.set_var("lt_state", state)
 
     def _reset_state(self, ctx: Any, exit_price: float = 0.0) -> None:
-        # 재진입 방어용 exit 기록
+        # record exit for re-entry guard
         if exit_price > 0:
             ctx.set_var("lt_last_exit_ts", time.time())
             ctx.set_var("lt_last_exit_price", float(exit_price))
@@ -114,7 +114,7 @@ class LightningPlugin(StrategyPlugin):
         return self._ATR_BUCKETS[-1][1:]
 
     def _detect_regime(self) -> str:
-        """BTC Leading Signal 기반 국면 판정."""
+        """Determine regime based on the BTC Leading Signal."""
         try:
             from app.monitor.btc_leading_signal import get_btc_leading_detector
             detector = get_btc_leading_detector()
@@ -125,7 +125,7 @@ class LightningPlugin(StrategyPlugin):
         return "TREND"
 
     def _check_btc_delay(self) -> tuple:
-        """BTC 급변동 시 진입 지연 체크."""
+        """Check whether to delay entry during a sharp BTC move."""
         try:
             from app.monitor.btc_leading_signal import get_btc_leading_detector
             detector = get_btc_leading_detector()
@@ -136,7 +136,7 @@ class LightningPlugin(StrategyPlugin):
         return False, 0.0
 
     def _check_execution_quality(self, ctx: Any) -> Dict[str, Any]:
-        """WATCH 단계: 거래량 서지 + depth imbalance 체크."""
+        """WATCH stage: check volume surge + depth imbalance."""
         result: Dict[str, Any] = {"vol_surge": False, "depth_bullish": False, "score": 0.0}
         try:
             vol_hist = list(getattr(ctx, "volume_history", []) or [])
@@ -182,7 +182,7 @@ class LightningPlugin(StrategyPlugin):
 
     def _try_shock_entry(self, ctx: Any, price: float, params: Dict[str, Any],
                          meta: Dict[str, Any]) -> Decision:
-        """SHOCK 국면: contrarian early_signal 기반 역행 스윙 진입."""
+        """SHOCK regime: contrarian counter-trend swing entry based on early_signal."""
         try:
             from app.core.contrarian_scanner import get_contrarian_scanner
             scanner = get_contrarian_scanner()
@@ -201,7 +201,7 @@ class LightningPlugin(StrategyPlugin):
                     continue
                 if c.rs_momentum < 0.3:
                     continue
-                # 역행 확인됨 → probe 진입 (타이트 TP/SL)
+                # counter-trend confirmed → probe entry (tight TP/SL)
                 meta["shock_mode"] = True
                 meta["rs_momentum"] = c.rs_momentum
                 meta["acceleration"] = c.acceleration
@@ -228,13 +228,13 @@ class LightningPlugin(StrategyPlugin):
                 meta["size_scale"] = probe_ratio
                 send_signal_telegram(
                     f"⚡🔮 [LIGHTNING v2] {market} SHOCK Probe\n"
-                    f"• RS모멘텀: {c.rs_momentum:+.2f}\n"
-                    f"• 가속도: {c.acceleration:+.2f}\n"
+                    f"• RS momentum: {c.rs_momentum:+.2f}\n"
+                    f"• Acceleration: {c.acceleration:+.2f}\n"
                     f"• TP: {meta['tp_pct']}% / SL: {meta['sl_pct']}%"
                 )
                 return Decision(signal="buy", reason="lightning:shock_probe", meta=meta)
         except (OSError, KeyError, AttributeError, TypeError, ValueError, OverflowError):
-            logger.warning("[LIGHTNING] SHOCK 진입 로직 전체 실패: %s — 급등 진입 기회 상실", getattr(ctx, "market", "?"), exc_info=True)
+            logger.warning("[LIGHTNING] SHOCK entry logic fully failed: %s — missed surge entry opportunity", getattr(ctx, "market", "?"), exc_info=True)
         return Decision(signal="hold", reason="lightning:shock_miss", meta=meta)
 
     def decide(self, ctx: Any, price: float) -> Decision:
@@ -244,7 +244,7 @@ class LightningPlugin(StrategyPlugin):
             if isinstance(ctrls, dict):
                 params = dict((ctrls.get("strategy") or {}).get("params") or {})
         except (KeyError, AttributeError, TypeError):
-            logger.warning("[%s] params 추출 실패 → 기본값 사용: %s", self.name if hasattr(self, 'name') else '?', getattr(ctx, 'market', '?'), exc_info=True)
+            logger.warning("[%s] failed to extract params → using defaults: %s", self.name if hasattr(self, 'name') else '?', getattr(ctx, 'market', '?'), exc_info=True)
             params = {}
 
         if bool(params.get("buy_now", False)):
@@ -254,7 +254,7 @@ class LightningPlugin(StrategyPlugin):
         now = time.time()
         history = getattr(ctx, "_tick_prices", None) or list(getattr(ctx, "price_history", []) or [])
 
-        # ── ATR 계산 + 버킷 결정 ──
+        # ── compute ATR + determine bucket ──
         atr_period = int(params.get("atr_period", 14))
         atr = indicators.atr_simplified(history, atr_period) if len(history) >= atr_period else None
         atr_pct = (atr / price * 100.0) if atr and price > 0 else 0.0
@@ -294,7 +294,7 @@ class LightningPlugin(StrategyPlugin):
             adj_factor = 1.0 + (0.5 - ai_score) * ai_influence
         effective_threshold = burst_threshold * adj_factor
 
-        # ── 국면 판정 ──
+        # ── regime determination ──
         regime = self._detect_regime()
         if regime == "DRIFT":
             effective_threshold *= 1.5
@@ -327,19 +327,19 @@ class LightningPlugin(StrategyPlugin):
         meta["trailing_pct"] = trailing_pct
         meta["probe_ratio"] = probe_ratio
 
-        # ── 현재 상태 로드 ──
+        # ── load current state ──
         state = self._get_state(ctx)
         pos = getattr(ctx, "position", None)
         has_pos = False
         try:
             has_pos = pos is not None and float(pos.get("qty", 0) or 0) > 0
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[LIGHTNING] 현재 상태 로드: %s", exc, exc_info=True)
+            logger.warning("[LIGHTNING] load current state: %s", exc, exc_info=True)
 
-        # ── LongHold: 서버 재시작 시 config에서 플래그 복원 ──
+        # ── LongHold: restore flag from config on server restart ──
         if has_pos:
             _restore_longhold_flag_from_config(ctx)
-        # ── LongHold 전환 완료 → 회복 체크 후 hold 유지 ──
+        # ── LongHold conversion done → keep hold after recovery check ──
         if has_pos and ctx.get_var("longhold_converted", False):
             if not _check_longhold_recovery(ctx, pos, price, "LIGHTNING"):
                 return Decision(signal="hold", reason="lightning:longhold_active",
@@ -348,7 +348,7 @@ class LightningPlugin(StrategyPlugin):
             ctx.set_var("longhold_converted", False)
             _unregister_longhold(getattr(ctx, "market", ""))
 
-        # 서버 재시작 안전장치
+        # server-restart safeguard
         if has_pos and state == self._ST_IDLE:
             state = self._ST_ACTIVE
             self._set_state(ctx, state)
@@ -365,7 +365,7 @@ class LightningPlugin(StrategyPlugin):
         meta["lt_state"] = state
 
         # =============================================
-        # 보유 중: PROBE / ACTIVE / ARM_TRAIL 관리
+        # Holding: manage PROBE / ACTIVE / ARM_TRAIL
         # =============================================
         if has_pos:
             avg_price = 0.0
@@ -375,7 +375,7 @@ class LightningPlugin(StrategyPlugin):
                     or getattr(ctx, "avg_buy_price", 0) or 0
                 )
             except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[LIGHTNING] avg_price 추출: %s", exc, exc_info=True)
+                logger.warning("[LIGHTNING] avg_price extraction: %s", exc, exc_info=True)
             if avg_price <= 0:
                 return Decision(signal="hold", reason="lightning:no_entry_price", meta=meta)
 
@@ -383,7 +383,7 @@ class LightningPlugin(StrategyPlugin):
             meta["profit_pct"] = profit_pct
             meta["entry_price"] = avg_price
 
-            # ── PROBE 상태: 확인 대기 ──
+            # ── PROBE state: waiting for confirmation ──
             if state == self._ST_PROBE:
                 probe_ts = float(ctx.get_var("lt_probe_ts", now))
                 probe_price = float(ctx.get_var("lt_probe_price", avg_price))
@@ -405,7 +405,7 @@ class LightningPlugin(StrategyPlugin):
                             confirm_ok = True
                             meta["confirm_trigger"] = "ema_cross+higher"
                     except (KeyError, AttributeError, TypeError) as exc:
-                        logger.warning("[LIGHTNING] PROBE 확인 대기: %s", exc, exc_info=True)
+                        logger.warning("[LIGHTNING] PROBE confirmation wait: %s", exc, exc_info=True)
 
                 if confirm_ok and elapsed < confirm_wait:
                     self._record_stat("confirm")
@@ -418,10 +418,10 @@ class LightningPlugin(StrategyPlugin):
                     meta["allow_add_buy"] = True
                     meta["size_scale"] = confirm_ratio
                     send_signal_telegram(
-                        f"⚡⚡ [LIGHTNING v2] {market} 확인 진입!\n"
+                        f"⚡⚡ [LIGHTNING v2] {market} confirmed entry!\n"
                         f"• Probe +{(price - probe_price) / probe_price * 100:.2f}%\n"
                         f"• {meta.get('confirm_trigger', 'OK')}\n"
-                        f"• 추가 {confirm_ratio:.0%} 매수"
+                        f"• add {confirm_ratio:.0%} buy"
                     )
                     return Decision(signal="buy", reason="lightning:confirm", meta=meta)
 
@@ -440,7 +440,7 @@ class LightningPlugin(StrategyPlugin):
 
                 return Decision(signal="hold", reason="lightning:probe_waiting", meta=meta)
 
-            # ── ARM_TRAIL: 트레일링 ──
+            # ── ARM_TRAIL: trailing ──
             if state == self._ST_ARM_TRAIL:
                 peak = float(ctx.get_var("lt_peak_price", avg_price))
                 if price > peak:
@@ -459,10 +459,10 @@ class LightningPlugin(StrategyPlugin):
 
                 return Decision(signal="hold", reason="lightning:trailing", meta=meta)
 
-            # ── ACTIVE 상태: TP/SL ──
+            # ── ACTIVE state: TP/SL ──
             meta["lt_phase"] = "ACTIVE"
 
-            # SL 아니면 streak 리셋
+            # reset streak if not SL
             ctx.set_var("lt_sl_streak", 0)
 
             if profit_pct >= tp_pct:
@@ -472,7 +472,7 @@ class LightningPlugin(StrategyPlugin):
                 return Decision(signal="hold", reason="lightning:arm_trail", meta=meta)
 
             if profit_pct <= sl_pct:
-                # ── LIGHTNING SL 확인 (2틱 연속 — 노이즈 방어) ──
+                # ── LIGHTNING SL confirmation (2 consecutive ticks — noise guard) ──
                 _lt_sl_confirm_need = int(params.get("sl_confirm_ticks", 2))
                 _lt_sl_streak = int(ctx.get_var("lt_sl_streak", 0)) + 1
                 ctx.set_var("lt_sl_streak", _lt_sl_streak)
@@ -481,11 +481,11 @@ class LightningPlugin(StrategyPlugin):
                 if _lt_sl_streak < _lt_sl_confirm_need:
                     return Decision(signal="hold", reason="lightning:sl_confirming", meta=meta)
                 ctx.set_var("lt_sl_streak", 0)
-                # DCA 물타기 먼저 시도
+                # try DCA averaging-down first
                 dca_result = _common_dca_check(ctx, price, avg_price, params, "lt", meta)
                 if dca_result is not None:
                     return dca_result
-                # ── DCA 불가 → SL → LongHold 전환 시도 ──
+                # ── DCA not possible → SL → try LongHold conversion ──
                 _lh_result = _try_convert_to_longhold(ctx, market, "LIGHTNING", avg_price, price, meta)
                 if _lh_result is not None:
                     return _lh_result
@@ -494,7 +494,7 @@ class LightningPlugin(StrategyPlugin):
                 meta = self._make_sell_meta(meta, price, market)
                 return Decision(signal="sell", reason="lightning:sl", meta=meta)
 
-            # Time-stop: 60분 횡보
+            # Time-stop: 60 min of sideways
             active_ts = float(ctx.get_var("lt_active_ts", 0.0))
             time_stop_min = float(params.get("time_stop_min", 60))
             if active_ts > 0:
@@ -506,7 +506,7 @@ class LightningPlugin(StrategyPlugin):
                     meta = self._make_sell_meta(meta, price, market)
                     return Decision(signal="sell", reason="lightning:timeout", meta=meta)
 
-            # Trailing (ACTIVE 중 고점 추적)
+            # Trailing (track peak while ACTIVE)
             peak_price = float(ctx.get_var("lt_peak_price", avg_price))
             if price > peak_price:
                 ctx.set_var("lt_peak_price", price)
@@ -522,31 +522,31 @@ class LightningPlugin(StrategyPlugin):
             return Decision(signal="hold", reason="lightning:holding", meta=meta)
 
         # =============================================
-        # 미보유: [2026-03-09] selector 신뢰 즉시매수
+        # No position: [2026-03-09] trust selector, immediate buy
         # =============================================
         if state not in (self._ST_IDLE, self._ST_WATCH):
             self._reset_state(ctx)
             state = self._ST_IDLE
 
-        # 일일 발사 제한 (안전장치 유지)
+        # daily shot limit (safeguard kept)
         daily_key = f"lt_shots_{time.strftime('%Y%m%d')}"
         daily_shots = int(ctx.get_var(daily_key, 0))
         meta["daily_shots"] = daily_shots
         if daily_shots >= self._MAX_DAILY_SHOTS:
             return Decision(signal="hold", reason="lightning:daily_limit", meta=meta)
 
-        # 자본 확인 (안전장치 유지)
+        # capital check (safeguard kept)
         capital = 0.0
         try:
             c = getattr(ctx, "usable_capital", None) or getattr(ctx, "allocated_capital", None)
             capital = float(c or 0.0)
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[LIGHTNING] 자본 확인: %s", exc, exc_info=True)
+            logger.warning("[LIGHTNING] capital check: %s", exc, exc_info=True)
         min_order = float(params.get("min_order_usdt", Q.min_order))
         if capital < min_order:
             return Decision(signal="hold", reason="lightning:insufficient_capital", meta=meta)
 
-        # [FIX] 재진입 방어: 쿨다운 + 가격상승 체크
+        # [FIX] re-entry guard: cooldown + price-rise check
         lt_reentry_cd = float(params.get("reentry_cooldown_sec", 300))
         last_exit_ts = float(ctx.get_var("lt_last_exit_ts", 0.0))
         last_exit_price = float(ctx.get_var("lt_last_exit_price", 0.0))
@@ -560,7 +560,7 @@ class LightningPlugin(StrategyPlugin):
             meta["price_elevation_pct"] = round((price / last_exit_price - 1) * 100, 2)
             return Decision(signal="hold", reason="lightning:reentry_price_elevated", meta=meta)
 
-        # selector가 모멘텀/ATR/BB를 이미 검증 → 즉시 buy
+        # selector already validated momentum/ATR/BB → buy immediately
         meta["selector_fast_entry"] = True
         self._set_state(ctx, self._ST_ACTIVE)
         ctx.set_var("lt_active_ts", now)
@@ -574,10 +574,10 @@ class LightningPlugin(StrategyPlugin):
         probe_ratio, tp_pct, sl_pct, atr_pct, daily_key,
         daily_shots, market, now, history,
     ) -> Decision:
-        """기존 다단계 진입 로직 (WATCH→PROBE→ACTIVE).
-        selector_fast_entry 도입으로 현재 미사용.
+        """Legacy multi-stage entry logic (WATCH→PROBE→ACTIVE).
+        Currently unused since selector_fast_entry was introduced.
         """
-        # ── BTC 레짐 기반 행동 조정 ──
+        # ── adjust behavior based on BTC regime ──
         btc_action: Dict[str, Any] = {}
         try:
             from app.monitor.btc_leading_signal import get_btc_leading_detector
@@ -587,9 +587,9 @@ class LightningPlugin(StrategyPlugin):
                 meta["btc_regime"] = btc_action.get("regime", "TREND")
                 meta["btc_action"] = btc_action.get("entry", "normal")
         except (KeyError, AttributeError, TypeError) as exc:
-            logger.warning("[LIGHTNING] BTC 레짐 기반 행동 조정: %s", exc, exc_info=True)
+            logger.warning("[LIGHTNING] adjust behavior based on BTC regime: %s", exc, exc_info=True)
 
-        # SHOCK: 사이즈 50% 축소 + contrarian 역행 진입
+        # SHOCK: shrink size 50% + contrarian counter-trend entry
         if regime == "SHOCK":
             shock_size = float(btc_action.get("size_mult", 0.5))
             meta["shock_size_mult"] = shock_size
@@ -597,7 +597,7 @@ class LightningPlugin(StrategyPlugin):
             meta["probe_ratio"] = probe_ratio
             return self._try_shock_entry(ctx, price, params, meta)
 
-        # ── RECOVERY 국면: BTC 반등 확인 후 진입 ──
+        # ── RECOVERY regime: enter after confirming BTC bounce ──
         if regime == "RECOVERY":
             should_delay, delay_sec = self._check_btc_delay()
             if should_delay:
@@ -608,7 +608,7 @@ class LightningPlugin(StrategyPlugin):
         if ai_confidence < min_conf:
             return Decision(signal="hold", reason=f"lightning:low_confidence({ai_confidence:.2f}<{min_conf:.2f})", meta=meta)
 
-        # ── BB Squeeze 감지 (돌파 임박 사전 시그널) ──
+        # ── BB Squeeze detection (early signal of imminent breakout) ──
         bb_squeeze = False
         try:
             if len(history) >= 20:
@@ -620,7 +620,7 @@ class LightningPlugin(StrategyPlugin):
                         bb_squeeze = True
                         meta["bb_squeeze"] = True
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[LIGHTNING] BB Squeeze 감지: %s", exc, exc_info=True)
+            logger.warning("[LIGHTNING] BB Squeeze detection: %s", exc, exc_info=True)
 
         # ── IDLE → WATCH ──
         if state == self._ST_IDLE:
@@ -636,7 +636,7 @@ class LightningPlugin(StrategyPlugin):
                 return Decision(signal="hold", reason="lightning:watch_start", meta=meta)
             return Decision(signal="hold", reason="lightning:wait", meta=meta)
 
-        # ── WATCH → PROBE (돌파 확인) ──
+        # ── WATCH → PROBE (breakout confirmation) ──
         if state == self._ST_WATCH:
             watch_ts = float(ctx.get_var("lt_watch_ts", now))
             watch_peak = float(ctx.get_var("lt_watch_peak_mom", 0.0))
@@ -647,17 +647,17 @@ class LightningPlugin(StrategyPlugin):
                 ctx.set_var("lt_watch_peak_mom", momentum_pct)
                 watch_peak = momentum_pct
 
-            # 타임아웃
+            # timeout
             if elapsed >= watch_timeout:
                 self._reset_state(ctx)
                 return Decision(signal="hold", reason="lightning:watch_timeout", meta=meta)
 
-            # 모멘텀 소멸
+            # momentum lost
             if short_momentum < -0.3:
                 self._reset_state(ctx)
                 return Decision(signal="hold", reason="lightning:watch_momentum_lost", meta=meta)
 
-            # 돌파 확인 → PROBE
+            # breakout confirmed → PROBE
             if momentum_pct >= effective_threshold:
                 exec_quality = self._check_execution_quality(ctx)
                 meta["exec_quality"] = exec_quality
@@ -666,7 +666,7 @@ class LightningPlugin(StrategyPlugin):
                     self._reset_state(ctx)
                     return Decision(signal="hold", reason="lightning:watch_sell_pressure", meta=meta)
 
-                # BTC 급변동 지연 체크 (감도 120초로 상향)
+                # BTC sharp-move delay check (sensitivity raised to 120s)
                 should_delay, delay_sec = self._check_btc_delay()
                 if should_delay and delay_sec >= 120:
                     self._reset_state(ctx)
@@ -684,8 +684,8 @@ class LightningPlugin(StrategyPlugin):
                 meta["size_scale"] = probe_ratio
                 send_signal_telegram(
                     f"⚡ [LIGHTNING v2] {market} Probe ({probe_ratio:.0%})\n"
-                    f"• 모멘텀: {momentum_pct:.2f}% (T:{effective_threshold:.2f}%)\n"
-                    f"• ATR: {atr_pct:.1f}% | 국면: {regime}\n"
+                    f"• Momentum: {momentum_pct:.2f}% (T:{effective_threshold:.2f}%)\n"
+                    f"• ATR: {atr_pct:.1f}% | Regime: {regime}\n"
                     f"• TP: {tp_pct:.1f}% / SL: {sl_pct:.1f}%"
                 )
                 return Decision(signal="buy", reason=f"lightning:probe({momentum_pct:.2f}%)", meta=meta)

@@ -14,14 +14,14 @@ from fastapi import APIRouter, Query, Request
 
 logger = logging.getLogger(__name__)
 
-# Binance USDT-M 선물 FOCUS API — strategy_focus_router 미러(매니저만 binance_futures_manager).
+# Binance USDT-M futures FOCUS API — mirror of strategy_focus_router (manager is binance_futures_manager only).
 router = APIRouter(prefix="/api/strategy/binance_futures", tags=["BINANCE_FUT"])
 
-# ★ [2026-06-23 감사 bug#5] 거래소별 장부 격리 — 이 라우터의 모든 저널 읽기는 Binance 전용 장부에서.
-#   (Bybit 라우터/전역 singleton 과 분리. binance_futures_manager._journal_path 와 동일 경로.)
+# ★ [2026-06-23 audit bug#5] Per-exchange ledger isolation — all journal reads in this router come from the Binance-only ledger.
+#   (Separate from the Bybit router / global singleton. Same path as binance_futures_manager._journal_path.)
 _BINANCE_FUT_JOURNAL_PATH = os.path.join("runtime", "binance_futures", "journal.jsonl")
-_BINANCE_FUT_SNAP_DIR = os.path.join("runtime", "binance_futures", "daily_snapshots")  # Daily PnL 차트 격리
-_BINANCE_FUT_CFGSNAP_DIR = os.path.join("runtime", "binance_futures", "config_snapshots")  # 설정 변경 히스토리
+_BINANCE_FUT_SNAP_DIR = os.path.join("runtime", "binance_futures", "daily_snapshots")  # Isolated daily PnL chart
+_BINANCE_FUT_CFGSNAP_DIR = os.path.join("runtime", "binance_futures", "config_snapshots")  # Config change history
 _BINANCE_FUT_CAP_EVENTS = os.path.join("runtime", "binance_futures", "capital_events.jsonl")
 _BINANCE_FUT_CAP_BASELINE = os.path.join("runtime", "binance_futures", "capital_baseline.json")
 
@@ -32,19 +32,19 @@ def _bjournal():
 
 
 def _bcapital():
-    """Binance 전용 capital tracker (입출금/ROI 격리)."""
+    """Binance-only capital tracker (deposit/withdraw / ROI isolation)."""
     from app.manager.capital_tracker import get_capital_tracker
     return get_capital_tracker(_BINANCE_FUT_CAP_EVENTS, _BINANCE_FUT_CAP_BASELINE)
 
 
 def _bcoincard(lookback_days: int = 30):
-    """Binance 전용 coin report card (binance 저널에서 파생 — 거래 누적 시 채워짐)."""
+    """Binance-only coin report card (derived from the binance journal — fills in as trades accumulate)."""
     from app.manager.coin_report_card import CoinReportCard
     return CoinReportCard(journal_path=_BINANCE_FUT_JOURNAL_PATH, lookback_days=lookback_days)
 
 
 def _binance_equity(fm):
-    """Binance 선물 계좌 (equity_usdt, cash_usdt). paper=FocusDryClient 경유(가상/실잔고)."""
+    """Binance futures account (equity_usdt, cash_usdt). paper goes via FocusDryClient (virtual/real balance)."""
     client = fm._get_client()
     eq = 0.0
     cash = 0.0
@@ -66,9 +66,9 @@ def _binance_equity(fm):
 
 @router.get("/system-status")
 def binance_system_status(request: Request) -> Dict[str, Any]:
-    """Overall Status 카드용 — 시스템 공유 스냅(regime/event/tick 등)은 그대로,
-    총자산(equity)·세션PnL 만 *Binance 선물* 계좌·장부 값으로 교체(거래소별 분류).
-    shim 이 /api/system/status → 이 엔드포인트로 리라이트(?ex=binance_futures)."""
+    """For the Overall Status card — the shared system snapshot (regime/event/tick etc.) is kept as-is,
+    only total equity and session PnL are replaced with the *Binance futures* account/ledger values (per-exchange split).
+    A shim rewrites /api/system/status → this endpoint (?ex=binance_futures)."""
     system = request.app.state.system
     snap = dict(system.status())
     fm = _get_fm(request)
@@ -79,14 +79,14 @@ def binance_system_status(request: Request) -> Dict[str, Any]:
         e["cash_usdt"] = cash
         e["deployed_usdt"] = max(0.0, eq - cash)
         snap["equity"] = e
-        # 세션 PnL = Binance 전용 장부 누적 실현 PnL (거래소별 분류)
+        # Session PnL = cumulative realized PnL from the Binance-only ledger (per-exchange split)
         _summ = _bjournal().get_summary().get("combined") or {}
         snap["session_pnl"] = float(_summ.get("total_pnl") or 0.0)
         snap["exchange_label"] = "BINANCE USDT-M"
     except Exception as exc:
         logger.warning("[BINANCE_FUT_API] system-status equity override failed: %s", exc)
-        # ★ [감사 medium#6] fail-open 누수 차단 — override 실패 시 snap 의 Bybit equity/session_pnl 이
-        #   그대로 남아 Binance 창에 타 거래소 잔고가 표시됨. 보수적으로 '집계불가(None)'로 덮어씀.
+        # ★ [audit medium#6] Block fail-open leak — if the override fails, snap's Bybit equity/session_pnl
+        #   would remain, showing another exchange's balance in the Binance window. Conservatively overwrite with 'unavailable (None)'.
         snap["equity"] = {"equity_usdt": None, "cash_usdt": None, "deployed_usdt": None}
         snap["session_pnl"] = None
         snap["exchange_label"] = "BINANCE USDT-M"
@@ -101,14 +101,14 @@ _FM_LOCK = threading.Lock()
 
 
 def _get_fm(request: Request):
-    """Get BinanceFuturesManager from system (없으면 생성).
-    ★ [2026-06-23] double-checked lock — 대시보드가 여러 API 동시 호출 시 _get_fm 이 락 없이
-    check-then-create 라 매니저가 N번 생성되던 레이스(시드 779필드 N회·로그 도배) 차단."""
+    """Get BinanceFuturesManager from system (create if missing).
+    ★ [2026-06-23] double-checked lock — when the dashboard calls several APIs concurrently, _get_fm did a
+    lockless check-then-create, so the manager could be created N times (seeding 779 fields N times, log spam). This blocks that race."""
     system = request.app.state.system
     fm = getattr(system, "binance_futures_manager", None)
     if fm is None:
         with _FM_LOCK:
-            fm = getattr(system, "binance_futures_manager", None)  # 락 안 재확인
+            fm = getattr(system, "binance_futures_manager", None)  # re-check inside the lock
             if fm is None:
                 from app.manager.binance_futures_manager import BinanceFuturesManager
                 fm = BinanceFuturesManager(system=system)
@@ -118,15 +118,15 @@ def _get_fm(request: Request):
 
 def _bot_opinion(signal: str, trend: str, gs_total, gs_threshold,
                  block_reason: str, pa_pattern: str) -> dict | None:
-    """[2026-05-28 부모] 봇과 표면 시그널이 어긋날 때 경고 배지 데이터.
+    """[2026-05-28 owner] Warning-badge data for when the bot disagrees with the surface signal.
 
-    어제 XLM LONG 사례: 점수 100점인데 봇 내부는 BB 129% 과열로 SHORT flip 시도.
-    수동 진입 시 `_is_manual` 충돌 차단으로 막혔지만 부모님이 *왜* 막혔는지
-    Dashboard 에서 보이지 않음. 이 함수가 의도/내부의견 충돌을 미리 노출한다.
+    Yesterday's XLM LONG case: score was 100 but internally the bot tried a SHORT flip due to BB 129% overheating.
+    On manual entry the `_is_manual` conflict guard blocked it, but the owner could not see *why* it was blocked
+    in the Dashboard. This function surfaces the intent/internal-opinion conflict up front.
 
-    return None 이면 배지 미표시. dict 면:
-        level: "warn"(빨강) | "info"(노랑)
-        text: 한 줄 한국어
+    return None means no badge. If a dict:
+        level: "warn" (red) | "info" (yellow)
+        text: one-line message
     """
     br = (block_reason or "")
     pa = (pa_pattern or "")
@@ -136,53 +136,53 @@ def _bot_opinion(signal: str, trend: str, gs_total, gs_threshold,
     except Exception:
         gst, gth = None, 65.0
 
-    # 우선순위 1: BB 극단 → 반대방향 flip 권장 (가장 강한 충돌)
+    # Priority 1: BB extreme → recommend opposite-direction flip (strongest conflict)
     if signal == "BUY":
         if "FLIP BUY" in br or "overbought" in br:
-            return {"level": "warn", "text": "⚠ BB 과열 — SHORT 권장"}
+            return {"level": "warn", "text": "⚠ BB overheated — SHORT recommended"}
         if "BOS_BEARISH" in br or "BOS_BEARISH" in pa:
-            return {"level": "warn", "text": "⚠ 하락 BOS + BB 과매도 — LONG 위험"}
+            return {"level": "warn", "text": "⚠ Bearish BOS + BB oversold — LONG risky"}
         if trend == "DOWNTREND":
-            return {"level": "warn", "text": "⚠ H4 하락 추세 — LONG 부적합"}
+            return {"level": "warn", "text": "⚠ H4 downtrend — LONG unsuitable"}
     elif signal == "SELL":
         if "FLIP SELL" in br or "oversold" in br:
-            return {"level": "warn", "text": "⚠ BB 극단 — LONG 권장"}
+            return {"level": "warn", "text": "⚠ BB extreme — LONG recommended"}
         if "BOS_BULLISH" in br or "BOS_BULLISH" in pa:
-            return {"level": "warn", "text": "⚠ 상승 BOS — SHORT 위험"}
+            return {"level": "warn", "text": "⚠ Bullish BOS — SHORT risky"}
         if trend == "UPTREND":
-            return {"level": "warn", "text": "⚠ H4 상승 추세 — SHORT 부적합"}
+            return {"level": "warn", "text": "⚠ H4 uptrend — SHORT unsuitable"}
 
-    # 우선순위 2: 30M 방향 충돌
+    # Priority 2: 30M direction conflict
     if "30M dir conflict" in br or "30M UPTREND" in br or "30M DOWNTREND" in br:
-        return {"level": "warn", "text": "⚠ 30M 방향 충돌"}
+        return {"level": "warn", "text": "⚠ 30M direction conflict"}
 
-    # 우선순위 3: 점수 음수 (강한 약함)
+    # Priority 3: negative score (strongly weak)
     if gst is not None and gst < 0 and signal in ("BUY", "SELL"):
-        return {"level": "info", "text": f"🔸 점수 음수({int(gst)}) — 진입 매우 약함"}
+        return {"level": "info", "text": f"🔸 Negative score ({int(gst)}) — entry very weak"}
 
-    # 우선순위 4: 점수 threshold 미달이지만 양수 (근접)
+    # Priority 4: score below threshold but positive (near)
     if gst is not None and 0 <= gst < gth and signal in ("BUY", "SELL"):
-        if gst >= gth * 0.7:  # threshold 70%+ 근접
-            return {"level": "info", "text": f"🔸 점수 근접({int(gst)}/{int(gth)})"}
+        if gst >= gth * 0.7:  # within 70%+ of threshold
+            return {"level": "info", "text": f"🔸 Score near ({int(gst)}/{int(gth)})"}
 
     return None
 
 
 # ── Status ──────────────────────────────────────────────────
 
-# /status 응답 캐시 — get_status() 가 매 호출 포지션별 현재가 fetch + _get_b12_breadth_vote(저널
-# 캐시 풀스캔, 결과 TTL 없음) + today_pnl 등 무겁다. 대시보드가 다탭으로 1~2초마다 폴링하면 동시부하 +
-# 브라우저 호스트당 6연결 큐에 막혀 4.5s timeout → canceled → FOCUS 패널 통째 "상태 로딩 중" 멈춤.
-# get_status(self) 는 요청 무관(fleet-global)이라 짧은 TTL 로 공유 재사용 → 다탭이 1회 계산을 나눠 씀.
-# [2026-06-19 부모 "모든 서버에서 focus 통째로 로딩"]. peer-cache(cd7a2b9)와 동일 패턴.
+# /status response cache — get_status() is heavy on every call: per-position current-price fetch + _get_b12_breadth_vote
+# (full scan of the journal cache, no result TTL) + today_pnl, etc. If the dashboard polls every 1-2s across multiple tabs,
+# concurrent load + the per-host 6-connection browser queue stalls → 4.5s timeout → canceled → the whole FOCUS panel hangs on "loading status".
+# get_status(self) is request-independent (fleet-global), so a short TTL lets tabs share one computation.
+# [2026-06-19 owner "focus loads as a whole on every server"]. Same pattern as peer-cache (cd7a2b9).
 _STATUS_RESP_BOX: dict = {"ts": 0.0, "data": None}
-_STATUS_RESP_TTL = 3.0   # 초 — PnL/포지션 표시라 짧게(3s staleness 무시 가능). 멈춤은 동시부하라 dedup 만으로 해소.
+_STATUS_RESP_TTL = 3.0   # seconds — short since it's PnL/position display (3s staleness is fine). Hangs are from concurrent load, solved by dedup alone.
 
 
 @router.get("/status")
 def focus_status(request: Request):
     """Current FOCUS state, position, PnL, daily discipline.
-    ★ 응답을 _STATUS_RESP_TTL 초 캐시 → 다탭/다폴링이 무거운 get_status() 1회를 재사용(통째 멈춤 방지)."""
+    ★ Caches the response for _STATUS_RESP_TTL seconds → multi-tab/multi-poll reuse one heavy get_status() call (prevents a full hang)."""
     import time as _t
     now = _t.time()
     _box = _STATUS_RESP_BOX
@@ -226,7 +226,7 @@ def focus_disable(
     """Disable FOCUS strategy."""
     fm = _get_fm(request)
 
-    # ★ H8 FIX: multi-position 대응 — position 또는 positions 있으면 청산
+    # ★ H8 FIX: multi-position handling — close if position or positions exist
     if close_position and (fm.position or fm.positions):
         try:
             fm._execute_exit("manual_disable", is_sl=False)
@@ -241,19 +241,19 @@ def focus_disable(
 @router.post("/close-all")
 def focus_close_all(request: Request):
     """Close ALL FOCUS positions on Bybit and clear local state.
-    ★ Bybit 실제 포지션을 조회하여 전부 청산 (유령 포지션 방지)."""
+    ★ Queries the actual Bybit positions and closes them all (prevents ghost positions)."""
     fm = _get_fm(request)
     closed = []
     errors = []
 
-    # ★ 재진입 쿨다운 갱신 — close-all 후 Scanner 즉시 재진입 방지
+    # ★ Refresh the re-entry cooldown — prevents the Scanner from re-entering immediately after close-all
     import time as _time
     fm._last_exit_ts = _time.time()
     if fm.positions:
         fm._last_exit_market = fm.positions[0].market
         fm._last_exit_direction = fm.positions[0].direction
 
-    # 1. 로컬 positions 리스트의 포지션 청산 — _close_position 사용 (저널 기록 포함)
+    # 1. Close positions in the local positions list — use _close_position (includes journal recording)
     for pos in list(fm.positions):
         try:
             ok = fm._close_position(pos, reason="manual_close_all")
@@ -277,7 +277,7 @@ def focus_close_all(request: Request):
         except Exception as exc:
             errors.append({"market": fm.position.market, "error": str(exc)})
 
-    # 3. ★ 거래소 실제 열린 포지션 전수 조회 → 유령 포지션 청산 (client seam = Binance)
+    # 3. ★ Query all actual open positions on the exchange → close orphan positions (client seam = Binance)
     try:
         import time as _t
         open_positions = [p for p in fm._get_client().list_open_positions()
@@ -305,11 +305,11 @@ def focus_close_all(request: Request):
         logger.error("[BINANCE_FUT_API] exchange position scan failed: %s", exc)
         errors.append({"market": "EXCHANGE_SCAN", "error": str(exc)})
 
-    # 4. ★ 거래소 스캔 실패 시 로컬 상태 유지 (유령 방지)
+    # 4. ★ If the exchange scan fails, keep local state (prevents orphans)
     from app.manager.focus_manager import FocusState
     bybit_scan_failed = any(e.get("market") == "EXCHANGE_SCAN" for e in errors)
     if bybit_scan_failed and not closed:
-        # Bybit 연결 자체가 실패 → 로컬 상태 유지 (다음 sync에서 정리)
+        # Bybit connection itself failed → keep local state (cleaned up in next sync)
         logger.warning("[BINANCE_FUT_API] Bybit scan failed — keeping local state to prevent orphans")
     else:
         fm.positions = []
@@ -337,7 +337,7 @@ def focus_close_one(
     fm = _get_fm(request)
     import time as _time
 
-    # 해당 포지션 찾기
+    # Find the matching position
     target = None
     for p in fm.positions:
         if p.market.upper() == market.upper():
@@ -348,8 +348,8 @@ def focus_close_one(
         return {"ok": False, "error": f"{market} not found in positions"}
 
     try:
-        # ★ [2026-04-18] 수익/손실 판정용: close 전에 현재가 캡처
-        # 수익 수동 탈출은 "익절" → 4시간 페널티 면제 (사용자 명시 요청)
+        # ★ [2026-04-18] For profit/loss determination: capture current price before closing
+        # A profitable manual exit is a "take-profit" → exempt from the 4-hour penalty (explicit user request)
         _cur_price_pre = None
         try:
             _cur_price_pre = fm._get_current_price(market)
@@ -372,7 +372,7 @@ def focus_close_one(
                 fm.selected_market = ""
             else:
                 fm.position = fm.positions[0]
-            # ★ 수동 퇴장 페널티 — config 토글 + 수익/손실 판정
+            # ★ Manual-exit penalty — config toggle + profit/loss determination
             _penalty_hours = 0.0
             _penalty_reason = ""
             if not getattr(fm.config, "manual_exit_penalty_enabled", True):
@@ -389,13 +389,13 @@ def focus_close_one(
                     "penalty_hours": _penalty_hours, "profit_exit": _was_profit,
                     "penalty_reason": _penalty_reason}
         else:
-            # ★ 실패 원인 상세: Bybit에 직접 재시도하며 에러 캡처
+            # ★ Failure detail: retry directly against Bybit and capture the error
             detail = f"Close order failed for {market}"
             try:
                 client = fm._get_client()
                 side = "Sell" if target.direction == "LONG" else "Buy"
                 client.place_order(market=target.market, side=side, ord_type="market", volume=target.qty, reduce_only=True)
-                # 여기 도착하면 실은 성공한 거 → 포지션 제거
+                # Reaching here means it actually succeeded → remove the position
                 fm.positions = [p for p in fm.positions if p.market.upper() != market.upper()]
                 fm.position = fm.positions[0] if fm.positions else None
                 if not fm.positions:
@@ -407,7 +407,7 @@ def focus_close_one(
             except Exception as retry_exc:
                 err_str = str(retry_exc)
                 detail = f"{market}: {err_str}"
-                # ★ 고스트 감지: reduceOnly 관련 에러 또는 포지션 없음 → 로컬에서 자동 제거
+                # ★ Ghost detection: reduceOnly-related error or no position → auto-remove locally
                 ghost_keywords = ["reduce only", "reduceonly", "position", "110017", "110043", "not enough", "qty not enough"]
                 if any(kw in err_str.lower() for kw in ghost_keywords):
                     fm.positions = [p for p in fm.positions if p.market.upper() != market.upper()]
@@ -445,7 +445,7 @@ def focus_close_selected(
             errors.append({"market": mkt, "error": "not_found"})
             continue
         try:
-            # ★ [2026-04-18] 수익/손실 판정용: close 전에 현재가 캡처
+            # ★ [2026-04-18] For profit/loss determination: capture current price before closing
             _cur_price_pre = None
             try:
                 _cur_price_pre = fm._get_current_price(mkt)
@@ -462,7 +462,7 @@ def focus_close_selected(
             if success:
                 fm.positions = [p for p in fm.positions if p.market.upper() != mkt]
                 closed.append(mkt)
-                # ★ 수동 퇴장 페널티 — config 토글 + 수익/손실 판정
+                # ★ Manual-exit penalty — config toggle + profit/loss determination
                 if not getattr(fm.config, "manual_exit_penalty_enabled", True):
                     logger.info("[FOCUS] Manual exit for %s — penalty DISABLED by config", mkt)
                 elif _was_profit:
@@ -475,7 +475,7 @@ def focus_close_selected(
         except Exception as exc:
             errors.append({"market": mkt, "error": str(exc)})
 
-    # 남은 포지션 정리
+    # Clean up remaining positions
     if fm.positions:
         fm.position = fm.positions[0]
     else:
@@ -490,7 +490,7 @@ def focus_close_selected(
 
 @router.post("/restore-tp-sl")
 def focus_restore_tp_sl(request: Request):
-    """재시작 후 Bybit에 TP/SL 재설정 (증발 복구)."""
+    """Re-apply TP/SL on Bybit after a restart (recover from evaporation)."""
     fm = _get_fm(request)
     if not fm.positions:
         return {"ok": True, "restored": 0, "message": "no positions"}
@@ -512,7 +512,7 @@ def focus_remove_ghost(
     request: Request,
     market: str = Query(..., description="Ghost position market to remove from local state"),
 ):
-    """고스트 포지션 제거 — Bybit에서 이미 청산됐지만 로컬에 남아있는 포지션 정리."""
+    """Remove a ghost position — clean up a position already closed on Bybit but still present locally."""
     fm = _get_fm(request)
     mkt = market.strip().upper()
     before = len(fm.positions)
@@ -531,17 +531,17 @@ def focus_remove_ghost(
 
 @router.post("/amnesty")
 def focus_amnesty(request: Request):
-    """★ 2026-04-23 부모 직접 지시: 대사면 (General Amnesty).
+    """★ 2026-04-23 direct owner instruction: General Amnesty.
 
-    "법이 미비할 때 저지른 일이니 일단 풀어주자"
+    "These were done while the rules were incomplete, so let's clear them for now."
 
-    B11 1명 판단 시대의 모든 누적 형벌 기록 해제:
-    - _last_exit_* (재진입 차단)
-    - _manual_exit_penalties (수동 퇴장 페널티)
-    - amnesty_ts 이후 journal 이벤트만 penalty 계산에 사용
-      (B12 vote / direction_exhaustion / profit_exit_block 등 모두 영향)
+    Clears all accumulated penalty records from the era of single B11 judgment:
+    - _last_exit_* (re-entry blocking)
+    - _manual_exit_penalties (manual-exit penalty)
+    - only journal events after amnesty_ts are used for penalty calculation
+      (affects B12 vote / direction_exhaustion / profit_exit_block, etc.)
 
-    Journal 기록 자체는 보존 (감사 추적 유지)."""
+    The journal records themselves are preserved (keeps the audit trail)."""
     fm = _get_fm(request)
     result = fm.execute_amnesty()
     logger.info("[BINANCE_FUT_API] ★ AMNESTY granted via API: %s", result)
@@ -566,10 +566,10 @@ def focus_clear_state(request: Request):
     return {"ok": True, "cleared": count, "state": "DORMANT"}
 
 
-# ── Debug: Scanner 후보 진단 ──────────────────────────────
+# ── Debug: Scanner candidate diagnostics ──────────────────────────────
 @router.get("/debug/scanner")
 def focus_debug_scanner(request: Request):
-    """Scanner 후보 + 각 필터 결과 반환 (진단용)."""
+    """Return scanner candidates + each filter's result (for diagnostics)."""
     fm = _get_fm(request)
     import time as _t
     held = {p.market.upper() for p in fm.positions}
@@ -610,7 +610,7 @@ def focus_debug_scanner(request: Request):
 # ── WhaleRadar ──────────────────────────────────────────────
 @router.get("/whale")
 def focus_whale_status(request: Request):
-    """WhaleRadar 현재 상태 — 활성 알림 + 최근 히스토리."""
+    """Current WhaleRadar state — active alerts + recent history."""
     try:
         from app.core.whale_radar import whale_radar
         return {
@@ -634,27 +634,27 @@ def focus_get_config(request: Request):
 
 @router.get("/config/defaults")
 def focus_get_config_defaults():
-    """Get FOCUS configuration dataclass factory defaults (기본값 리셋 용)."""
+    """Get FOCUS configuration dataclass factory defaults (for resetting to defaults)."""
     from dataclasses import asdict
     from app.manager.focus_manager import FocusConfig
     return {"ok": True, "defaults": asdict(FocusConfig())}
 
 
 # ────────────────────────────────────────────────────────────
-# ★ [2026-05-19 부모 결정] 자동 config snapshot 시스템 (히스토리 10개)
-# 부모님 비전: "10회 설정이 나오면 나중에 수익 극대화된 셋팅이 무엇이었는지 확인"
-# 매 POST /config 시 자동 저장 → runtime/config_snapshots/snapshot_YYYYMMDD_HHMMSS.json
-# 10개 초과 시 oldest 자동 삭제 (FIFO).
+# ★ [2026-05-19 owner decision] Automatic config snapshot system (history of 10)
+# Owner's vision: "Once 10 settings exist, we can later check which setting maximized profit."
+# Auto-save on every POST /config → runtime/config_snapshots/snapshot_YYYYMMDD_HHMMSS.json
+# When over 10, the oldest is auto-deleted (FIFO).
 # ────────────────────────────────────────────────────────────
 _PNL24H_CACHE = {"t": 0.0, "v": {}}
 _PNL24H_TTL = 60.0
 
 
 def _calc_pnl_24h() -> dict:
-    """focus_harpoon_journal.jsonl 의 24h EXIT 통계.
+    """24h EXIT stats from focus_harpoon_journal.jsonl.
 
-    ★ [2026-06-20] TTL 캐시(60s) — 매 호출 raw 저널 풀파싱(11만줄, 느린 단일코어 서버 ~33s)
-    방지. config 저장 스냅샷이 이걸 호출해 저장 POST 가 33s 블록되던 근본(드로다운 리셋 2s 와 대비).
+    ★ [2026-06-20] TTL cache (60s) — avoids a full raw-journal parse on every call (110k lines, ~33s on a slow single-core server).
+    The config-save snapshot calls this, which was the root cause of the save POST blocking for 33s (vs. the 2s drawdown reset).
     """
     import time as _t24
     if _PNL24H_CACHE["v"] and (_t24.time() - _PNL24H_CACHE["t"]) < _PNL24H_TTL:
@@ -702,7 +702,7 @@ def _calc_pnl_24h() -> dict:
 
 
 def _save_config_snapshot(config: dict, patch: dict) -> None:
-    """config 변경 시 snapshot 저장. 10개 maintain."""
+    """Save a snapshot on config change. Maintain 10."""
     try:
         from pathlib import Path
         import json as _json
@@ -714,7 +714,7 @@ def _save_config_snapshot(config: dict, patch: dict) -> None:
         dt = datetime.fromtimestamp(ts)
         fname = f"snapshot_{dt.strftime('%Y%m%d_%H%M%S')}.json"
         fpath = snap_dir / fname
-        # patch_diff = 실제 변경된 항목만 (None 제외, list 는 그대로)
+        # patch_diff = only the actually-changed items (excluding None, lists kept as-is)
         patch_diff = {k: v for k, v in patch.items() if v is not None}
         snapshot = {
             "ts": ts,
@@ -725,7 +725,7 @@ def _save_config_snapshot(config: dict, patch: dict) -> None:
         }
         with open(fpath, "w", encoding="utf-8") as f:
             _json.dump(snapshot, f, ensure_ascii=False, indent=2)
-        # 10개 초과 시 oldest 삭제 (FIFO)
+        # When over 10, delete the oldest (FIFO)
         snaps = sorted(snap_dir.glob("snapshot_*.json"))
         while len(snaps) > 10:
             try:
@@ -740,7 +740,7 @@ def _save_config_snapshot(config: dict, patch: dict) -> None:
 
 @router.get("/config/snapshots")
 def focus_config_snapshots():
-    """저장된 snapshot 10개 목록 (timestamp desc).
+    """List the 10 saved snapshots (timestamp desc).
 
     Returns: [{filename, ts, dt, patch_diff, pnl_24h}, ...]
     """
@@ -771,12 +771,12 @@ def focus_config_snapshots():
 
 @router.get("/config/snapshots/{filename}")
 def focus_config_snapshot_single(filename: str):
-    """단일 snapshot 의 전체 config 반환 (복원용)."""
+    """Return the full config of a single snapshot (for restore)."""
     try:
         from pathlib import Path
         import json as _json
         snap_dir = Path(_BINANCE_FUT_CFGSNAP_DIR)
-        # 보안: filename 검증 (snapshot_YYYYMMDD_HHMMSS.json 만 허용)
+        # Security: validate filename (only snapshot_YYYYMMDD_HHMMSS.json allowed)
         if not filename.startswith("snapshot_") or not filename.endswith(".json"):
             return {"ok": False, "error": "invalid filename"}
         fpath = snap_dir / filename
@@ -794,7 +794,7 @@ def focus_set_config(
     request: Request,
     budget_usdt: Optional[float] = Query(None, ge=0, description="0=auto budget from system"),
     leverage: Optional[int] = Query(None, ge=1, le=100),
-    max_positions: Optional[int] = Query(None, ge=1, le=99, description="최대 동시 포지션 슬롯"),
+    max_positions: Optional[int] = Query(None, ge=1, le=99, description="Max concurrent position slots"),
     direction_mode: Optional[str] = Query(None),
     risk_pct: Optional[float] = Query(None, ge=1, le=50),
     max_daily_plans: Optional[int] = Query(None, ge=1, le=999),
@@ -807,568 +807,568 @@ def focus_set_config(
     partial_exit_pct: Optional[float] = Query(None, ge=10, le=90),
     trailing_pct: Optional[float] = Query(None, ge=0.1, le=10),
     # ── Dynamic Trailing SL ──
-    dynamic_trailing: Optional[bool] = Query(None, description="동적 트레일링 SL ON/OFF"),
-    breakeven_trigger_pct: Optional[float] = Query(None, ge=0.1, le=5.0, description="손익분기 잠금 트리거 (%)"),
-    trailing_preserve_pct: Optional[float] = Query(None, ge=10, le=90, description="최고수익 보존율-base (%)"),
-    trailing_small_profit_preserve_pct: Optional[float] = Query(None, ge=10, le=95, description="소이익 보존율 (<0.5%) (%)"),
-    trailing_accel_pct: Optional[float] = Query(None, ge=0, le=30, description="수익 1%당 보존율 가속 (%)"),
+    dynamic_trailing: Optional[bool] = Query(None, description="Dynamic trailing SL ON/OFF"),
+    breakeven_trigger_pct: Optional[float] = Query(None, ge=0.1, le=5.0, description="Break-even lock trigger (%)"),
+    trailing_preserve_pct: Optional[float] = Query(None, ge=10, le=90, description="Peak-profit preservation rate-base (%)"),
+    trailing_small_profit_preserve_pct: Optional[float] = Query(None, ge=10, le=95, description="Small-profit preservation rate (<0.5%) (%)"),
+    trailing_accel_pct: Optional[float] = Query(None, ge=0, le=30, description="Preservation-rate acceleration per 1% profit (%)"),
     # ── v2: ADX / Conviction ──
-    adx_filter_enabled: Optional[bool] = Query(None, description="ADX 필터 ON/OFF"),
-    min_adx_entry: Optional[int] = Query(None, ge=10, le=50, description="최소 ADX (진입 기준)"),
-    dormant_adx_threshold: Optional[int] = Query(None, ge=5, le=30, description="DORMANT ADX 기준"),
-    min_conviction: Optional[float] = Query(None, ge=0, le=100, description="[2026-05-17 100점] 최소 확신 점수 (0~100)"),
+    adx_filter_enabled: Optional[bool] = Query(None, description="ADX filter ON/OFF"),
+    min_adx_entry: Optional[int] = Query(None, ge=10, le=50, description="Min ADX (entry threshold)"),
+    dormant_adx_threshold: Optional[int] = Query(None, ge=5, le=30, description="DORMANT ADX threshold"),
+    min_conviction: Optional[float] = Query(None, ge=0, le=100, description="[2026-05-17 100-scale] Min conviction score (0~100)"),
     # ── Scanner Multi-Slot ──
     scanner_entry: Optional[bool] = Query(None, description="Scanner multi-slot ON/OFF"),
     scanner_min_adx: Optional[int] = Query(None, ge=15, le=50),
     scanner_min_conviction: Optional[float] = Query(None, ge=0, le=100),
     scanner_max_exposure_pct: Optional[float] = Query(None, ge=10, le=100),
-    scanner_m30_primary_conflict_penalty: Optional[float] = Query(None, ge=0.1, le=1.0, description="PRI(H1) vs 30M 추세 충돌 시 conviction 배수 (default 0.7 = -30%, 1.0=OFF, 0.5=옛값)"),
-    scanner_m30_direction_conflict_penalty: Optional[float] = Query(None, ge=0.1, le=1.0, description="direction(LONG/SHORT) vs 30M 추세 충돌 시 conviction 배수 (default 0.7 = -30%, 1.0=OFF, 0.5=옛값)"),
-    # ── ★ [2026-05-20 Phase 6 재설계] Entry Mode (Score vs Reverse) ──
-    entry_mode: Optional[str] = Query(None, regex="^(score|reverse)$", description="진입 모드: score (conviction 100점, 기본) / reverse (봇 신호 + 낮은 conv + 낮은 ADX → 자동 반대 진입, 운영자 1차 룰)"),
-    # ── ★★★ [2026-05-28 저녁 부모 결단] 가드 묶음 마스터 토글 ★★★ ──
-    # 9개월 누적 가드 정리 — 부모님 분류: 정밀 진입 + 손해 X 이윤 극대화 = 2 종류만.
-    # 🟢 green = Phase 6/7 (D1+H4+H1+30M+15M+5M + PA + 5조건 룰) — 적극 진입
-    # 🟡 yellow = 옛 깐깐 가드 (BE Stall / Pre-BE / Reverse Drift / Entry Quality Gates 등)
-    # both = 둘 다 ON (가장 깐깐, 권장 X)
-    # minimal = 핵심만 (TF+PA+SL/HardROE — "죽을 때까지 인내" 모드)
-    entry_guard_set: Optional[str] = Query(None, regex="^(green|yellow|both|minimal)$", description="🟢 green (적극, Phase 6/7) / 🟡 yellow (신중, 옛 깐깐 가드) / both / minimal. 한 클릭으로 진입 가드 묶음 통째 전환. default=green."),
-    exit_guard_set: Optional[str] = Query(None, regex="^(green|yellow|both|minimal)$", description="🟢 green (charge_exit/tight_trail/exit_5m 등) / 🟡 yellow (BE Stall/Pre-BE/Reverse Drift 등 옛 EXIT 11종) / both / minimal (SL/HardROE 만 — 죽을 때까지 인내). default=green."),
-    smart_manual_entry_enabled: Optional[bool] = Query(None, description="[2026-05-29 운영자] Smart Manual Entry (신호 확인 후 진입) ON/OFF. OFF 시 L⏳/S⏳ 버튼 작동 X (즉시 진입 L/S 만)."),
-    smart_manual_entry_default_timeout_sec: Optional[float] = Query(None, ge=60, le=86400, description="Smart Manual Entry 대기 시간 (초). UI는 분 단위 입력 → ×60. default 3600 (1시간)."),
-    slot_auto_expand_enabled: Optional[bool] = Query(None, description="[2026-05-29 운영자] Slot Auto Expand (강신호 시 임시 +1 슬롯) ON/OFF. 옛 단순 시간 기반 (롤백) → 강신호+묶임+제한적+자본보호 재설계."),
-    slot_auto_expand_lock_hours: Optional[float] = Query(None, ge=0.1, le=24, description="모든 슬롯 N시간 묶임 조건 (default 1.0)"),
-    slot_auto_expand_min_conviction: Optional[float] = Query(None, ge=50, le=100, description="강신호 최소 conv (default 85)"),
-    slot_auto_expand_max_extra: Optional[int] = Query(None, ge=1, le=3, description="최대 추가 슬롯 (default 1, 무한 확장 X)"),
-    slot_auto_expand_size_ratio: Optional[float] = Query(None, ge=0.1, le=1.0, description="평균 사이즈의 N% (default 0.5 = 50%, 자본 보호)"),
-    market_consensus_exit_enabled: Optional[bool] = Query(None, description="[2026-05-29 운영자] Market Consensus Exit (시장 합의 역방향 손실 청산) ON/OFF. '이윤은 엎치락뒷치락 / 손해는 미끄럼틀' 비대칭 대응."),
-    market_consensus_threshold_pct: Optional[float] = Query(None, ge=50, le=100, description="한 방향 신호 비율 임계 (default 70%)"),
-    market_consensus_duration_min: Optional[float] = Query(None, ge=1, le=60, description="합의 지속 시간 (default 15분)"),
-    market_consensus_min_hold_min: Optional[float] = Query(None, ge=5, le=240, description="포지션 최소 hold (진입 직후 보호, default 20분)"),
-    market_consensus_min_pnl_pct: Optional[float] = Query(None, ge=-10, le=0, description="PnL ≤ N%만 청산 (수익 중 역방향 보호, default -0.5%)"),
-    reverse_conv_threshold: Optional[float] = Query(None, ge=20, le=70, description="Reverse 모드 conv 임계. 이 값 이하 + ADX 조건 충족 시 반대 진입. default 50 (40~55 권장)"),
-    reverse_adx_max: Optional[float] = Query(None, ge=5, le=40, description="Reverse 모드 ADX 임계. 이 값 이하 (= 럭비공 자리) + conv 조건 충족 시 반대 진입. default 20 (15~25 권장)"),
-    # ── ★ [2026-05-21 Phase 6 Stage 8 재재설계] 점수 회복 자동 청산 ──
-    charge_exit_enabled: Optional[bool] = Query(None, description="점수 회복 자동 청산 ON/OFF. 운영자 룰: '이윤이 나야 청산이고 BE까지 못가더라도 점수가 회복되는 기미 보이면 탈출'. 이윤 중 + conv 회복 시 소액 청산. 기존 가드 (BE/SL) 그대로."),
-    charge_exit_min_pnl_pct: Optional[float] = Query(None, ge=-5, le=5, description="점수회복 청산 이윤 조건 (%). 이 이상 pnl일 때만 트리거. default 0 = pnl>0 (이윤 중). 운영자 '이윤이 나야 청산'"),
-    charge_exit_conv_delta: Optional[float] = Query(None, ge=1, le=30, description="점수회복 청산 conv 임계. 진입 시 conv 대비 이 이상 증가 시 청산. default 5 (3=민감, 10=보수). 운영자 '점수 회복 기미'"),
-    max_same_direction: Optional[int] = Query(None, ge=1, le=15, description="같은 방향 최대 포지션 수"),
-    regime_direction_lock_freeze_sec: Optional[float] = Query(None, ge=300, le=86400, description="Regime 변경 후 freeze 시간(초). 30분=1800, 1h=3600, 4h=14400"),
-    regime_direction_lock_neutral_block: Optional[bool] = Query(None, description="NEUTRAL regime 시 양방향 차단 (REST). true=쉬기, false=양방향 허용"),
+    scanner_m30_primary_conflict_penalty: Optional[float] = Query(None, ge=0.1, le=1.0, description="Conviction multiplier when PRI(H1) vs 30M trend conflict (default 0.7 = -30%, 1.0=OFF, 0.5=old value)"),
+    scanner_m30_direction_conflict_penalty: Optional[float] = Query(None, ge=0.1, le=1.0, description="Conviction multiplier when direction(LONG/SHORT) vs 30M trend conflict (default 0.7 = -30%, 1.0=OFF, 0.5=old value)"),
+    # ── ★ [2026-05-20 Phase 6 redesign] Entry Mode (Score vs Reverse) ──
+    entry_mode: Optional[str] = Query(None, regex="^(score|reverse)$", description="Entry mode: score (conviction 100-scale, default) / reverse (bot signal + low conv + low ADX → auto opposite entry, operator primary rule)"),
+    # ── ★★★ [2026-05-28 evening owner decision] Guard-bundle master toggle ★★★ ──
+    # Cleanup of 9 months of accumulated guards — owner's classification: precise entry + no loss + max profit = only 2 kinds.
+    # 🟢 green = Phase 6/7 (D1+H4+H1+30M+15M+5M + PA + 5-condition rule) — aggressive entry
+    # 🟡 yellow = old strict guards (BE Stall / Pre-BE / Reverse Drift / Entry Quality Gates etc.)
+    # both = both ON (strictest, not recommended)
+    # minimal = core only (TF+PA+SL/HardROE — "endure to the death" mode)
+    entry_guard_set: Optional[str] = Query(None, regex="^(green|yellow|both|minimal)$", description="🟢 green (aggressive, Phase 6/7) / 🟡 yellow (cautious, old strict guards) / both / minimal. Switch the entire entry-guard bundle with one click. default=green."),
+    exit_guard_set: Optional[str] = Query(None, regex="^(green|yellow|both|minimal)$", description="🟢 green (charge_exit/tight_trail/exit_5m etc.) / 🟡 yellow (old 11 EXIT guards: BE Stall/Pre-BE/Reverse Drift etc.) / both / minimal (SL/HardROE only — endure to the end). default=green."),
+    smart_manual_entry_enabled: Optional[bool] = Query(None, description="[2026-05-29 operator] Smart Manual Entry (enter after signal confirmation) ON/OFF. When OFF, L⏳/S⏳ buttons don't work (immediate-entry L/S only)."),
+    smart_manual_entry_default_timeout_sec: Optional[float] = Query(None, ge=60, le=86400, description="Smart Manual Entry wait time (sec). UI takes minutes → ×60. default 3600 (1 hour)."),
+    slot_auto_expand_enabled: Optional[bool] = Query(None, description="[2026-05-29 operator] Slot Auto Expand (temporary +1 slot on strong signal) ON/OFF. Redesigned from the old simple time-based one (rolled back) → strong-signal + locked + limited + capital-protected."),
+    slot_auto_expand_lock_hours: Optional[float] = Query(None, ge=0.1, le=24, description="Condition: all slots locked for N hours (default 1.0)"),
+    slot_auto_expand_min_conviction: Optional[float] = Query(None, ge=50, le=100, description="Strong-signal min conv (default 85)"),
+    slot_auto_expand_max_extra: Optional[int] = Query(None, ge=1, le=3, description="Max extra slots (default 1, no unlimited expansion)"),
+    slot_auto_expand_size_ratio: Optional[float] = Query(None, ge=0.1, le=1.0, description="N% of the average size (default 0.5 = 50%, capital protection)"),
+    market_consensus_exit_enabled: Optional[bool] = Query(None, description="[2026-05-29 operator] Market Consensus Exit (close losing positions when the market consensus goes the opposite way) ON/OFF. Handles the asymmetry: 'profit seesaws / loss is a slide'."),
+    market_consensus_threshold_pct: Optional[float] = Query(None, ge=50, le=100, description="One-direction signal ratio threshold (default 70%)"),
+    market_consensus_duration_min: Optional[float] = Query(None, ge=1, le=60, description="Consensus duration (default 15 min)"),
+    market_consensus_min_hold_min: Optional[float] = Query(None, ge=5, le=240, description="Min position hold (protects right after entry, default 20 min)"),
+    market_consensus_min_pnl_pct: Optional[float] = Query(None, ge=-10, le=0, description="Close only when PnL ≤ N% (protects in-profit reversals, default -0.5%)"),
+    reverse_conv_threshold: Optional[float] = Query(None, ge=20, le=70, description="Reverse-mode conv threshold. Opposite entry when at/below this + ADX condition met. default 50 (40~55 recommended)"),
+    reverse_adx_max: Optional[float] = Query(None, ge=5, le=40, description="Reverse-mode ADX threshold. Opposite entry when at/below this (= choppy spot) + conv condition met. default 20 (15~25 recommended)"),
+    # ── ★ [2026-05-21 Phase 6 Stage 8 re-redesign] Score-recovery auto exit ──
+    charge_exit_enabled: Optional[bool] = Query(None, description="Score-recovery auto exit ON/OFF. Operator rule: 'exit only in profit, and if the score shows signs of recovering even if it can't reach BE'. Small exit when in profit + conv recovers. Existing guards (BE/SL) unchanged."),
+    charge_exit_min_pnl_pct: Optional[float] = Query(None, ge=-5, le=5, description="Score-recovery exit profit condition (%). Triggers only when pnl ≥ this. default 0 = pnl>0 (in profit). Operator: 'exit only in profit'"),
+    charge_exit_conv_delta: Optional[float] = Query(None, ge=1, le=30, description="Score-recovery exit conv threshold. Exit when conv rises this much above entry conv. default 5 (3=sensitive, 10=conservative). Operator: 'signs of score recovery'"),
+    max_same_direction: Optional[int] = Query(None, ge=1, le=15, description="Max positions in the same direction"),
+    regime_direction_lock_freeze_sec: Optional[float] = Query(None, ge=300, le=86400, description="Freeze time after a regime change (sec). 30min=1800, 1h=3600, 4h=14400"),
+    regime_direction_lock_neutral_block: Optional[bool] = Query(None, description="Block both directions on NEUTRAL regime (REST). true=rest, false=allow both directions"),
     # ── Coin Loss Cap ──
-    coin_loss_cap_enabled: Optional[bool] = Query(None, description="코인별 24h 손실 한도 ON/OFF"),
-    coin_loss_cap_amount: Optional[float] = Query(None, ge=5, le=500, description="코인당 최대 손실 ($)"),
-    coin_loss_cap_window_hours: Optional[float] = Query(None, ge=1, le=72, description="손실 집계 윈도우 (시간)"),
-    # ── Per-Coin Size Cap (★ 2026-05-08 부모님 결정) ──
-    per_coin_size_cap_enabled: Optional[bool] = Query(None, description="1코인 사이즈 자본 % 이하 cap ON/OFF"),
-    per_coin_size_cap_pct: Optional[float] = Query(None, ge=1, le=100, description="자본 대비 1코인 사이즈 최대 %"),
-    # ── Conviction Override Slot (★ 2026-05-10 부모님 결정) ──
-    override_slot_enabled: Optional[bool] = Query(None, description="확장 슬롯 ON/OFF (window(h) 이상 묶인 슬롯 만큼 추가 진입)"),
-    override_min_conviction: Optional[float] = Query(None, ge=0, le=100, description="[100점] 확장 슬롯 진입 최소 conviction (default 75)"),
-    override_locked_slot_min_hours: Optional[float] = Query(None, ge=1, le=720, description="★ 묶인 슬롯 인정 window(h) — 이 시간 이상 보유한 슬롯만 카운트 (default 24)"),
-    override_size_cap_pct: Optional[float] = Query(None, ge=1, le=50, description="확장 슬롯 사이즈 cap (자본 %, default 8)"),
-    override_max_sl_distance_pct: Optional[float] = Query(None, ge=1, le=50, description="확장 슬롯 max SL 거리 % (default 5)"),
-    override_hard_roe_cut_pct: Optional[float] = Query(None, ge=-100, le=0, description="확장 슬롯 Hard ROE 즉시 컷 % (default -10)"),
-    # ── Momentum Reversal (Phase 4 의 hard penalty 18) ──
-    momentum_reversal_enabled: Optional[bool] = Query(None, description="모멘텀 역행 감점 ON/OFF (진입 직전 5m 1~3봉 역행)"),
-    momentum_reversal_strong_atr: Optional[float] = Query(None, ge=0.1, le=5.0, description="강한 역행 ATR 임계 (default 1.0)"),
-    momentum_reversal_medium_atr: Optional[float] = Query(None, ge=0.1, le=5.0, description="중간 역행 ATR 임계 (default 0.5)"),
-    momentum_reversal_strong_weight: Optional[float] = Query(None, ge=-100, le=0, description="[100점 ×10] 강한 역행 감점 (default -30)"),
-    momentum_reversal_medium_weight: Optional[float] = Query(None, ge=-100, le=0, description="[100점 ×10] 중간 역행 감점 (default -20)"),
-    momentum_reversal_lookback_bars: Optional[int] = Query(None, ge=1, le=5, description="5m 누적 lookback 봉수 (default 3)"),
+    coin_loss_cap_enabled: Optional[bool] = Query(None, description="Per-coin 24h loss cap ON/OFF"),
+    coin_loss_cap_amount: Optional[float] = Query(None, ge=5, le=500, description="Max loss per coin ($)"),
+    coin_loss_cap_window_hours: Optional[float] = Query(None, ge=1, le=72, description="Loss aggregation window (hours)"),
+    # ── Per-Coin Size Cap (★ 2026-05-08 owner decision) ──
+    per_coin_size_cap_enabled: Optional[bool] = Query(None, description="Cap single-coin size at a % of capital ON/OFF"),
+    per_coin_size_cap_pct: Optional[float] = Query(None, ge=1, le=100, description="Max single-coin size as % of capital"),
+    # ── Conviction Override Slot (★ 2026-05-10 owner decision) ──
+    override_slot_enabled: Optional[bool] = Query(None, description="Override slot ON/OFF (extra entries equal to the number of slots locked for ≥ window(h))"),
+    override_min_conviction: Optional[float] = Query(None, ge=0, le=100, description="[100-scale] Override-slot entry min conviction (default 75)"),
+    override_locked_slot_min_hours: Optional[float] = Query(None, ge=1, le=720, description="★ Locked-slot recognition window(h) — counts only slots held longer than this (default 24)"),
+    override_size_cap_pct: Optional[float] = Query(None, ge=1, le=50, description="Override-slot size cap (% of capital, default 8)"),
+    override_max_sl_distance_pct: Optional[float] = Query(None, ge=1, le=50, description="Override-slot max SL distance % (default 5)"),
+    override_hard_roe_cut_pct: Optional[float] = Query(None, ge=-100, le=0, description="Override-slot Hard ROE instant-cut % (default -10)"),
+    # ── Momentum Reversal (hard penalty 18 from Phase 4) ──
+    momentum_reversal_enabled: Optional[bool] = Query(None, description="Momentum-reversal penalty ON/OFF (5m 1~3 bars reversing right before entry)"),
+    momentum_reversal_strong_atr: Optional[float] = Query(None, ge=0.1, le=5.0, description="Strong reversal ATR threshold (default 1.0)"),
+    momentum_reversal_medium_atr: Optional[float] = Query(None, ge=0.1, le=5.0, description="Medium reversal ATR threshold (default 0.5)"),
+    momentum_reversal_strong_weight: Optional[float] = Query(None, ge=-100, le=0, description="[100-scale ×10] Strong-reversal penalty (default -30)"),
+    momentum_reversal_medium_weight: Optional[float] = Query(None, ge=-100, le=0, description="[100-scale ×10] Medium-reversal penalty (default -20)"),
+    momentum_reversal_lookback_bars: Optional[int] = Query(None, ge=1, le=5, description="5m cumulative lookback bars (default 3)"),
     # ── Coin Repeat Brake ──
-    coin_repeat_brake_enabled: Optional[bool] = Query(None, description="코인 반복 진입 브레이크 ON/OFF"),
-    coin_repeat_free_count: Optional[int] = Query(None, ge=0, le=20, description="무료 진입 횟수 (0 = 첫 진입부터 cooldown 적용)"),
-    coin_repeat_cooldown_base: Optional[float] = Query(None, ge=60, le=3600, description="쿨다운 기본 초"),
-    # ── ★ BE Stall Exit (2026-05-14 부모 — UI 노출) ──
-    be_stall_exit_enabled: Optional[bool] = Query(None, description="BE Stall Exit: BE 후 정체 시 청산 ON/OFF"),
-    be_stall_exit_sec: Optional[float] = Query(None, ge=5.0, le=300.0, description="BE Stall Exit: BE 후 정체 시간 초 (default 30)"),
-    be_stall_intelligent_enabled: Optional[bool] = Query(None, description="BE Stall 지능형: 모멘텀(MACD/RSI/BB 5m) 연동 — 우리편 HOLD / 반대편 즉시 청산 / 중립 폴백"),
-    be_stall_intelligent_rsi_strong: Optional[float] = Query(None, ge=50.0, le=80.0, description="지능형 RSI 강세 임계 (LONG: ≥ 이 값 = 우리편 / 기본 55)"),
-    be_stall_intelligent_rsi_weak: Optional[float] = Query(None, ge=20.0, le=50.0, description="지능형 RSI 약세 임계 (LONG: ≤ 이 값 = 반대편 / 기본 45)"),
-    # ── ★ Pre-BE Stall Exit (2026-04-23 부모 직접 요청) ──
-    pre_be_stall_exit_mode: Optional[str] = Query(None, description="Pre-BE Stall: AUTO (시장따라) / ON / OFF"),
-    pre_be_stall_min_profit_pct: Optional[float] = Query(None, ge=0.01, le=2.0, description="Pre-BE Stall: 최소 수익 % (default 0.10)"),
-    pre_be_stall_sec: Optional[float] = Query(None, ge=10.0, le=600.0, description="Pre-BE Stall: 정체 시간 초 (default 60)"),
-    pre_be_stall_volatility_threshold_pct: Optional[float] = Query(None, ge=0.5, le=10.0, description="Pre-BE Stall AUTO 임계 ATR% (default 2.0, 미만=횡보=ON)"),
-    pre_be_stall_max_since_peak_sec: Optional[float] = Query(None, ge=300.0, le=86400.0, description="Pre-BE Stall: peak 후 최대 시간 (default 1800=30분, 넘으면 stale → 미발동)"),
-    # ── 🐢 Pre-BE 손실방지선 (2026-06-09 부모 "지금 나우") ──
-    pre_be_loss_guard_enabled: Optional[bool] = Query(None, description="🐢 Pre-BE 손실방지선: peak<0.1 헤맴이 entry 손실로 밀리면 작은 컷 (default OFF)"),
-    pre_be_loss_guard_peak_max_pct: Optional[float] = Query(None, ge=0.0, le=1.0, description="peak ≤ 이 값 = 헤맴 대상 (default 0.10)"),
-    pre_be_loss_guard_trigger_loss_pct: Optional[float] = Query(None, ge=0.1, le=3.0, description="entry 대비 -이 값% 밀리면 컷 (default 0.5, SL 절반)"),
-    pre_be_loss_guard_min_hold_sec: Optional[float] = Query(None, ge=0.0, le=3600.0, description="진입 후 최소 보유 초 (default 60)"),
-    pre_be_loss_guard_max_age_sec: Optional[float] = Query(None, ge=60.0, le=86400.0, description="stale 보호 — 이 시간 넘으면 미발동 (default 7200=2h)"),
-    # ── ★ Reverse Drift Exit (2026-05-16 부모 직접 요청) ──
-    reverse_drift_exit_enabled: Optional[bool] = Query(None, description="Reverse Drift Exit: peak에서 역행 시 컷 (pre_be_stall 보완, ATR 무관 발동)"),
-    reverse_drift_peak_min_pct: Optional[float] = Query(None, ge=0.01, le=1.0, description="발동 peak 최소 % (default 0.10)"),
-    reverse_drift_peak_max_pct: Optional[float] = Query(None, ge=0.05, le=2.0, description="발동 peak 최대 % (default 0.35 = BE_trigger 0.4 미만, 0.05 갭)"),
-    reverse_drift_min_since_peak_sec: Optional[float] = Query(None, ge=30.0, le=1800.0, description="peak 후 정체 최소 시간 초 (default 180)"),
-    reverse_drift_max_since_peak_sec: Optional[float] = Query(None, ge=300.0, le=86400.0, description="peak 후 최대 시간 초 (default 1800=30분, 이 시간 넘으면 stale → 미발동)"),
-    reverse_drift_pct: Optional[float] = Query(None, ge=0.01, le=1.0, description="역행 임계 % (ATR 적응 OFF 또는 floor, default 0.26)"),
-    reverse_drift_atr_adaptive_enabled: Optional[bool] = Query(None, description="ATR 기반 적응 임계 ON/OFF (default ON)"),
-    reverse_drift_atr_multiplier: Optional[float] = Query(None, ge=0.05, le=1.0, description="atr_pct × multiplier = 임계 (default 0.2)"),
-    reverse_drift_atr_cap_pct: Optional[float] = Query(None, ge=0.1, le=2.0, description="적응 임계 상한 (default 0.4)"),
-    # ── ★ 끝물 추격 차단 (Overextension) — 2026-06-07 부모 (라이브 ON) ──
-    overextension_enabled: Optional[bool] = Query(None, description="끝물 추격 감점 ON/OFF: 24H 범위 상단(LONG)/하단(SHORT)+큰 이동폭 = 소진추세 추격 → conviction 감점 (default ON)"),
-    overextension_range_pos_pct: Optional[float] = Query(None, ge=0.5, le=1.0, description="LONG 발동 24H 범위 위치 (default 0.85 = 상단 15%). SHORT 은 1-이값"),
-    overextension_min_move_pct: Optional[float] = Query(None, ge=0.0, le=50.0, description="발동 최소 24H 변동 |%| (default 8.0, 작은 변동 제외)"),
-    overextension_penalty: Optional[float] = Query(None, ge=0.0, le=50.0, description="conviction 감점 점수 (default 10)"),
-    overextension_adx_exempt: Optional[float] = Query(None, ge=0.0, le=100.0, description="ADX 이 이상 = 강한 돌파 → 감점 면제 (default 30, 0=면제없음)"),
-    blowoff_filter_enabled: Optional[bool] = Query(None, description="[#1 끝물필터] Blow-off 24h 급등/급락 추격 차단 ON/OFF (default OFF, ADX면제 없음)"),
-    blowoff_move_pct: Optional[float] = Query(None, ge=5, le=300, description="[#1] 24h |변동| 이 % 이상=blow-off 후보 (default 30)"),
-    blowoff_penalty: Optional[float] = Query(None, ge=0, le=100, description="[#1] 기본 감점 (default 20)"),
-    blowoff_extreme_pct: Optional[float] = Query(None, ge=10, le=500, description="[#1] 극단 변동 % (최대감점, default 80)"),
-    blowoff_max_penalty: Optional[float] = Query(None, ge=0, le=150, description="[#1] 극단 최대 감점 (default 40)"),
-    blowoff_chase_only: Optional[bool] = Query(None, description="[#1] True=추격(같은방향)만 감점, fade 면제 (default True)"),
-    # 🎯 변곡 setup 점수 (Inflection Setup) — 2026-06-12 부모 "점수가 차트를 배신"
-    inflection_setup_enabled: Optional[bool] = Query(None, description="변곡 setup 점수 ON/OFF: 위치(이동폭)×모멘텀 → 천장stall 롱감점/숏가점, 바닥변곡 롱가점, 벽타기 면제 (default OFF)"),
-    inflection_setup_weight: Optional[float] = Query(None, ge=0.0, le=60.0, description="변곡 modifier 최대 크기 W (default 20)"),
-    inflection_setup_cap: Optional[float] = Query(None, ge=0.0, le=60.0, description="출력 클램프 ±cap (default 20)"),
-    inflection_setup_base: Optional[float] = Query(None, ge=0.0, le=1.0, description="위치만으로 주는 기본 가감 base (default 0.45)"),
-    inflection_setup_slope_scale: Optional[float] = Query(None, ge=0.05, le=5.0, description="slope15m tanh 정규화 스케일 % (default 0.40)"),
-    # 🎣 Retest setup 점수 (2026-06-12 부모/동생) — 돌파→눌림→지지 = 좋은 진입 자리
-    retest_setup_enabled: Optional[bool] = Query(None, description="Retest 가점 ON/OFF: 돌파→되돌림→지지+turning = 좋은 진입 자리 가점 (default OFF)"),
-    retest_setup_weight: Optional[float] = Query(None, ge=0.0, le=40.0, description="retest 가점 최대 크기 (default 12)"),
-    retest_setup_turn_bonus: Optional[float] = Query(None, ge=0.0, le=20.0, description="되돌림 후 turning 시 추가 가점 (default 4)"),
-    retest_retr_lo: Optional[float] = Query(None, ge=0.0, le=1.0, description="최소 되돌림 비율, 이하=천장추격 신호X (default 0.30)"),
-    retest_retr_hi: Optional[float] = Query(None, ge=0.0, le=1.5, description="이상적 되돌림 상한, +0.3 초과=too-deep (default 0.90)"),
-    # 🌋 변동성 각성 SL 적응 (2026-06-11 부모 "멀게 두고 따라붙기") — SL 넓히면 size 자동↓ 리스크 고정
-    awaken_sl_enabled: Optional[bool] = Query(None, description="변동성 각성 SL 적응: 각성+Day순행 시 SL 넓게+size 자동축소(리스크 고정) (default OFF)"),
-    awaken_sl_mode: Optional[str] = Query(None, description="SL 거리 기준: atr / structure / both (default both=더 먼 쪽)"),
-    awaken_atr_ratio: Optional[float] = Query(None, ge=1.0, le=5.0, description="각성 판정 현재/과거 ATR 비율 (default 1.3)"),
-    awaken_atr_lookback: Optional[int] = Query(None, ge=10, le=100, description="과거 ATR 평균 봉수 H4 (default 20)"),
-    awaken_max_sl_mult: Optional[float] = Query(None, ge=1.0, le=5.0, description="SL 최대 배수 무한확장 방지 (default 2.5)"),
-    awaken_require_day_align: Optional[bool] = Query(None, description="Day(코인 D1) 순행만 견딤 자격 (default True, 역행/미정 제외)"),
-    awaken_swing_lookback: Optional[int] = Query(None, ge=3, le=50, description="구조점(각성의 발) swing 탐색 봉수 (default 10)"),
-    awaken_atr_buffer: Optional[float] = Query(None, ge=0.0, le=3.0, description="구조점에 ATR 여유 배수 (default 0.5)"),
-    # ② 끝물 상한 감점 (2026-06-09 부모 "90+=끝물=50↓, 벽타기 예외")
-    conviction_ceiling_enabled: Optional[bool] = Query(None, description="② 끝물 상한 감점: conviction 90+ 를 target 으로 cap (default OFF)"),
-    conviction_ceiling_start: Optional[float] = Query(None, ge=50.0, le=150.0, description="이 이상 conviction=끝물 후보 (default 90)"),
-    conviction_ceiling_target: Optional[float] = Query(None, ge=0.0, le=100.0, description="끝물을 이 점수로 cap (default 50, 65미달=차단)"),
-    conviction_ceiling_adx_exempt: Optional[float] = Query(None, ge=0.0, le=100.0, description="ADX 이 이상=벽타기 면제 (default 30, 0=면제없음)"),
-    # ★ 이윤 여력 페널티 (2026-06-09 부모 "방향 맞아도 갈 곳 없으면 감점")
-    headroom_penalty_enabled: Optional[bool] = Query(None, description="이윤 여력 페널티: 저항/지지 코앞·RSI 극단·BB 밴드끝 진입 감점 (default OFF)"),
-    headroom_sr_penalty: Optional[float] = Query(None, ge=0.0, le=30.0, description="LONG 저항 코앞 / SHORT 지지 코앞 감점 (default 6)"),
-    headroom_sr_near_pct: Optional[float] = Query(None, ge=0.1, le=10.0, description="저항/지지까지 이 %이내=여력없음 (default 1.5)"),
-    headroom_rsi_penalty: Optional[float] = Query(None, ge=0.0, le=30.0, description="LONG 과매수 / SHORT 과매도 감점 (default 6)"),
-    headroom_rsi_overbought: Optional[float] = Query(None, ge=50.0, le=100.0, description="LONG: RSI 이 이상=갈곳없음 (default 70)"),
-    headroom_rsi_oversold: Optional[float] = Query(None, ge=0.0, le=50.0, description="SHORT: RSI 이 이하=갈곳없음 (default 30)"),
-    headroom_bb_penalty: Optional[float] = Query(None, ge=0.0, le=30.0, description="LONG BB상단 / SHORT BB하단 감점 (default 4)"),
-    headroom_bb_hi_pctb: Optional[float] = Query(None, ge=0.5, le=1.5, description="%b 이 이상=밴드상단 (default 0.80)"),
-    headroom_bb_lo_pctb: Optional[float] = Query(None, ge=-0.5, le=0.5, description="%b 이 이하=밴드하단 (default 0.20)"),
-    # ── 🌊 거시하락 능동 SHORT 진입 2단계 (Macro Short Timing) — 2026-06-11 부모 "물길 완성" ──
-    macro_short_timing_enabled: Optional[bool] = Query(None, description="거시하락 2단계: 거시 RISK_OFF + 5m 반등꺾임 = 능동 SHORT 진입(가점). SHORT 전용·끝물방지 (default OFF)"),
-    macro_short_timing_delta: Optional[float] = Query(None, ge=0.0, le=40.0, description="SHORT conviction 가점 크기 (default 12)"),
-    macro_short_timing_min_signals: Optional[int] = Query(None, ge=1, le=3, description="꺾임 3신호(음전환/MACD<0/PA) 중 최소 충족 수 (default 2)"),
-    macro_short_timing_bounce_pct: Optional[float] = Query(None, ge=0.0, le=5.0, description="'반등 존재' 전제 — 5m 저점 후 고점 반등 최소 % (default 0.3)"),
-    macro_short_timing_lookback: Optional[int] = Query(None, ge=6, le=40, description="5m 반등 탐색 봉 수 (default 12)"),
-    # ── ★ 레짐역행 보유탈출 P3 (2026-06-06 부모) — router 배선 누락 fix (2026-06-07) ──
-    macro_exit_enabled: Optional[bool] = Query(None, description="레짐역행 보유탈출 P3: RISK_ON+SHORT / RISK_OFF+LONG 보유분 SL 가까운 출구로 (default OFF, 청산가드)"),
-    macro_exit_breadth_min: Optional[int] = Query(None, ge=5, le=10, description="발동 breadth STRONG N/10 (default 8 = 확실할 때만)"),
-    macro_exit_sl_cushion_pct: Optional[float] = Query(None, ge=0.05, le=2.0, description="SL 현재가 거리 % (default 0.15, 작을수록 즉시탈출)"),
-    macro_exit_strong_coin_exempt: Optional[bool] = Query(None, description="개별 강세 예외: 수익中이면 거시역행이어도 보유유지 (default ON)"),
-    macro_exit_exempt_min_roe: Optional[float] = Query(None, ge=0.0, le=20.0, description="예외 최소 가격ROE% (default 0 = 수익이면 무조건 예외)"),
-    # ── ★ router 배선 누락 일괄 fix (2026-06-07) — dataclass+UI 있는데 POST 누락이던 12필드 (BB벽타기/레짐컴퍼스P2/final5m/micro1m/multiBE) ──
-    bb_block_trend_bypass_adx: Optional[float] = Query(None, ge=0.0, le=100.0, description="BB 벽타기: ADX≥이값=강추세 BB극단차단 우회 (0=비활성)"),
-    bb_trend_bypass_require_di: Optional[bool] = Query(None, description="BB 벽타기 ② 방향확정(DI) 필수"),
-    bb_trend_bypass_macd_min: Optional[float] = Query(None, ge=0.0, le=10.0, description="BB 벽타기 ③ MACD 모멘텀 허용치 (0=비활성)"),
-    final_30m15m_bypass_conviction: Optional[float] = Query(None, ge=0, le=200, description="final_30m15m 점수흡수 — 이 conviction 이상이면 차단 면제 (0=OFF, 예 75)"),
-    final_30m15m_bypass_include_regime: Optional[bool] = Query(None, description="거시역행(regime_opposed)도 점수흡수 포함 (True=포함/False=제외·기존)"),
-    final_d1_bypass_conviction: Optional[float] = Query(None, ge=0, le=200, description="D1 점수흡수 — 이 conviction 이상이면 D1 역행 차단 면제 (0=OFF, 예 78). 출구가드가 받침"),
-    final_d1_recent5_override_enabled: Optional[bool] = Query(None, description="final_d1 최근5봉 override — D1=UPTREND 오판(lookback=5 잔상) 시 최근 5일봉이 명확히 DOWN이면 SHORT 통과 (default OFF)"),
-    final_d1_recent5_drop_pct: Optional[float] = Query(None, ge=0, le=50, description="최근 5일봉 변화율 ≤ -이값(%) 이면 UPTREND 라벨 무시 SHORT 통과 (예 1.0)"),
-    d1_reality_demote_enabled: Optional[bool] = Query(None, description="Fix D — D1 추세 라벨 reality check: UPTREND인데 최근 5일봉 ≤ -drop% 면 SIDEWAYS 강등(추세정렬 LONG credit 제거). 떨어지는칼 LONG 차단·카드 라벨 교정. default OFF"),
-    d1_reality_demote_drop_pct: Optional[float] = Query(None, ge=0, le=50, description="최근 5일봉 변화율 ≤ -이값(%) 이면 UPTREND→SIDEWAYS 강등 (예 1.0)"),
-    guard_score_total_cap_enabled: Optional[bool] = Query(None, description="[패치 v1] 가드 가산점 총합 캡 ON/OFF (default OFF)"),
-    guard_score_total_cap: Optional[float] = Query(None, ge=5, le=100, description="[패치 v1] 총합 클램프 ±N (default 30)"),
-    conviction_ceiling_post_guards: Optional[bool] = Query(None, description="[패치 v1] 끝물 상한을 base+가드 합산 후 적용 (default OFF)"),
-    final_bypass_use_base: Optional[bool] = Query(None, description="[패치 v1] 점수흡수 bypass 를 base conviction 기준으로 (default OFF)"),
-    final_5m_simple_check_enabled: Optional[bool] = Query(None, description="진입 직전 5M RSI/MACD/BB 동조 검사"),
-    final_5m_simple_min_score: Optional[int] = Query(None, ge=0, le=3, description="5M 3종 중 N 이상 동조 시 통과"),
-    final_5m_bb_trend_bypass_enabled: Optional[bool] = Query(None, description="final_5m BB 벽타기 면제 — 강한추세(ADX+DI)면 BB 극단(SHORT 바닥/LONG 천장)이어도 통과. default OFF"),
-    final_d1_alignment_check_enabled: Optional[bool] = Query(None, description="D1 정렬 필수 — Day 캔들 역방향 시 진입차단 (OFF=이벤트로 흔들린 Day캔들 무시, 2026-06-07 운영자)"),
-    final_align_regime_override_enabled: Optional[bool] = Query(None, description="거시 정렬 override — 급락(RISK_OFF) 확실 시 final게이트가 상위TF 대신 거시방향 따름 (SHORT순행 통과/LONG떨어지는칼 차단, 2026-06-07)"),
-    macro_compass_enabled: Optional[bool] = Query(None, description="레짐 컴퍼스 P2 (RECOVERING 가점, default OFF paper)"),
-    macro_recovering_conv_delta: Optional[float] = Query(None, ge=-50.0, le=50.0, description="RECOVERING LONG 가점/SHORT 감점 폭 (0=paper)"),
-    macro_recovering_require_di_adx: Optional[bool] = Query(None, description="죽은고양이 방어: +DI flip+ADX 동반만 가점"),
-    macro_recovering_min_adx: Optional[float] = Query(None, ge=0.0, le=100.0, description="회복 확인 최소 ADX"),
-    micro_1m_body_min_pct: Optional[float] = Query(None, ge=0.0, le=5.0, description="1M 약한 도지 거름 — 진짜 미는 봉 최소 body %"),
-    multi_be_lock_atr_adaptive_enabled: Optional[bool] = Query(None, description="멀티 BE락 ATR 배수 모드 ON/OFF"),
-    multi_be_lock_atr_min_stage1_trigger_pct: Optional[float] = Query(None, ge=0.0, le=5.0, description="멀티 BE락 stage1 트리거 floor %"),
-    multi_be_lock_atr_max_stage1_trigger_pct: Optional[float] = Query(None, ge=0.0, le=20.0, description="[2026-06-13] 멀티 BE락 stage1 트리거 상한 % — extreme ATR도 +N%엔 BE 락 (0=상한없음, default 3.0)"),
-    # ── ★ Entry Grace Period (2026-05-18 부모 비전 #6) — 진입 후 분위기 파악 시간 ──
-    entry_grace_period_sec: Optional[float] = Query(None, ge=0.0, le=3600.0, description="진입 후 N초 동안 pre_be_stall + reverse_drift 가드 비활성 (A/B 판별 시간 벌기). 0=OFF, 300=5분 권장. be_stall/SL/long_hold 영향 X."),
-    market_bias_grace_exit_enabled: Optional[bool] = Query(None, description="[운영자 비전 #6 보조] 그레이스 기간 중 market_bias 반대 dominance 감지 시 즉시 force exit (A 패턴 회피). default OFF. entry_grace_period_sec 와 함께 켜야 발동."),
-    news_grace_exit_enabled: Optional[bool] = Query(None, description="[운영자 비전 #6 보조 — 뉴스 부활] 그레이스 기간 중 뉴스 sentiment 반대 강 시 force exit. default OFF. news_sentiment.focus_enabled (/api/news-sentiment/config) 도 함께 켜야 발동."),
-    news_grace_exit_threshold: Optional[float] = Query(None, ge=0.1, le=1.0, description="[운영자 비전 #6 보조] news_grace_exit 발동 임계 |sentiment| (default 0.5)"),
-    # ── ★★★★ [2026-05-18 부모 비전 #6 B 옵션] 시간 무관 OR 조건 ──
-    exit_consensus_enabled: Optional[bool] = Query(None, description="[운영자 비전 #6 B 옵션] 시간 무관 OR 조건. reverse_drift/pre_be_stall 발동 시 옆친구+뉴스 의견 종합. 같은방향=hold(견디기) / 반대=exit(가드따름). 시간 그레이스 없이 작동. default OFF."),
-    exit_consensus_news_threshold: Optional[float] = Query(None, ge=0.1, le=1.0, description="[운영자 비전 #6 B 옵션] exit_consensus 뉴스 sentiment 강도 임계 (default 0.3 완만)"),
+    coin_repeat_brake_enabled: Optional[bool] = Query(None, description="Coin repeat-entry brake ON/OFF"),
+    coin_repeat_free_count: Optional[int] = Query(None, ge=0, le=20, description="Free entry count (0 = apply cooldown from the first entry)"),
+    coin_repeat_cooldown_base: Optional[float] = Query(None, ge=60, le=3600, description="Cooldown base seconds"),
+    # ── ★ BE Stall Exit (2026-05-14 owner — exposed in UI) ──
+    be_stall_exit_enabled: Optional[bool] = Query(None, description="BE Stall Exit: close when stalling after BE ON/OFF"),
+    be_stall_exit_sec: Optional[float] = Query(None, ge=5.0, le=300.0, description="BE Stall Exit: stall time after BE in seconds (default 30)"),
+    be_stall_intelligent_enabled: Optional[bool] = Query(None, description="BE Stall intelligent: tied to momentum (MACD/RSI/BB 5m) — in our favor HOLD / against us close immediately / neutral fallback"),
+    be_stall_intelligent_rsi_strong: Optional[float] = Query(None, ge=50.0, le=80.0, description="Intelligent RSI strong threshold (LONG: ≥ this = in our favor / default 55)"),
+    be_stall_intelligent_rsi_weak: Optional[float] = Query(None, ge=20.0, le=50.0, description="Intelligent RSI weak threshold (LONG: ≤ this = against us / default 45)"),
+    # ── ★ Pre-BE Stall Exit (2026-04-23 owner direct request) ──
+    pre_be_stall_exit_mode: Optional[str] = Query(None, description="Pre-BE Stall: AUTO (follow market) / ON / OFF"),
+    pre_be_stall_min_profit_pct: Optional[float] = Query(None, ge=0.01, le=2.0, description="Pre-BE Stall: min profit % (default 0.10)"),
+    pre_be_stall_sec: Optional[float] = Query(None, ge=10.0, le=600.0, description="Pre-BE Stall: stall time in seconds (default 60)"),
+    pre_be_stall_volatility_threshold_pct: Optional[float] = Query(None, ge=0.5, le=10.0, description="Pre-BE Stall AUTO threshold ATR% (default 2.0, below=ranging=ON)"),
+    pre_be_stall_max_since_peak_sec: Optional[float] = Query(None, ge=300.0, le=86400.0, description="Pre-BE Stall: max time after peak (default 1800=30min, beyond=stale → not triggered)"),
+    # ── 🐢 Pre-BE loss guard (2026-06-09 owner "right now") ──
+    pre_be_loss_guard_enabled: Optional[bool] = Query(None, description="🐢 Pre-BE loss guard: small cut when a peak<0.1 dither slips into an entry loss (default OFF)"),
+    pre_be_loss_guard_peak_max_pct: Optional[float] = Query(None, ge=0.0, le=1.0, description="peak ≤ this = dither target (default 0.10)"),
+    pre_be_loss_guard_trigger_loss_pct: Optional[float] = Query(None, ge=0.1, le=3.0, description="Cut when it slips -this % below entry (default 0.5, half of SL)"),
+    pre_be_loss_guard_min_hold_sec: Optional[float] = Query(None, ge=0.0, le=3600.0, description="Min hold seconds after entry (default 60)"),
+    pre_be_loss_guard_max_age_sec: Optional[float] = Query(None, ge=60.0, le=86400.0, description="Stale protection — not triggered beyond this time (default 7200=2h)"),
+    # ── ★ Reverse Drift Exit (2026-05-16 owner direct request) ──
+    reverse_drift_exit_enabled: Optional[bool] = Query(None, description="Reverse Drift Exit: cut when drifting back from peak (complements pre_be_stall, triggers regardless of ATR)"),
+    reverse_drift_peak_min_pct: Optional[float] = Query(None, ge=0.01, le=1.0, description="Trigger peak min % (default 0.10)"),
+    reverse_drift_peak_max_pct: Optional[float] = Query(None, ge=0.05, le=2.0, description="Trigger peak max % (default 0.35 = below BE_trigger 0.4, 0.05 gap)"),
+    reverse_drift_min_since_peak_sec: Optional[float] = Query(None, ge=30.0, le=1800.0, description="Min stall time after peak in seconds (default 180)"),
+    reverse_drift_max_since_peak_sec: Optional[float] = Query(None, ge=300.0, le=86400.0, description="Max time after peak in seconds (default 1800=30min, beyond this=stale → not triggered)"),
+    reverse_drift_pct: Optional[float] = Query(None, ge=0.01, le=1.0, description="Reversal threshold % (ATR adaptation OFF or floor, default 0.26)"),
+    reverse_drift_atr_adaptive_enabled: Optional[bool] = Query(None, description="ATR-based adaptive threshold ON/OFF (default ON)"),
+    reverse_drift_atr_multiplier: Optional[float] = Query(None, ge=0.05, le=1.0, description="atr_pct × multiplier = threshold (default 0.2)"),
+    reverse_drift_atr_cap_pct: Optional[float] = Query(None, ge=0.1, le=2.0, description="Adaptive threshold cap (default 0.4)"),
+    # ── ★ Late-chase block (Overextension) — 2026-06-07 owner (live ON) ──
+    overextension_enabled: Optional[bool] = Query(None, description="Late-chase penalty ON/OFF: top of 24H range (LONG)/bottom (SHORT) + large move = chasing an exhausted trend → conviction penalty (default ON)"),
+    overextension_range_pos_pct: Optional[float] = Query(None, ge=0.5, le=1.0, description="LONG trigger position in 24H range (default 0.85 = top 15%). SHORT uses 1-this"),
+    overextension_min_move_pct: Optional[float] = Query(None, ge=0.0, le=50.0, description="Trigger min 24H move |%| (default 8.0, excludes small moves)"),
+    overextension_penalty: Optional[float] = Query(None, ge=0.0, le=50.0, description="Conviction penalty points (default 10)"),
+    overextension_adx_exempt: Optional[float] = Query(None, ge=0.0, le=100.0, description="ADX ≥ this = strong breakout → penalty exempt (default 30, 0=no exemption)"),
+    blowoff_filter_enabled: Optional[bool] = Query(None, description="[#1 late filter] Block chasing 24h blow-off spikes/dumps ON/OFF (default OFF, no ADX exemption)"),
+    blowoff_move_pct: Optional[float] = Query(None, ge=5, le=300, description="[#1] 24h |move| ≥ this %=blow-off candidate (default 30)"),
+    blowoff_penalty: Optional[float] = Query(None, ge=0, le=100, description="[#1] Base penalty (default 20)"),
+    blowoff_extreme_pct: Optional[float] = Query(None, ge=10, le=500, description="[#1] Extreme move % (max penalty, default 80)"),
+    blowoff_max_penalty: Optional[float] = Query(None, ge=0, le=150, description="[#1] Extreme max penalty (default 40)"),
+    blowoff_chase_only: Optional[bool] = Query(None, description="[#1] True=penalize chase (same direction) only, fade exempt (default True)"),
+    # 🎯 Inflection setup score — 2026-06-12 owner "the score betrays the chart"
+    inflection_setup_enabled: Optional[bool] = Query(None, description="Inflection setup score ON/OFF: position (move)×momentum → top-stall LONG penalty/SHORT bonus, bottom-inflection LONG bonus, wall-riding exempt (default OFF)"),
+    inflection_setup_weight: Optional[float] = Query(None, ge=0.0, le=60.0, description="Inflection modifier max magnitude W (default 20)"),
+    inflection_setup_cap: Optional[float] = Query(None, ge=0.0, le=60.0, description="Output clamp ±cap (default 20)"),
+    inflection_setup_base: Optional[float] = Query(None, ge=0.0, le=1.0, description="Base adjustment from position alone (default 0.45)"),
+    inflection_setup_slope_scale: Optional[float] = Query(None, ge=0.05, le=5.0, description="slope15m tanh normalization scale % (default 0.40)"),
+    # 🎣 Retest setup score (2026-06-12 owner/sibling) — breakout→pullback→support = good entry spot
+    retest_setup_enabled: Optional[bool] = Query(None, description="Retest bonus ON/OFF: breakout→pullback→support+turning = good entry spot bonus (default OFF)"),
+    retest_setup_weight: Optional[float] = Query(None, ge=0.0, le=40.0, description="Retest bonus max magnitude (default 12)"),
+    retest_setup_turn_bonus: Optional[float] = Query(None, ge=0.0, le=20.0, description="Extra bonus on turning after pullback (default 4)"),
+    retest_retr_lo: Optional[float] = Query(None, ge=0.0, le=1.0, description="Min pullback ratio, below=not a top-chase signal (default 0.30)"),
+    retest_retr_hi: Optional[float] = Query(None, ge=0.0, le=1.5, description="Ideal pullback upper bound, +0.3 over=too-deep (default 0.90)"),
+    # 🌋 Volatility-awakening SL adaptation (2026-06-11 owner "set it far and trail") — widening SL auto-shrinks size↓ to fix risk
+    awaken_sl_enabled: Optional[bool] = Query(None, description="Volatility-awakening SL adaptation: on awakening + Day-aligned, widen SL + auto-shrink size (fixed risk) (default OFF)"),
+    awaken_sl_mode: Optional[str] = Query(None, description="SL distance basis: atr / structure / both (default both=the farther one)"),
+    awaken_atr_ratio: Optional[float] = Query(None, ge=1.0, le=5.0, description="Awakening判定 current/past ATR ratio (default 1.3)"),
+    awaken_atr_lookback: Optional[int] = Query(None, ge=10, le=100, description="Past ATR average bar count H4 (default 20)"),
+    awaken_max_sl_mult: Optional[float] = Query(None, ge=1.0, le=5.0, description="SL max multiplier to prevent unlimited expansion (default 2.5)"),
+    awaken_require_day_align: Optional[bool] = Query(None, description="Only Day (coin D1) alignment qualifies to endure (default True, excludes against/undecided)"),
+    awaken_swing_lookback: Optional[int] = Query(None, ge=3, le=50, description="Structure-point (awakening foot) swing search bars (default 10)"),
+    awaken_atr_buffer: Optional[float] = Query(None, ge=0.0, le=3.0, description="ATR buffer multiplier on the structure point (default 0.5)"),
+    # ② Late ceiling penalty (2026-06-09 owner "90+=late=50↓, wall-riding exception")
+    conviction_ceiling_enabled: Optional[bool] = Query(None, description="② Late ceiling penalty: cap conviction 90+ down to target (default OFF)"),
+    conviction_ceiling_start: Optional[float] = Query(None, ge=50.0, le=150.0, description="conviction ≥ this = late candidate (default 90)"),
+    conviction_ceiling_target: Optional[float] = Query(None, ge=0.0, le=100.0, description="Cap late entries to this score (default 50, below 65=blocked)"),
+    conviction_ceiling_adx_exempt: Optional[float] = Query(None, ge=0.0, le=100.0, description="ADX ≥ this = wall-riding exempt (default 30, 0=no exemption)"),
+    # ★ Headroom penalty (2026-06-09 owner "penalize even if the direction is right but there's nowhere to go")
+    headroom_penalty_enabled: Optional[bool] = Query(None, description="Headroom penalty: penalize entries right at resistance/support, RSI extremes, BB band edge (default OFF)"),
+    headroom_sr_penalty: Optional[float] = Query(None, ge=0.0, le=30.0, description="LONG right at resistance / SHORT right at support penalty (default 6)"),
+    headroom_sr_near_pct: Optional[float] = Query(None, ge=0.1, le=10.0, description="Within this % of resistance/support = no headroom (default 1.5)"),
+    headroom_rsi_penalty: Optional[float] = Query(None, ge=0.0, le=30.0, description="LONG overbought / SHORT oversold penalty (default 6)"),
+    headroom_rsi_overbought: Optional[float] = Query(None, ge=50.0, le=100.0, description="LONG: RSI ≥ this = nowhere to go (default 70)"),
+    headroom_rsi_oversold: Optional[float] = Query(None, ge=0.0, le=50.0, description="SHORT: RSI ≤ this = nowhere to go (default 30)"),
+    headroom_bb_penalty: Optional[float] = Query(None, ge=0.0, le=30.0, description="LONG BB upper / SHORT BB lower penalty (default 4)"),
+    headroom_bb_hi_pctb: Optional[float] = Query(None, ge=0.5, le=1.5, description="%b ≥ this = band upper (default 0.80)"),
+    headroom_bb_lo_pctb: Optional[float] = Query(None, ge=-0.5, le=0.5, description="%b ≤ this = band lower (default 0.20)"),
+    # ── 🌊 Macro-down active SHORT entry, stage 2 (Macro Short Timing) — 2026-06-11 owner "complete the waterway" ──
+    macro_short_timing_enabled: Optional[bool] = Query(None, description="Macro-down 2-stage: macro RISK_OFF + 5m bounce rollover = active SHORT entry (bonus). SHORT-only, late-chase prevention (default OFF)"),
+    macro_short_timing_delta: Optional[float] = Query(None, ge=0.0, le=40.0, description="SHORT conviction bonus magnitude (default 12)"),
+    macro_short_timing_min_signals: Optional[int] = Query(None, ge=1, le=3, description="Min of 3 rollover signals (turn negative/MACD<0/PA) to meet (default 2)"),
+    macro_short_timing_bounce_pct: Optional[float] = Query(None, ge=0.0, le=5.0, description="Premise of 'bounce exists' — min % bounce to a high after a 5m low (default 0.3)"),
+    macro_short_timing_lookback: Optional[int] = Query(None, ge=6, le=40, description="5m bounce search bars (default 12)"),
+    # ── ★ Regime-counter holding exit P3 (2026-06-06 owner) — fix for missing router wiring (2026-06-07) ──
+    macro_exit_enabled: Optional[bool] = Query(None, description="Regime-counter holding exit P3: move RISK_ON+SHORT / RISK_OFF+LONG holdings to a near SL exit (default OFF, exit guard)"),
+    macro_exit_breadth_min: Optional[int] = Query(None, ge=5, le=10, description="Trigger breadth STRONG N/10 (default 8 = only when certain)"),
+    macro_exit_sl_cushion_pct: Optional[float] = Query(None, ge=0.05, le=2.0, description="SL distance from current price % (default 0.15, smaller=quicker exit)"),
+    macro_exit_strong_coin_exempt: Optional[bool] = Query(None, description="Individual-strength exception: hold even against the macro if in profit (default ON)"),
+    macro_exit_exempt_min_roe: Optional[float] = Query(None, ge=0.0, le=20.0, description="Exception min price ROE% (default 0 = always exempt if in profit)"),
+    # ── ★ Batch fix for missing router wiring (2026-06-07) — 12 fields that had dataclass+UI but were missing from POST (BB-wall-ride/regime-compass-P2/final5m/micro1m/multiBE) ──
+    bb_block_trend_bypass_adx: Optional[float] = Query(None, ge=0.0, le=100.0, description="BB wall-riding: ADX ≥ this = strong trend bypasses BB-extreme block (0=disabled)"),
+    bb_trend_bypass_require_di: Optional[bool] = Query(None, description="BB wall-riding ② require direction confirmation (DI)"),
+    bb_trend_bypass_macd_min: Optional[float] = Query(None, ge=0.0, le=10.0, description="BB wall-riding ③ MACD momentum tolerance (0=disabled)"),
+    final_30m15m_bypass_conviction: Optional[float] = Query(None, ge=0, le=200, description="final_30m15m score-absorb — if conviction ≥ this, block is exempt (0=OFF, e.g. 75)"),
+    final_30m15m_bypass_include_regime: Optional[bool] = Query(None, description="Include macro-counter (regime_opposed) in score-absorb too (True=include / False=exclude, existing)"),
+    final_d1_bypass_conviction: Optional[float] = Query(None, ge=0, le=200, description="D1 score-absorb — if conviction ≥ this, the D1-counter block is exempt (0=OFF, e.g. 78). Backed by exit guards"),
+    final_d1_recent5_override_enabled: Optional[bool] = Query(None, description="final_d1 recent-5-bar override — when D1=UPTREND is a misread (lookback=5 afterimage), if the last 5 daily bars are clearly DOWN, let SHORT pass (default OFF)"),
+    final_d1_recent5_drop_pct: Optional[float] = Query(None, ge=0, le=50, description="If the last 5 daily bars' change ≤ -this(%), ignore the UPTREND label and let SHORT pass (e.g. 1.0)"),
+    d1_reality_demote_enabled: Optional[bool] = Query(None, description="Fix D — D1 trend label reality check: if labeled UPTREND but the last 5 daily bars ≤ -drop%, demote to SIDEWAYS (remove trend-alignment LONG credit). Blocks falling-knife LONGs, corrects the card label. default OFF"),
+    d1_reality_demote_drop_pct: Optional[float] = Query(None, ge=0, le=50, description="If the last 5 daily bars' change ≤ -this(%), demote UPTREND→SIDEWAYS (e.g. 1.0)"),
+    guard_score_total_cap_enabled: Optional[bool] = Query(None, description="[patch v1] Cap the total of guard bonus points ON/OFF (default OFF)"),
+    guard_score_total_cap: Optional[float] = Query(None, ge=5, le=100, description="[patch v1] Total clamp ±N (default 30)"),
+    conviction_ceiling_post_guards: Optional[bool] = Query(None, description="[patch v1] Apply the late ceiling after summing base+guards (default OFF)"),
+    final_bypass_use_base: Optional[bool] = Query(None, description="[patch v1] Base the score-absorb bypass on base conviction (default OFF)"),
+    final_5m_simple_check_enabled: Optional[bool] = Query(None, description="Check 5M RSI/MACD/BB agreement right before entry"),
+    final_5m_simple_min_score: Optional[int] = Query(None, ge=0, le=3, description="Pass when ≥ N of the 3 5M signals agree"),
+    final_5m_bb_trend_bypass_enabled: Optional[bool] = Query(None, description="final_5m BB wall-riding exempt — with a strong trend (ADX+DI), pass even at a BB extreme (SHORT bottom/LONG top). default OFF"),
+    final_d1_alignment_check_enabled: Optional[bool] = Query(None, description="Require D1 alignment — block entry when the Day candle is the opposite direction (OFF=ignore Day candles shaken by events, 2026-06-07 operator)"),
+    final_align_regime_override_enabled: Optional[bool] = Query(None, description="Macro-alignment override — on a clear crash (RISK_OFF), the final gate follows the macro direction instead of the higher TF (SHORT-aligned passes / LONG falling-knife blocked, 2026-06-07)"),
+    macro_compass_enabled: Optional[bool] = Query(None, description="Regime compass P2 (RECOVERING bonus, default OFF paper)"),
+    macro_recovering_conv_delta: Optional[float] = Query(None, ge=-50.0, le=50.0, description="RECOVERING LONG bonus / SHORT penalty magnitude (0=paper)"),
+    macro_recovering_require_di_adx: Optional[bool] = Query(None, description="Dead-cat defense: bonus only with a +DI flip + ADX together"),
+    macro_recovering_min_adx: Optional[float] = Query(None, ge=0.0, le=100.0, description="Min ADX to confirm recovery"),
+    micro_1m_body_min_pct: Optional[float] = Query(None, ge=0.0, le=5.0, description="Filter weak 1M dojis — min body % for a real pushing bar"),
+    multi_be_lock_atr_adaptive_enabled: Optional[bool] = Query(None, description="Multi BE-lock ATR-multiplier mode ON/OFF"),
+    multi_be_lock_atr_min_stage1_trigger_pct: Optional[float] = Query(None, ge=0.0, le=5.0, description="Multi BE-lock stage1 trigger floor %"),
+    multi_be_lock_atr_max_stage1_trigger_pct: Optional[float] = Query(None, ge=0.0, le=20.0, description="[2026-06-13] Multi BE-lock stage1 trigger cap % — even extreme ATR locks BE at +N% (0=no cap, default 3.0)"),
+    # ── ★ Entry Grace Period (2026-05-18 owner vision #6) — time to read the mood after entry ──
+    entry_grace_period_sec: Optional[float] = Query(None, ge=0.0, le=3600.0, description="Disable pre_be_stall + reverse_drift guards for N seconds after entry (buys time to tell A/B apart). 0=OFF, 300=5min recommended. Doesn't affect be_stall/SL/long_hold."),
+    market_bias_grace_exit_enabled: Optional[bool] = Query(None, description="[operator vision #6 aux] During the grace period, force exit immediately when an opposite market_bias dominance is detected (avoid pattern A). default OFF. Must be on together with entry_grace_period_sec to trigger."),
+    news_grace_exit_enabled: Optional[bool] = Query(None, description="[operator vision #6 aux — news revival] Force exit during the grace period when news sentiment is strongly opposite. default OFF. news_sentiment.focus_enabled (/api/news-sentiment/config) must also be on to trigger."),
+    news_grace_exit_threshold: Optional[float] = Query(None, ge=0.1, le=1.0, description="[operator vision #6 aux] news_grace_exit trigger threshold |sentiment| (default 0.5)"),
+    # ── ★★★★ [2026-05-18 owner vision #6 option B] Time-independent OR condition ──
+    exit_consensus_enabled: Optional[bool] = Query(None, description="[operator vision #6 option B] Time-independent OR condition. When reverse_drift/pre_be_stall fires, combine the peer's + news's opinion. Same direction=hold (endure) / opposite=exit (follow the guard). Works without a time grace. default OFF."),
+    exit_consensus_news_threshold: Optional[float] = Query(None, ge=0.1, le=1.0, description="[operator vision #6 option B] exit_consensus news sentiment strength threshold (default 0.3, mild)"),
     # ── Long Hold Timeout (3-tier, 2026-04-25) ──
     long_hold_timeout_enabled: Optional[bool] = Query(None, description="Long Hold Timeout (3-tier) ON/OFF"),
-    long_hold_timeout_tier1_min: Optional[float] = Query(None, ge=0, le=99999, description="Tier1: 시간(분) — 0=비활성, 9999=사실상 OFF"),
-    long_hold_timeout_tier1_peak_pct: Optional[float] = Query(None, ge=0.01, le=2.0, description="Tier1: peak < 임계(%) 시 컷"),
-    long_hold_timeout_tier2_min: Optional[float] = Query(None, ge=0, le=99999, description="Tier2: 시간(분) — 0=비활성, 9999=사실상 OFF"),
-    long_hold_timeout_tier2_peak_pct: Optional[float] = Query(None, ge=0.01, le=2.0, description="Tier2: peak < 임계(%) 시 컷"),
-    long_hold_timeout_tier3_min: Optional[float] = Query(None, ge=0, le=99999, description="Tier3: 시간(분) — BE-distant 컷 (default 30, 9999=OFF)"),
-    long_hold_timeout_tier3_peak_pct: Optional[float] = Query(None, ge=0.01, le=2.0, description="Tier3: peak < 임계(%) 시 컷 (default 0.2)"),
-    # ── ★ Entry Expectation (2026-05-14 부모 — 진입 기대치 메커니즘) ──
-    entry_expectation_enabled: Optional[bool] = Query(None, description="진입 시 primary_tf(H1) 구조로 reward/risk 산정 + 거래소 TP/SL 일원화 ON/OFF"),
-    expectation_progress_exit_enabled: Optional[bool] = Query(None, description="진행률 기반 청산 (LHT 시간컷 대체) ON/OFF"),
-    expectation_progress_t1_min: Optional[float] = Query(None, ge=1, le=600, description="진행률 컷 T1: N분 경과 (default 15)"),
-    expectation_progress_t1_pct: Optional[float] = Query(None, ge=0, le=100, description="진행률 컷 T1: 목표 진행률 < M% 면 컷 (default 30)"),
-    expectation_progress_t2_min: Optional[float] = Query(None, ge=1, le=600, description="진행률 컷 T2: N분 경과 (default 30)"),
-    expectation_progress_t2_pct: Optional[float] = Query(None, ge=0, le=100, description="진행률 컷 T2: 목표 진행률 < M% 면 컷 (default 50)"),
-    # ── ★ 음수 progress 즉시 컷 (2026-05-15 부모) ──
-    expectation_progress_neg_cut_enabled: Optional[bool] = Query(None, description="음수 progress 즉시 컷 (손실 방향 명백시 빠른 컷)"),
-    expectation_progress_neg_cut_pct: Optional[float] = Query(None, ge=-1000.0, le=0.0, description="진행률 임계 (음수, default -50 = 목표 반대로 50% 진행)"),
-    expectation_progress_neg_cut_min: Optional[float] = Query(None, ge=1, le=600, description="음수 컷 최소 보유시간(분, default 30)"),
-    # ── ★ Entry Quality Gates (2026-05-15 부모) ──
-    entry_expectation_gate_enabled: Optional[bool] = Query(None, description="#1 RR/risk 게이트: 임계 미달 진입 차단 ON/OFF (entry_expectation_enabled 필요)"),
-    entry_expectation_min_rr: Optional[float] = Query(None, ge=0, le=10, description="RR floor — 이 값 미만이면 차단 (default 1.0, 운영자 운영 완화)"),
-    entry_expectation_min_reward_pct: Optional[float] = Query(None, ge=0, le=10, description="reward_pct floor — 예상 도달 %가 이 값 미만이면 차단 (default 0.8, 5-14 설계도 Gate 2 명세)"),
-    entry_expectation_max_risk_pct: Optional[float] = Query(None, ge=0.5, le=30, description="risk_pct cap — 이 값(%) 초과면 차단 (default 6.0, 5/15 SIREN 사고 안전망)"),
-    # ── 🌍 [2026-06-02 거시 레짐 방향 게이트] Market Breadth (대표10 쓰나미) ──
-    breadth_strong_n: Optional[int] = Query(None, ge=1, le=10, description="STRONG 임계 N/10 (default 8). N개 코인 일제=강한 쓰나미"),
-    breadth_mid_n: Optional[int] = Query(None, ge=1, le=10, description="MID 임계 N/10 (default 6)"),
-    breadth_aligned_strong: Optional[float] = Query(None, ge=0, le=100, description="순행 STRONG 가점 (default 12, 흐름따름=기회)"),
-    breadth_aligned_mid: Optional[float] = Query(None, ge=0, le=100, description="순행 MID 가점 (default 6)"),
-    breadth_counter_strong: Optional[float] = Query(None, ge=-100, le=0, description="역행 STRONG 감점 (default -25, 떨어지는칼=차단)"),
-    breadth_counter_mid: Optional[float] = Query(None, ge=-100, le=0, description="역행 MID 감점 (default -7)"),
-    regime_counter_strong_cap_enabled: Optional[bool] = Query(None, description="STRONG 역행 시 conviction cap ON/OFF (떨어지는칼 점수 강제하향)"),
-    regime_counter_strong_cap: Optional[float] = Query(None, ge=0, le=100, description="STRONG 역행 conviction cap 값 (default 50)"),
-    regime_short_release_enabled: Optional[bool] = Query(None, description="SHORT 해방 — 거시 하락 시 SHORT 순행 통과 (두 다리) ON/OFF"),
-    regime_short_release_n: Optional[int] = Query(None, ge=1, le=10, description="SHORT 통과 거시 하락 코인수 (default 6, MID임계 이하로 RISK_OFF 시 SHORT 해방)"),
-    # ── 🦵 [2026-06-11] 개별 코인 디커플링 SHORT 해방 ──
-    coin_decouple_enabled: Optional[bool] = Query(None, description="개별 디커플링 SHORT 해방 — BTC와 반대로 무너진 코인에 약자 다리 해방 ON/OFF (default OFF)"),
-    coin_decouple_short_release: Optional[float] = Query(None, ge=0, le=60, description="디커플링 시 코인 구조방향 가점 (btc -20 구멍 상쇄, default 22)"),
-    coin_decouple_long_penalty: Optional[float] = Query(None, ge=0, le=60, description="디커플링 시 역행 다리(떨어지는칼) 페널티 (default 12)"),
-    coin_decouple_min_strength: Optional[float] = Query(None, ge=0, le=1, description="코인 6TF 확신도 최소 (default 0.5, 흔들림 제외)"),
-    coin_decouple_btc_cache_sec: Optional[float] = Query(None, ge=10, le=600, description="BTC 6TF 방향 캐시 TTL초 (default 120)"),
-    # ── 🦵🌊 [2026-06-12 부모] 모멘텀 decouple — coin_decouple 의 선행 버전 (변곡 up 검출, conviction 해방) ──
-    mom_decouple_enabled: Optional[bool] = Query(None, description="모멘텀 decouple — 천장서 코인 혼자 모멘텀死 시 약자다리 conviction 해방 ON/OFF (default OFF)"),
-    mom_decouple_weight: Optional[float] = Query(None, ge=0, le=60, description="conviction 가감 스케일 W (default 30, 50점격차 flip)"),
-    mom_decouple_cap: Optional[float] = Query(None, ge=0, le=60, description="출력 클램프 ±cap (default 35)"),
-    mom_decouple_base: Optional[float] = Query(None, ge=0, le=1, description="위치만의 기본 가감 base (default 0.45)"),
-    mom_decouple_up_thr: Optional[float] = Query(None, ge=0, le=1, description="모멘텀 |up| 최소 — 이하면 꺾임 아님 (default 0.40)"),
-    mom_decouple_div_thr: Optional[float] = Query(None, ge=0, le=2, description="BTC 모멘텀 대비 발산 최소 — 시장 동반눌림 제외 (default 0.20)"),
-    mom_decouple_pos_hi: Optional[float] = Query(None, ge=0, le=1, description="SHORT 해방 위치 하한(천장) (default 0.60)"),
-    mom_decouple_pos_lo: Optional[float] = Query(None, ge=0, le=1, description="LONG 해방 위치 상한(바닥) (default 0.40)"),
-    mom_decouple_btc_cache_sec: Optional[float] = Query(None, ge=10, le=600, description="BTC 5m 모멘텀 캐시 TTL초 (default 60)"),
-    # ── 🔄 [2026-06-02 Phase 3] M/W/H&S 반전 점수 ──
-    reversal_score: Optional[float] = Query(None, ge=0, le=50, description="반전(M/W/H&S) 점수 (default 10). 순행+/역행−, 형성중 ×0.5"),
-    # ── 🕯️ [2026-06-03 부모] TF 추세 가중 (H4/H1/30M/15M/5M) ──
-    h4_trend_weight: Optional[float] = Query(None, ge=0, le=3, description="H4(4시간봉) 추세 가중 (default 1.0, ×6=최대)"),
-    h1_trend_weight: Optional[float] = Query(None, ge=0, le=3, description="H1 추세 가중 (default 1.0)"),
-    m30_trend_weight: Optional[float] = Query(None, ge=0, le=3, description="30M 추세 가중 (default 1.0)"),
-    m15_trend_weight: Optional[float] = Query(None, ge=0, le=3, description="15M 추세 가중 (default 1.0)"),
-    m5_trend_weight: Optional[float] = Query(None, ge=0, le=3, description="5M 추세 가중 (default 1.0, 0=끔)"),
-    breadth_dir_chg1h_pct: Optional[float] = Query(None, ge=0.05, le=2.0, description="breadth 방향판정 1h 변화율 임계 % (default 0.3)"),
-    breadth_dir_ema_pct: Optional[float] = Query(None, ge=0.02, le=1.0, description="breadth 방향판정 5분EMA 임계 % (default 0.10)"),
-    # [2026-05-23 부모] 변동성 도달가능성 게이트 — "충분한 등락폭으로 TP 갈 수 있나"
-    entry_volatility_gate_enabled: Optional[bool] = Query(None, description="변동성 도달가능성 게이트 ON/OFF. reward 거리(저항선)는 멀어도 변동성 죽으면 못 감 — 횡보 죽은 자리 차단"),
-    entry_volatility_lookback_tf: Optional[str] = Query(None, description="등락폭 측정 TF (default 5분봉)"),
-    entry_volatility_lookback_bars: Optional[int] = Query(None, ge=3, le=100, description="최근 N봉 등락폭 측정 (default 12 = 1시간)"),
-    entry_volatility_min_reach_ratio: Optional[float] = Query(None, ge=0.1, le=3.0, description="최근등락폭/reward거리 ≥ 이 비율이어야 진입 (default 0.6)"),
-    entry_flip_require_alignment: Optional[bool] = Query(None, description="#2 FLIP alignment: FLIP 방향이 H1+30M 둘 다 반대면 차단 ON/OFF"),
-    # ── ★ Long Hold Persistence (2026-04-26 부모님 "이윤 못내면 못나가") ──
-    trend_reversal_enabled: Optional[bool] = Query(None, description="추세 반전 자동 청산 ON/OFF"),
-    bb_macd_sw_enabled: Optional[bool] = Query(None, description="SIDEWAYS BB+MACD 자동 청산 ON/OFF"),
-    bb_macd_sw_min_hold_hours: Optional[float] = Query(None, ge=0.1, le=99.0, description="bb_macd_sw 발동 최소 보유(h)"),
-    bb_macd_sw_pnl_low: Optional[float] = Query(None, ge=-99.0, le=0.0, description="bb_macd_sw 발동 pnl 하한(%)"),
-    bb_macd_sw_pnl_high: Optional[float] = Query(None, ge=0.0, le=99.0, description="bb_macd_sw 발동 pnl 상한(%)"),
-    caution_sideways_profit_secure_enabled: Optional[bool] = Query(None, description="횡보+이윤 자동 익절 ON/OFF"),
-    caution_min_hold_sec: Optional[float] = Query(None, ge=0, le=86400, description="caution 발동 최소 보유(초)"),
-    caution_fee_rate: Optional[float] = Query(None, ge=0.0, le=0.01, description="caution 수수료율"),
-    caution_min_profit_multiplier: Optional[float] = Query(None, ge=0.1, le=100.0, description="caution 최소 순이익 = 수수료 × N"),
-    quick_tp_enabled: Optional[bool] = Query(None, description="시간 기반 빠른 TP ON/OFF"),
-    quick_tp_min_hold_hours: Optional[float] = Query(None, ge=0.1, le=999.0, description="quick_tp 발동 최소 보유(h)"),
-    quick_tp_min_pnl_pct: Optional[float] = Query(None, ge=0.0, le=99.0, description="quick_tp 발동 최소 pnl(%)"),
-    btc_crash_threshold_pct: Optional[float] = Query(None, ge=-99.0, le=0.0, description="BTC 급락 자동 청산 임계(%)"),
-    btc_emergency_pause_enabled: Optional[bool] = Query(None, description="BTC 급변동 감지 ON/OFF"),
-    btc_emergency_pause_threshold_pct: Optional[float] = Query(None, ge=0.5, le=99.0, description="발동 임계 (절대값 %, default 5)"),
-    btc_emergency_pause_window_min: Optional[float] = Query(None, ge=1.0, le=120.0, description="체크 윈도우 (분, default 10)"),
-    btc_emergency_mode: Optional[str] = Query(None, description="모드: trend_aligned/pause/close_all"),
-    btc_emergency_aggressive_entry: Optional[bool] = Query(None, description="빈 슬롯 트렌드 방향 진입 가속 ON/OFF"),
-    btc_emergency_aligned_duration_min: Optional[float] = Query(None, ge=1.0, le=1440.0, description="트렌드 정렬 유지 시간 (분, default 120=2h)"),
-    # ★ [2026-04-26] Winners-Only Add — 부모님 "진정한 Autocoin"
-    winners_add_enabled: Optional[bool] = Query(None, description="Winners Add ON/OFF — 자본 추가 시 유리한 코인 증액"),
-    winners_add_capital_threshold_pct: Optional[float] = Query(None, ge=1.0, le=99.0, description="발동 임계 (equity +N% 증가)"),
-    winners_add_min_pnl_pct: Optional[float] = Query(None, ge=0.0, le=99.0, description="1순위 pnl 임계 (%)"),
-    winners_add_max_per_event: Optional[int] = Query(None, ge=1, le=10, description="한 번 발동 최대 코인 수"),
-    winners_add_max_pct_per_coin: Optional[float] = Query(None, ge=1.0, le=999.0, description="코인당 max 추가 = 기존 margin × N%"),
-    winners_add_cooldown_sec: Optional[float] = Query(None, ge=60, le=86400, description="발동 cooldown (초)"),
-    min_sl_pct: Optional[float] = Query(None, ge=0.0001, le=0.5, description="SL 최소 거리 (가격 비율, 0.001=0.1%)"),
-    max_sl_distance_pct: Optional[float] = Query(None, ge=0.5, le=99.9, description="SL 최대 거리 (%, 99=사실상 비활성)"),
-    max_atr_pct: Optional[float] = Query(None, ge=0.5, le=99.0, description="ATR cap (%, 변동성 큰 코인 보호)"),
-    cycle_min_rr: Optional[float] = Query(None, ge=0.1, le=10.0, description="TP/SL 최소 RR (1.0=가드 비활성)"),
-    # ── Min TP fee-guard (2026-05-15 부모, 진입 직후 즉시 TP hit + 수수료 손실 방지) ──
-    min_tp_distance_enabled: Optional[bool] = Query(None, description="Min TP fee-guard: 진입가 옆 TP 금지 (저변동 코인 보호)"),
-    min_tp_distance_pct: Optional[float] = Query(None, ge=0.05, le=2.0, description="Min TP 거리 (%, 수수료 왕복 0.11%×~3=0.30)"),
-    # ── 5m Microtiming Gate (2026-05-16 부모, "BLOCK 말고 WAIT — 정확한 자리에 들어가게") ──
-    microtiming_5m_enabled: Optional[bool] = Query(None, description="5m RSI/MACD/BB 마이크로 타이밍 게이트 (BLOCK 아닌 defer)"),
-    microtiming_5m_min_score: Optional[int] = Query(None, ge=1, le=3, description="3종 중 N개 충족 시 진입 (default 2)"),
-    microtiming_5m_defer_sec: Optional[float] = Query(None, ge=60.0, le=3600.0, description="defer 후 재평가 간격 (s)"),
-    microtiming_5m_max_defers: Optional[int] = Query(None, ge=1, le=10, description="최대 defer 회수 (초과시 자연 만료)"),
-    microtiming_5m_rsi_long_threshold: Optional[float] = Query(None, ge=10.0, le=50.0, description="LONG: 직전 RSI ≤ 이 값 + 상승 변곡"),
-    microtiming_5m_rsi_short_threshold: Optional[float] = Query(None, ge=50.0, le=90.0, description="SHORT: 직전 RSI ≥ 이 값 + 하강 변곡"),
-    microtiming_5m_bb_low_pct: Optional[float] = Query(None, ge=0.0, le=50.0, description="BB 하단권 임계 % (LONG 직전 위치)"),
-    microtiming_5m_bb_recover_pct: Optional[float] = Query(None, ge=0.0, le=80.0, description="BB 회복 임계 % (LONG 현재 위치)"),
-    microtiming_5m_phase_k_exempt: Optional[bool] = Query(None, description="Phase K (regime transition) 진입 면제"),
-    # ── DrawdownShield base (2026-05-16 부모, 미실현 변동이 다른 진입 막는 문제 해결) ──
-    drawdown_shield_use_cash_only: Optional[bool] = Query(None, description="DrawdownShield: True=cash만 (UPL 무시), False=equity (UPL 포함, 기존)"),
-    drawdown_shield_caution_pct: Optional[float] = Query(None, ge=0, le=100, description="DrawdownShield 누적 CAUTION 임계 (%, default 5)"),
-    drawdown_shield_defend_pct: Optional[float] = Query(None, ge=0, le=100, description="누적 DEFEND 임계 (%, default 10)"),
-    drawdown_shield_crisis_pct: Optional[float] = Query(None, ge=0, le=100, description="누적 CRISIS 임계 (%, default 20)"),
-    drawdown_shield_caution_usd: Optional[float] = Query(None, ge=0, le=100000, description="일간 CAUTION 임계 ($, default 30)"),
-    drawdown_shield_defend_usd: Optional[float] = Query(None, ge=0, le=100000, description="일간 DEFEND 임계 ($, default 60)"),
-    drawdown_shield_crisis_usd: Optional[float] = Query(None, ge=0, le=100000, description="일간 CRISIS 임계 ($, default 100)"),
-    drawdown_shield_caution_pen: Optional[float] = Query(None, ge=-100, le=0, description="CAUTION conviction penalty (음수, default -10)"),
+    long_hold_timeout_tier1_min: Optional[float] = Query(None, ge=0, le=99999, description="Tier1: time (min) — 0=disabled, 9999=effectively OFF"),
+    long_hold_timeout_tier1_peak_pct: Optional[float] = Query(None, ge=0.01, le=2.0, description="Tier1: cut when peak < threshold(%)"),
+    long_hold_timeout_tier2_min: Optional[float] = Query(None, ge=0, le=99999, description="Tier2: time (min) — 0=disabled, 9999=effectively OFF"),
+    long_hold_timeout_tier2_peak_pct: Optional[float] = Query(None, ge=0.01, le=2.0, description="Tier2: cut when peak < threshold(%)"),
+    long_hold_timeout_tier3_min: Optional[float] = Query(None, ge=0, le=99999, description="Tier3: time (min) — BE-distant cut (default 30, 9999=OFF)"),
+    long_hold_timeout_tier3_peak_pct: Optional[float] = Query(None, ge=0.01, le=2.0, description="Tier3: cut when peak < threshold(%) (default 0.2)"),
+    # ── ★ Entry Expectation (2026-05-14 owner — entry-expectation mechanism) ──
+    entry_expectation_enabled: Optional[bool] = Query(None, description="On entry, compute reward/risk from primary_tf(H1) structure + unify exchange TP/SL ON/OFF"),
+    expectation_progress_exit_enabled: Optional[bool] = Query(None, description="Progress-based exit (replaces LHT time cut) ON/OFF"),
+    expectation_progress_t1_min: Optional[float] = Query(None, ge=1, le=600, description="Progress cut T1: N minutes elapsed (default 15)"),
+    expectation_progress_t1_pct: Optional[float] = Query(None, ge=0, le=100, description="Progress cut T1: cut if target progress < M% (default 30)"),
+    expectation_progress_t2_min: Optional[float] = Query(None, ge=1, le=600, description="Progress cut T2: N minutes elapsed (default 30)"),
+    expectation_progress_t2_pct: Optional[float] = Query(None, ge=0, le=100, description="Progress cut T2: cut if target progress < M% (default 50)"),
+    # ── ★ Negative-progress instant cut (2026-05-15 owner) ──
+    expectation_progress_neg_cut_enabled: Optional[bool] = Query(None, description="Negative-progress instant cut (quick cut when the loss direction is clear)"),
+    expectation_progress_neg_cut_pct: Optional[float] = Query(None, ge=-1000.0, le=0.0, description="Progress threshold (negative, default -50 = 50% progress opposite the target)"),
+    expectation_progress_neg_cut_min: Optional[float] = Query(None, ge=1, le=600, description="Negative-cut min hold time (min, default 30)"),
+    # ── ★ Entry Quality Gates (2026-05-15 owner) ──
+    entry_expectation_gate_enabled: Optional[bool] = Query(None, description="#1 RR/risk gate: block entries below threshold ON/OFF (requires entry_expectation_enabled)"),
+    entry_expectation_min_rr: Optional[float] = Query(None, ge=0, le=10, description="RR floor — block if below this (default 1.0, relaxed for operations)"),
+    entry_expectation_min_reward_pct: Optional[float] = Query(None, ge=0, le=10, description="reward_pct floor — block if expected reach % is below this (default 0.8, spec Gate 2 of the 5-14 blueprint)"),
+    entry_expectation_max_risk_pct: Optional[float] = Query(None, ge=0.5, le=30, description="risk_pct cap — block if over this (%) (default 6.0, safety net for the 5/15 SIREN incident)"),
+    # ── 🌍 [2026-06-02 macro regime direction gate] Market Breadth (top-10 tsunami) ──
+    breadth_strong_n: Optional[int] = Query(None, ge=1, le=10, description="STRONG threshold N/10 (default 8). N coins in unison = a strong tsunami"),
+    breadth_mid_n: Optional[int] = Query(None, ge=1, le=10, description="MID threshold N/10 (default 6)"),
+    breadth_aligned_strong: Optional[float] = Query(None, ge=0, le=100, description="Aligned STRONG bonus (default 12, following the flow=opportunity)"),
+    breadth_aligned_mid: Optional[float] = Query(None, ge=0, le=100, description="Aligned MID bonus (default 6)"),
+    breadth_counter_strong: Optional[float] = Query(None, ge=-100, le=0, description="Counter STRONG penalty (default -25, falling knife=blocked)"),
+    breadth_counter_mid: Optional[float] = Query(None, ge=-100, le=0, description="Counter MID penalty (default -7)"),
+    regime_counter_strong_cap_enabled: Optional[bool] = Query(None, description="Conviction cap on STRONG counter ON/OFF (force the falling-knife score down)"),
+    regime_counter_strong_cap: Optional[float] = Query(None, ge=0, le=100, description="STRONG counter conviction cap value (default 50)"),
+    regime_short_release_enabled: Optional[bool] = Query(None, description="SHORT release — on a macro decline, let aligned SHORTs pass (two legs) ON/OFF"),
+    regime_short_release_n: Optional[int] = Query(None, ge=1, le=10, description="Macro-decline coin count for SHORT pass (default 6, releases SHORT when RISK_OFF below the MID threshold)"),
+    # ── 🦵 [2026-06-11] Per-coin decoupling SHORT release ──
+    coin_decouple_enabled: Optional[bool] = Query(None, description="Per-coin decoupling SHORT release — release the weaker leg for a coin that collapsed opposite to BTC ON/OFF (default OFF)"),
+    coin_decouple_short_release: Optional[float] = Query(None, ge=0, le=60, description="Bonus for the coin's structural direction on decoupling (offsets the btc -20 hole, default 22)"),
+    coin_decouple_long_penalty: Optional[float] = Query(None, ge=0, le=60, description="Penalty for the counter leg (falling knife) on decoupling (default 12)"),
+    coin_decouple_min_strength: Optional[float] = Query(None, ge=0, le=1, description="Coin 6TF confidence min (default 0.5, excludes wobble)"),
+    coin_decouple_btc_cache_sec: Optional[float] = Query(None, ge=10, le=600, description="BTC 6TF direction cache TTL sec (default 120)"),
+    # ── 🦵🌊 [2026-06-12 owner] Momentum decouple — a leading version of coin_decouple (detects an up inflection, releases conviction) ──
+    mom_decouple_enabled: Optional[bool] = Query(None, description="Momentum decouple — at a top, when a coin's momentum dies alone, release the weaker leg's conviction ON/OFF (default OFF)"),
+    mom_decouple_weight: Optional[float] = Query(None, ge=0, le=60, description="Conviction adjustment scale W (default 30, flips a 50-point gap)"),
+    mom_decouple_cap: Optional[float] = Query(None, ge=0, le=60, description="Output clamp ±cap (default 35)"),
+    mom_decouple_base: Optional[float] = Query(None, ge=0, le=1, description="Base adjustment from position alone (default 0.45)"),
+    mom_decouple_up_thr: Optional[float] = Query(None, ge=0, le=1, description="Momentum |up| min — below this is not a rollover (default 0.40)"),
+    mom_decouple_div_thr: Optional[float] = Query(None, ge=0, le=2, description="Min divergence vs BTC momentum — excludes market-wide pullbacks (default 0.20)"),
+    mom_decouple_pos_hi: Optional[float] = Query(None, ge=0, le=1, description="SHORT release position lower bound (top) (default 0.60)"),
+    mom_decouple_pos_lo: Optional[float] = Query(None, ge=0, le=1, description="LONG release position upper bound (bottom) (default 0.40)"),
+    mom_decouple_btc_cache_sec: Optional[float] = Query(None, ge=10, le=600, description="BTC 5m momentum cache TTL sec (default 60)"),
+    # ── 🔄 [2026-06-02 Phase 3] M/W/H&S reversal score ──
+    reversal_score: Optional[float] = Query(None, ge=0, le=50, description="Reversal (M/W/H&S) score (default 10). Aligned+/counter−, forming ×0.5"),
+    # ── 🕯️ [2026-06-03 owner] TF trend weighting (H4/H1/30M/15M/5M) ──
+    h4_trend_weight: Optional[float] = Query(None, ge=0, le=3, description="H4 (4-hour) trend weight (default 1.0, ×6=max)"),
+    h1_trend_weight: Optional[float] = Query(None, ge=0, le=3, description="H1 trend weight (default 1.0)"),
+    m30_trend_weight: Optional[float] = Query(None, ge=0, le=3, description="30M trend weight (default 1.0)"),
+    m15_trend_weight: Optional[float] = Query(None, ge=0, le=3, description="15M trend weight (default 1.0)"),
+    m5_trend_weight: Optional[float] = Query(None, ge=0, le=3, description="5M trend weight (default 1.0, 0=off)"),
+    breadth_dir_chg1h_pct: Optional[float] = Query(None, ge=0.05, le=2.0, description="breadth direction 1h change-rate threshold % (default 0.3)"),
+    breadth_dir_ema_pct: Optional[float] = Query(None, ge=0.02, le=1.0, description="breadth direction 5-min EMA threshold % (default 0.10)"),
+    # [2026-05-23 owner] Volatility-reachability gate — "is there enough range to reach TP"
+    entry_volatility_gate_enabled: Optional[bool] = Query(None, description="Volatility-reachability gate ON/OFF. Even if the reward distance (resistance) is far, dead volatility can't reach it — blocks dead ranging spots"),
+    entry_volatility_lookback_tf: Optional[str] = Query(None, description="TF for measuring range (default 5-min)"),
+    entry_volatility_lookback_bars: Optional[int] = Query(None, ge=3, le=100, description="Measure range over the last N bars (default 12 = 1 hour)"),
+    entry_volatility_min_reach_ratio: Optional[float] = Query(None, ge=0.1, le=3.0, description="Enter only if recent-range/reward-distance ≥ this ratio (default 0.6)"),
+    entry_flip_require_alignment: Optional[bool] = Query(None, description="#2 FLIP alignment: block if the FLIP direction is opposite to both H1+30M ON/OFF"),
+    # ── ★ Long Hold Persistence (2026-04-26 owner "can't leave without a profit") ──
+    trend_reversal_enabled: Optional[bool] = Query(None, description="Trend-reversal auto exit ON/OFF"),
+    bb_macd_sw_enabled: Optional[bool] = Query(None, description="SIDEWAYS BB+MACD auto exit ON/OFF"),
+    bb_macd_sw_min_hold_hours: Optional[float] = Query(None, ge=0.1, le=99.0, description="bb_macd_sw trigger min hold (h)"),
+    bb_macd_sw_pnl_low: Optional[float] = Query(None, ge=-99.0, le=0.0, description="bb_macd_sw trigger pnl lower bound (%)"),
+    bb_macd_sw_pnl_high: Optional[float] = Query(None, ge=0.0, le=99.0, description="bb_macd_sw trigger pnl upper bound (%)"),
+    caution_sideways_profit_secure_enabled: Optional[bool] = Query(None, description="Ranging + in-profit auto take-profit ON/OFF"),
+    caution_min_hold_sec: Optional[float] = Query(None, ge=0, le=86400, description="caution trigger min hold (sec)"),
+    caution_fee_rate: Optional[float] = Query(None, ge=0.0, le=0.01, description="caution fee rate"),
+    caution_min_profit_multiplier: Optional[float] = Query(None, ge=0.1, le=100.0, description="caution min net profit = fee × N"),
+    quick_tp_enabled: Optional[bool] = Query(None, description="Time-based quick TP ON/OFF"),
+    quick_tp_min_hold_hours: Optional[float] = Query(None, ge=0.1, le=999.0, description="quick_tp trigger min hold (h)"),
+    quick_tp_min_pnl_pct: Optional[float] = Query(None, ge=0.0, le=99.0, description="quick_tp trigger min pnl (%)"),
+    btc_crash_threshold_pct: Optional[float] = Query(None, ge=-99.0, le=0.0, description="BTC crash auto-exit threshold (%)"),
+    btc_emergency_pause_enabled: Optional[bool] = Query(None, description="BTC sudden-move detection ON/OFF"),
+    btc_emergency_pause_threshold_pct: Optional[float] = Query(None, ge=0.5, le=99.0, description="Trigger threshold (absolute %, default 5)"),
+    btc_emergency_pause_window_min: Optional[float] = Query(None, ge=1.0, le=120.0, description="Check window (min, default 10)"),
+    btc_emergency_mode: Optional[str] = Query(None, description="Mode: trend_aligned/pause/close_all"),
+    btc_emergency_aggressive_entry: Optional[bool] = Query(None, description="Accelerate trend-direction entries into empty slots ON/OFF"),
+    btc_emergency_aligned_duration_min: Optional[float] = Query(None, ge=1.0, le=1440.0, description="Trend-alignment hold time (min, default 120=2h)"),
+    # ★ [2026-04-26] Winners-Only Add — owner's "true Autocoin"
+    winners_add_enabled: Optional[bool] = Query(None, description="Winners Add ON/OFF — add to favorable coins as capital grows"),
+    winners_add_capital_threshold_pct: Optional[float] = Query(None, ge=1.0, le=99.0, description="Trigger threshold (equity +N% increase)"),
+    winners_add_min_pnl_pct: Optional[float] = Query(None, ge=0.0, le=99.0, description="Top-priority pnl threshold (%)"),
+    winners_add_max_per_event: Optional[int] = Query(None, ge=1, le=10, description="Max coins per trigger"),
+    winners_add_max_pct_per_coin: Optional[float] = Query(None, ge=1.0, le=999.0, description="Max add per coin = existing margin × N%"),
+    winners_add_cooldown_sec: Optional[float] = Query(None, ge=60, le=86400, description="Trigger cooldown (sec)"),
+    min_sl_pct: Optional[float] = Query(None, ge=0.0001, le=0.5, description="SL min distance (price ratio, 0.001=0.1%)"),
+    max_sl_distance_pct: Optional[float] = Query(None, ge=0.5, le=99.9, description="SL max distance (%, 99=effectively disabled)"),
+    max_atr_pct: Optional[float] = Query(None, ge=0.5, le=99.0, description="ATR cap (%, protects high-volatility coins)"),
+    cycle_min_rr: Optional[float] = Query(None, ge=0.1, le=10.0, description="TP/SL min RR (1.0=guard disabled)"),
+    # ── Min TP fee-guard (2026-05-15 owner, prevents an immediate TP hit + fee loss right after entry) ──
+    min_tp_distance_enabled: Optional[bool] = Query(None, description="Min TP fee-guard: forbid TP right next to entry (protects low-volatility coins)"),
+    min_tp_distance_pct: Optional[float] = Query(None, ge=0.05, le=2.0, description="Min TP distance (%, round-trip fee 0.11%×~3=0.30)"),
+    # ── 5m Microtiming Gate (2026-05-16 owner, "WAIT, don't BLOCK — get in at the exact spot") ──
+    microtiming_5m_enabled: Optional[bool] = Query(None, description="5m RSI/MACD/BB micro-timing gate (defer, not BLOCK)"),
+    microtiming_5m_min_score: Optional[int] = Query(None, ge=1, le=3, description="Enter when ≥ N of the 3 are met (default 2)"),
+    microtiming_5m_defer_sec: Optional[float] = Query(None, ge=60.0, le=3600.0, description="Re-evaluation interval after defer (s)"),
+    microtiming_5m_max_defers: Optional[int] = Query(None, ge=1, le=10, description="Max defer count (expires naturally if exceeded)"),
+    microtiming_5m_rsi_long_threshold: Optional[float] = Query(None, ge=10.0, le=50.0, description="LONG: previous RSI ≤ this + upward inflection"),
+    microtiming_5m_rsi_short_threshold: Optional[float] = Query(None, ge=50.0, le=90.0, description="SHORT: previous RSI ≥ this + downward inflection"),
+    microtiming_5m_bb_low_pct: Optional[float] = Query(None, ge=0.0, le=50.0, description="BB lower-zone threshold % (LONG previous position)"),
+    microtiming_5m_bb_recover_pct: Optional[float] = Query(None, ge=0.0, le=80.0, description="BB recovery threshold % (LONG current position)"),
+    microtiming_5m_phase_k_exempt: Optional[bool] = Query(None, description="Phase K (regime transition) entry exemption"),
+    # ── DrawdownShield base (2026-05-16 owner, fixes unrealized swings blocking other entries) ──
+    drawdown_shield_use_cash_only: Optional[bool] = Query(None, description="DrawdownShield: True=cash only (ignore UPL), False=equity (include UPL, existing)"),
+    drawdown_shield_caution_pct: Optional[float] = Query(None, ge=0, le=100, description="DrawdownShield cumulative CAUTION threshold (%, default 5)"),
+    drawdown_shield_defend_pct: Optional[float] = Query(None, ge=0, le=100, description="Cumulative DEFEND threshold (%, default 10)"),
+    drawdown_shield_crisis_pct: Optional[float] = Query(None, ge=0, le=100, description="Cumulative CRISIS threshold (%, default 20)"),
+    drawdown_shield_caution_usd: Optional[float] = Query(None, ge=0, le=100000, description="Daily CAUTION threshold ($, default 30)"),
+    drawdown_shield_defend_usd: Optional[float] = Query(None, ge=0, le=100000, description="Daily DEFEND threshold ($, default 60)"),
+    drawdown_shield_crisis_usd: Optional[float] = Query(None, ge=0, le=100000, description="Daily CRISIS threshold ($, default 100)"),
+    drawdown_shield_caution_pen: Optional[float] = Query(None, ge=-100, le=0, description="CAUTION conviction penalty (negative, default -10)"),
     drawdown_shield_defend_pen: Optional[float] = Query(None, ge=-100, le=0, description="DEFEND penalty (default -20)"),
     drawdown_shield_crisis_pen: Optional[float] = Query(None, ge=-100, le=0, description="CRISIS penalty (default -30)"),
-    # ── [2026-05-16 부모] Same-coin Flip Cooldown + 5m Raw Body Guard + Imminent Flip ──
-    same_coin_flip_cooldown_enabled: Optional[bool] = Query(None, description="같은 코인 LONG↔SHORT 신규 진입 N분 cooldown ON/OFF"),
-    same_coin_flip_cooldown_min: Optional[int] = Query(None, ge=0, le=600, description="cooldown 분 (60=기본)"),
-    # ── ★ [2026-06-05 부모] 1M 마이크로 체크 ──
-    micro_1m_check_enabled: Optional[bool] = Query(None, description="1M 마이크로 체크 ON/OFF — 진입 직전 1분봉 타이밍 검증"),
-    micro_1m_candle_check: Optional[bool] = Query(None, description="① 마지막 1M 봉 방향 체크"),
-    micro_1m_candle_trend_exempt_adx: Optional[float] = Query(None, ge=0, le=100, description="추세 강하면(ADX≥이값=벽타기) 1M 봉 방향 면제 → 진입 지연 방지 (0=비활성, 예 30)"),
-    micro_1m_volume_check: Optional[bool] = Query(None, description="② 1M 거래량 연속 감소 체크"),
-    micro_1m_rsi_check: Optional[bool] = Query(None, description="③ 1M RSI 극단 체크"),
-    micro_1m_rsi_long_max: Optional[float] = Query(None, ge=50, le=90, description="LONG RSI 과열 임계 (기본 70)"),
-    micro_1m_rsi_short_min: Optional[float] = Query(None, ge=10, le=50, description="SHORT RSI 과열 임계 (기본 30)"),
-    micro_1m_vol_decline_bars: Optional[int] = Query(None, ge=2, le=10, description="거래량 연속 감소 봉수 (기본 3)"),
-    raw_body_guard_enabled: Optional[bool] = Query(None, description="5m raw body 가드 ON/OFF — 최근 N봉 시가→종가 net 부호 반대면 BLOCK"),
-    raw_body_guard_lookback: Optional[int] = Query(None, ge=1, le=20, description="lookback 5m 봉 수 (3=기본)"),
-    raw_body_guard_min_net_pct: Optional[float] = Query(None, ge=0.0, le=5.0, description="min net % (0=부호만, 0.15~0.30 권장)"),
-    # ── [2026-05-16 부모 비전] Momentum Derivative Guard (RSI/MACD 흐름 1차 미분) ──
-    momentum_deriv_guard_enabled: Optional[bool] = Query(None, description="RSI/MACD hist 변화율 가드 ON/OFF — 진입 방향과 반대 흐름이면 BLOCK"),
-    momentum_deriv_guard_tf: Optional[str] = Query(None, description="TF (1/5/15/30/60), 기본 5"),
-    momentum_deriv_guard_lookback: Optional[int] = Query(None, ge=2, le=50, description="비교 윈도우 봉 수 (5=기본)"),
-    momentum_deriv_guard_rsi_min_slope: Optional[float] = Query(None, ge=0.0, le=50.0, description="RSI Δ 임계 (절대, 2.0=기본)"),
-    momentum_deriv_guard_macd_min_slope: Optional[float] = Query(None, ge=0.0, le=10.0, description="MACD hist Δ 임계 (0=부호만)"),
-    momentum_deriv_guard_require_both: Optional[bool] = Query(None, description="True=RSI+MACD 둘 다 반대여야 BLOCK, False=하나만 반대여도 BLOCK"),
-    # ── [2026-05-16 부모 비전 #2] MTF Momentum Alignment (TF 들 가속 일관성) ──
-    mtf_momentum_align_enabled: Optional[bool] = Query(None, description="MTF 모멘텀 정렬 가드 ON/OFF — TF 들 가속 방향이 진입 방향과 일치하는지"),
-    mtf_momentum_align_tfs: Optional[str] = Query(None, description="TFs CSV (예: '60,30,5')"),
-    mtf_momentum_align_lookback: Optional[int] = Query(None, ge=2, le=50, description="각 TF 비교 윈도우 봉 수"),
-    mtf_momentum_align_min_aligned: Optional[int] = Query(None, ge=1, le=10, description="최소 일치 TF 수 (3개 중 2개 등)"),
-    mtf_momentum_align_rsi_slope_thr: Optional[float] = Query(None, ge=0.0, le=20.0, description="RSI Δ 부호 판정 임계"),
-    mtf_momentum_align_use_macd: Optional[bool] = Query(None, description="True=RSI+MACD 둘 다 일치해야 TF aligned"),
-    # ── [2026-05-16 부모 비전 #3] CFID — Coin Flip Imminent Detector ──
-    cfid_enabled: Optional[bool] = Query(None, description="코인별 변곡점 임박 감지 ON/OFF"),
-    cfid_tf: Optional[str] = Query(None, description="TF (60=H1, 30=30M 권장)"),
-    cfid_ema_gap_thr_pct: Optional[float] = Query(None, ge=0.05, le=5.0, description="EMA20-50 gap/price*100 임계"),
-    cfid_volume_spike_ratio: Optional[float] = Query(None, ge=1.0, le=10.0, description="최근 N봉 vol avg / 이전 N봉 spike 비율"),
-    cfid_adx_change_min: Optional[float] = Query(None, ge=0.1, le=20.0, description="ADX 변화율 절댓값 임계"),
-    cfid_lookback: Optional[int] = Query(None, ge=3, le=50, description="비교 윈도우 봉 수"),
-    cfid_bypass_momentum_deriv: Optional[bool] = Query(None, description="momentum_deriv 가드 우회 허용"),
-    cfid_bypass_mtf_align: Optional[bool] = Query(None, description="mtf_momentum_align 가드 우회 허용"),
-    # ── ★ [2026-05-18 부모 비전 #5] Leading Entry — 선행 진입 ──
-    leading_entry_mode: Optional[str] = Query(None, description="선행 진입 모드: 'OFF' / 'CFID' / 'PATTERN' (mutually exclusive)"),
-    cfid_leading_min_strength: Optional[float] = Query(None, ge=10.0, le=100.0, description="[CFID 모드] CFID strength 임계 (default 70)"),
-    cfid_leading_size_pct: Optional[float] = Query(None, ge=0.5, le=50.0, description="[CFID 모드] 진입 사이즈 % of equity (default 5)"),
-    cfid_leading_bypass_microtiming: Optional[bool] = Query(None, description="[CFID 모드] 5m microtiming gate 우회"),
-    cfid_leading_bypass_bb_regime: Optional[bool] = Query(None, description="[CFID 모드] BB_REGIME 정점/저점 차단 우회"),
-    pattern_leading_size_pct: Optional[float] = Query(None, ge=0.5, le=50.0, description="[PATTERN 모드] 진입 사이즈 % of equity (default 5)"),
-    pattern_leading_min_5step_score: Optional[int] = Query(None, ge=1, le=12, description="[PATTERN 모드] 5step 12점 만점 중 임계 (default 6)"),
-    pattern_leading_max_sr_pct: Optional[float] = Query(None, ge=0.1, le=10.0, description="[PATTERN 모드] sr_near_S/R 거리 % (default 1.0)"),
-    pattern_leading_min_mtf_align: Optional[int] = Query(None, ge=1, le=4, description="[PATTERN 모드] mtf_align 정렬 TF 수 (default 2)"),
-    pattern_leading_bypass_microtiming: Optional[bool] = Query(None, description="[PATTERN 모드] 5m microtiming gate 우회"),
-    pattern_leading_bypass_bb_regime: Optional[bool] = Query(None, description="[PATTERN 모드] BB_REGIME 정점/저점 차단 우회"),
+    # ── [2026-05-16 owner] Same-coin Flip Cooldown + 5m Raw Body Guard + Imminent Flip ──
+    same_coin_flip_cooldown_enabled: Optional[bool] = Query(None, description="Same-coin LONG↔SHORT new-entry N-min cooldown ON/OFF"),
+    same_coin_flip_cooldown_min: Optional[int] = Query(None, ge=0, le=600, description="Cooldown minutes (60=default)"),
+    # ── ★ [2026-06-05 owner] 1M micro-check ──
+    micro_1m_check_enabled: Optional[bool] = Query(None, description="1M micro-check ON/OFF — verify 1-min bar timing right before entry"),
+    micro_1m_candle_check: Optional[bool] = Query(None, description="① Check the last 1M bar's direction"),
+    micro_1m_candle_trend_exempt_adx: Optional[float] = Query(None, ge=0, le=100, description="If the trend is strong (ADX ≥ this = wall-riding), exempt the 1M bar direction → prevents entry delay (0=disabled, e.g. 30)"),
+    micro_1m_volume_check: Optional[bool] = Query(None, description="② Check for consecutive 1M volume decline"),
+    micro_1m_rsi_check: Optional[bool] = Query(None, description="③ Check 1M RSI extremes"),
+    micro_1m_rsi_long_max: Optional[float] = Query(None, ge=50, le=90, description="LONG RSI overheat threshold (default 70)"),
+    micro_1m_rsi_short_min: Optional[float] = Query(None, ge=10, le=50, description="SHORT RSI overheat threshold (default 30)"),
+    micro_1m_vol_decline_bars: Optional[int] = Query(None, ge=2, le=10, description="Consecutive volume-decline bars (default 3)"),
+    raw_body_guard_enabled: Optional[bool] = Query(None, description="5m raw-body guard ON/OFF — BLOCK if the last N bars' open→close net sign is opposite"),
+    raw_body_guard_lookback: Optional[int] = Query(None, ge=1, le=20, description="lookback 5m bars (3=default)"),
+    raw_body_guard_min_net_pct: Optional[float] = Query(None, ge=0.0, le=5.0, description="min net % (0=sign only, 0.15~0.30 recommended)"),
+    # ── [2026-05-16 owner vision] Momentum Derivative Guard (first derivative of RSI/MACD flow) ──
+    momentum_deriv_guard_enabled: Optional[bool] = Query(None, description="RSI/MACD hist change-rate guard ON/OFF — BLOCK if the flow opposes the entry direction"),
+    momentum_deriv_guard_tf: Optional[str] = Query(None, description="TF (1/5/15/30/60), default 5"),
+    momentum_deriv_guard_lookback: Optional[int] = Query(None, ge=2, le=50, description="Comparison window bars (5=default)"),
+    momentum_deriv_guard_rsi_min_slope: Optional[float] = Query(None, ge=0.0, le=50.0, description="RSI Δ threshold (absolute, 2.0=default)"),
+    momentum_deriv_guard_macd_min_slope: Optional[float] = Query(None, ge=0.0, le=10.0, description="MACD hist Δ threshold (0=sign only)"),
+    momentum_deriv_guard_require_both: Optional[bool] = Query(None, description="True=BLOCK only if both RSI+MACD are opposite, False=BLOCK if either is opposite"),
+    # ── [2026-05-16 owner vision #2] MTF Momentum Alignment (consistency of acceleration across TFs) ──
+    mtf_momentum_align_enabled: Optional[bool] = Query(None, description="MTF momentum-alignment guard ON/OFF — whether the TFs' acceleration direction matches the entry direction"),
+    mtf_momentum_align_tfs: Optional[str] = Query(None, description="TFs CSV (e.g. '60,30,5')"),
+    mtf_momentum_align_lookback: Optional[int] = Query(None, ge=2, le=50, description="Comparison window bars per TF"),
+    mtf_momentum_align_min_aligned: Optional[int] = Query(None, ge=1, le=10, description="Min matching TFs (e.g. 2 of 3)"),
+    mtf_momentum_align_rsi_slope_thr: Optional[float] = Query(None, ge=0.0, le=20.0, description="RSI Δ sign-determination threshold"),
+    mtf_momentum_align_use_macd: Optional[bool] = Query(None, description="True=a TF is aligned only if both RSI+MACD match"),
+    # ── [2026-05-16 owner vision #3] CFID — Coin Flip Imminent Detector ──
+    cfid_enabled: Optional[bool] = Query(None, description="Per-coin imminent-inflection detection ON/OFF"),
+    cfid_tf: Optional[str] = Query(None, description="TF (60=H1, 30=30M recommended)"),
+    cfid_ema_gap_thr_pct: Optional[float] = Query(None, ge=0.05, le=5.0, description="EMA20-50 gap/price*100 threshold"),
+    cfid_volume_spike_ratio: Optional[float] = Query(None, ge=1.0, le=10.0, description="Last N bars vol avg / prior N bars spike ratio"),
+    cfid_adx_change_min: Optional[float] = Query(None, ge=0.1, le=20.0, description="ADX change-rate absolute-value threshold"),
+    cfid_lookback: Optional[int] = Query(None, ge=3, le=50, description="Comparison window bars"),
+    cfid_bypass_momentum_deriv: Optional[bool] = Query(None, description="Allow bypassing the momentum_deriv guard"),
+    cfid_bypass_mtf_align: Optional[bool] = Query(None, description="Allow bypassing the mtf_momentum_align guard"),
+    # ── ★ [2026-05-18 owner vision #5] Leading Entry ──
+    leading_entry_mode: Optional[str] = Query(None, description="Leading-entry mode: 'OFF' / 'CFID' / 'PATTERN' (mutually exclusive)"),
+    cfid_leading_min_strength: Optional[float] = Query(None, ge=10.0, le=100.0, description="[CFID mode] CFID strength threshold (default 70)"),
+    cfid_leading_size_pct: Optional[float] = Query(None, ge=0.5, le=50.0, description="[CFID mode] entry size % of equity (default 5)"),
+    cfid_leading_bypass_microtiming: Optional[bool] = Query(None, description="[CFID mode] bypass the 5m microtiming gate"),
+    cfid_leading_bypass_bb_regime: Optional[bool] = Query(None, description="[CFID mode] bypass the BB_REGIME peak/trough block"),
+    pattern_leading_size_pct: Optional[float] = Query(None, ge=0.5, le=50.0, description="[PATTERN mode] entry size % of equity (default 5)"),
+    pattern_leading_min_5step_score: Optional[int] = Query(None, ge=1, le=12, description="[PATTERN mode] threshold out of the 5step max of 12 (default 6)"),
+    pattern_leading_max_sr_pct: Optional[float] = Query(None, ge=0.1, le=10.0, description="[PATTERN mode] sr_near_S/R distance % (default 1.0)"),
+    pattern_leading_min_mtf_align: Optional[int] = Query(None, ge=1, le=4, description="[PATTERN mode] mtf_align matching TFs (default 2)"),
+    pattern_leading_bypass_microtiming: Optional[bool] = Query(None, description="[PATTERN mode] bypass the 5m microtiming gate"),
+    pattern_leading_bypass_bb_regime: Optional[bool] = Query(None, description="[PATTERN mode] bypass the BB_REGIME peak/trough block"),
     # ── ★ [2026-05-19 Phase 6 Step 2 B-Full] Combinatorial Weighting ──
-    #   조합 4개 (A/B/C/D) 의 가산점 + 발동 임계. 프리셋/UI 에서 조정 가능.
-    phase6_combo_a_bonus: Optional[int] = Query(None, ge=0, le=50, description="[조합 A] PA+zone+MTF 정렬 시 가산 (default 25)"),
-    phase6_combo_a_sr_min: Optional[int] = Query(None, ge=0, le=10, description="[조합 A] sr_s 최소 (8=near only, 5=mid 까지, default 5)"),
-    phase6_combo_a_mtf_min: Optional[int] = Query(None, ge=0, le=4, description="[조합 A] mtf_s 최소 (4=강 정렬, 2=부분 정렬, default 2)"),
-    phase6_combo_b_bonus: Optional[int] = Query(None, ge=0, le=70, description="[조합 B] CFID+EMA+vol 시 가산 (default 35)"),
-    phase6_combo_b_strength_min: Optional[int] = Query(None, ge=0, le=100, description="[조합 B] CFID strength 최소 (70=강, 50=중간, default 50)"),
-    phase6_combo_c_bonus: Optional[int] = Query(None, ge=0, le=40, description="[조합 C] 5step+vol 시 가산 (default 15)"),
-    phase6_combo_c_5step_min: Optional[int] = Query(None, ge=0, le=12, description="[조합 C] 5step score 최소 (10=만점, 7=강자리, default 7)"),
-    phase6_combo_d_bonus: Optional[int] = Query(None, ge=0, le=40, description="[조합 D] news strong+aligned 시 가산 (default 15)"),
-    phase6_combo_d_news_abs_min: Optional[int] = Query(None, ge=0, le=20, description="[조합 D] |news_raw| 최소 (10=강, 6=중간, default 6)"),
-    # ── ★ [2026-05-19 부모 결정] BB 차단 가드 임계 (UI 조정 가능, ORDI 교훈 보존) ──
-    bb_block_threshold_pct: Optional[float] = Query(None, ge=50.0, le=100.0, description="[BB hardblock] LONG > 이값 차단 (default 85, SHORT 대칭 < 100-이값)"),
-    bb_penalty_threshold_pct: Optional[float] = Query(None, ge=50.0, le=100.0, description="[BB 감점] LONG > 이값 conv 감점 (default 75, SHORT 대칭 < 100-이값)"),
-    bb_penalty_amount: Optional[float] = Query(None, ge=0.0, le=50.0, description="[BB 감점량] 100점 단위 감점 (default 20)"),
-    # ── [2026-05-16 부모 비전 #4] Coin State Machine ──
-    coin_state_machine_enabled: Optional[bool] = Query(None, description="진입 시점 코인 상태 4단계 분류 ON/OFF"),
-    coin_state_apply_conv_adjust: Optional[bool] = Query(None, description="True=conviction_score 에 단계별 보정 적용 (default OFF)"),
-    coin_state_accel_conv_adj: Optional[float] = Query(None, ge=-30, le=30, description="[100점] ACCEL 보정 (default 0)"),
-    coin_state_steady_conv_adj: Optional[float] = Query(None, ge=-30, le=30, description="[100점] STEADY 보정 (default -5)"),
-    coin_state_decel_conv_adj: Optional[float] = Query(None, ge=-30, le=30, description="[100점] DECEL 보정 (default -10)"),
-    coin_state_flip_imminent_conv_adj: Optional[float] = Query(None, ge=-30, le=30, description="[100점] FLIP_IMMINENT 보정 (default +5)"),
-    # ── [2026-05-16 부모 비전 #5] Tight Trail After BE ──
-    tight_trail_after_be_enabled: Optional[bool] = Query(None, description="BE 락 활성 시 peak slippage 즉시 컷"),
-    tight_trail_max_slippage_pct: Optional[float] = Query(None, ge=0.05, le=5.0, description="peak 에서 N%p 빠지면 컷 (0.2=기본)"),
-    tight_trail_min_peak_pct: Optional[float] = Query(None, ge=0.1, le=10.0, description="peak 이 이상일 때만 적용 (0.4=기본)"),
-    tight_trail_atr_adaptive_enabled: Optional[bool] = Query(None, description="ATR 비례 동적 slippage 임계"),
-    tight_trail_atr_tf: Optional[str] = Query(None, description="ATR TF (5=5m 기본)"),
-    tight_trail_atr_period: Optional[int] = Query(None, ge=5, le=50, description="ATR period (14=기본)"),
-    tight_trail_atr_multiplier: Optional[float] = Query(None, ge=0.05, le=2.0, description="atr_pct × N → slippage (0.3=기본)"),
-    tight_trail_atr_cap_pct: Optional[float] = Query(None, ge=0.1, le=5.0, description="adaptive slippage 상한 (0.6=기본)"),
-    # ── 🎯 [2026-06-12 부모 ESPORTS/WLD] 코인별 추세-적응 출구 ──
-    trend_adaptive_exit_enabled: Optional[bool] = Query(None, description="코인별 추세-적응 출구 — runner 태우고 chopper 스캘프 (ADX 기반, default OFF)"),
-    trend_adaptive_exit_adx_strong: Optional[float] = Query(None, ge=10, le=60, description="ADX 이상=runner 트레일 완화 (default 30)"),
-    trend_adaptive_exit_adx_weak: Optional[float] = Query(None, ge=5, le=40, description="ADX 이하=chopper 트레일 강화 (default 18)"),
-    trend_adaptive_exit_runner_factor: Optional[float] = Query(None, ge=0.1, le=1.0, description="runner factor <1 (preserve↓/slip↑=태움, default 0.6)"),
-    trend_adaptive_exit_chop_factor: Optional[float] = Query(None, ge=1.0, le=3.0, description="chopper factor >1 (preserve↑/slip↓=스캘프, default 1.4)"),
-    trend_adaptive_exit_adx_cache_sec: Optional[float] = Query(None, ge=5, le=300, description="코인 ADX 캐시 TTL초 (default 30)"),
-    imminent_flip_enabled: Optional[bool] = Query(None, description="freeze 윈도우 안에서도 imminent flip 신호 시 freeze 해제"),
-    imminent_flip_ema_gap_pct: Optional[float] = Query(None, ge=0.0, le=10.0, description="BTC EMA20-50 gap 임계 (0.3=기본)"),
-    imminent_flip_use_30m: Optional[bool] = Query(None, description="30M 보조 신호 사용"),
-    imminent_flip_adx_rise_min: Optional[float] = Query(None, ge=0.0, le=50.0, description="ADX 상승 폭 (2.0=기본)"),
-    imminent_flip_gap_lookback: Optional[int] = Query(None, ge=1, le=20, description="gap/ADX 비교 봉 수 (3=기본)"),
-    # ── Hard ROE Cap (1건당 최대 손실 ROE 강제 컷, 2026-04-25) ──
-    hard_roe_cap_enabled: Optional[bool] = Query(None, description="Hard ROE Cap ON/OFF — 1건당 ROE 임계 도달 시 강제 컷"),
-    hard_roe_cap_roe_pct: Optional[float] = Query(None, ge=-99.0, le=0.0, description="Hard ROE Cap 임계 ROE % (음수, 예: -8.0)"),
-    # ── Leverage Tier (ATR 기반 차등 레버리지, 2026-04-25) ──
-    leverage_tier_enabled: Optional[bool] = Query(None, description="Leverage Tier ON/OFF (ATR 기반 차등)"),
-    leverage_tier_atr_low_pct: Optional[float] = Query(None, ge=0.5, le=5.0, description="Low tier ATR 임계 (%) — 미만=low lev"),
-    leverage_tier_low: Optional[int] = Query(None, ge=2, le=20, description="Low tier 레버리지 배수"),
-    leverage_tier_atr_high_pct: Optional[float] = Query(None, ge=1.0, le=5.0, description="High tier ATR 임계 (%) — 이상=high lev"),
-    leverage_tier_high: Optional[int] = Query(None, ge=2, le=20, description="High tier 레버리지 배수"),
+    #   Bonuses + trigger thresholds for the 4 combos (A/B/C/D). Adjustable from presets/UI.
+    phase6_combo_a_bonus: Optional[int] = Query(None, ge=0, le=50, description="[combo A] bonus when PA+zone+MTF align (default 25)"),
+    phase6_combo_a_sr_min: Optional[int] = Query(None, ge=0, le=10, description="[combo A] sr_s min (8=near only, 5=up to mid, default 5)"),
+    phase6_combo_a_mtf_min: Optional[int] = Query(None, ge=0, le=4, description="[combo A] mtf_s min (4=strong alignment, 2=partial, default 2)"),
+    phase6_combo_b_bonus: Optional[int] = Query(None, ge=0, le=70, description="[combo B] bonus on CFID+EMA+vol (default 35)"),
+    phase6_combo_b_strength_min: Optional[int] = Query(None, ge=0, le=100, description="[combo B] CFID strength min (70=strong, 50=medium, default 50)"),
+    phase6_combo_c_bonus: Optional[int] = Query(None, ge=0, le=40, description="[combo C] bonus on 5step+vol (default 15)"),
+    phase6_combo_c_5step_min: Optional[int] = Query(None, ge=0, le=12, description="[combo C] 5step score min (10=max, 7=strong spot, default 7)"),
+    phase6_combo_d_bonus: Optional[int] = Query(None, ge=0, le=40, description="[combo D] bonus when news is strong+aligned (default 15)"),
+    phase6_combo_d_news_abs_min: Optional[int] = Query(None, ge=0, le=20, description="[combo D] |news_raw| min (10=strong, 6=medium, default 6)"),
+    # ── ★ [2026-05-19 owner decision] BB block-guard thresholds (UI-adjustable, preserves the ORDI lesson) ──
+    bb_block_threshold_pct: Optional[float] = Query(None, ge=50.0, le=100.0, description="[BB hardblock] block LONG > this (default 85, SHORT symmetric < 100-this)"),
+    bb_penalty_threshold_pct: Optional[float] = Query(None, ge=50.0, le=100.0, description="[BB penalty] penalize conv for LONG > this (default 75, SHORT symmetric < 100-this)"),
+    bb_penalty_amount: Optional[float] = Query(None, ge=0.0, le=50.0, description="[BB penalty amount] penalty in 100-scale points (default 20)"),
+    # ── [2026-05-16 owner vision #4] Coin State Machine ──
+    coin_state_machine_enabled: Optional[bool] = Query(None, description="Classify the coin state into 4 stages at entry ON/OFF"),
+    coin_state_apply_conv_adjust: Optional[bool] = Query(None, description="True=apply per-stage adjustment to conviction_score (default OFF)"),
+    coin_state_accel_conv_adj: Optional[float] = Query(None, ge=-30, le=30, description="[100-scale] ACCEL adjustment (default 0)"),
+    coin_state_steady_conv_adj: Optional[float] = Query(None, ge=-30, le=30, description="[100-scale] STEADY adjustment (default -5)"),
+    coin_state_decel_conv_adj: Optional[float] = Query(None, ge=-30, le=30, description="[100-scale] DECEL adjustment (default -10)"),
+    coin_state_flip_imminent_conv_adj: Optional[float] = Query(None, ge=-30, le=30, description="[100-scale] FLIP_IMMINENT adjustment (default +5)"),
+    # ── [2026-05-16 owner vision #5] Tight Trail After BE ──
+    tight_trail_after_be_enabled: Optional[bool] = Query(None, description="When BE lock is active, instant-cut on peak slippage"),
+    tight_trail_max_slippage_pct: Optional[float] = Query(None, ge=0.05, le=5.0, description="Cut when it drops N%p from peak (0.2=default)"),
+    tight_trail_min_peak_pct: Optional[float] = Query(None, ge=0.1, le=10.0, description="Apply only when peak ≥ this (0.4=default)"),
+    tight_trail_atr_adaptive_enabled: Optional[bool] = Query(None, description="ATR-proportional dynamic slippage threshold"),
+    tight_trail_atr_tf: Optional[str] = Query(None, description="ATR TF (5=5m default)"),
+    tight_trail_atr_period: Optional[int] = Query(None, ge=5, le=50, description="ATR period (14=default)"),
+    tight_trail_atr_multiplier: Optional[float] = Query(None, ge=0.05, le=2.0, description="atr_pct × N → slippage (0.3=default)"),
+    tight_trail_atr_cap_pct: Optional[float] = Query(None, ge=0.1, le=5.0, description="Adaptive slippage cap (0.6=default)"),
+    # ── 🎯 [2026-06-12 owner ESPORTS/WLD] Per-coin trend-adaptive exit ──
+    trend_adaptive_exit_enabled: Optional[bool] = Query(None, description="Per-coin trend-adaptive exit — let runners run and scalp choppers (ADX-based, default OFF)"),
+    trend_adaptive_exit_adx_strong: Optional[float] = Query(None, ge=10, le=60, description="ADX ≥ this = relax the runner trail (default 30)"),
+    trend_adaptive_exit_adx_weak: Optional[float] = Query(None, ge=5, le=40, description="ADX ≤ this = tighten the chopper trail (default 18)"),
+    trend_adaptive_exit_runner_factor: Optional[float] = Query(None, ge=0.1, le=1.0, description="runner factor <1 (preserve↓/slip↑=let it run, default 0.6)"),
+    trend_adaptive_exit_chop_factor: Optional[float] = Query(None, ge=1.0, le=3.0, description="chopper factor >1 (preserve↑/slip↓=scalp, default 1.4)"),
+    trend_adaptive_exit_adx_cache_sec: Optional[float] = Query(None, ge=5, le=300, description="Coin ADX cache TTL sec (default 30)"),
+    imminent_flip_enabled: Optional[bool] = Query(None, description="Release the freeze on an imminent-flip signal even within the freeze window"),
+    imminent_flip_ema_gap_pct: Optional[float] = Query(None, ge=0.0, le=10.0, description="BTC EMA20-50 gap threshold (0.3=default)"),
+    imminent_flip_use_30m: Optional[bool] = Query(None, description="Use the 30M auxiliary signal"),
+    imminent_flip_adx_rise_min: Optional[float] = Query(None, ge=0.0, le=50.0, description="ADX rise magnitude (2.0=default)"),
+    imminent_flip_gap_lookback: Optional[int] = Query(None, ge=1, le=20, description="gap/ADX comparison bars (3=default)"),
+    # ── Hard ROE Cap (force-cut at max loss ROE per position, 2026-04-25) ──
+    hard_roe_cap_enabled: Optional[bool] = Query(None, description="Hard ROE Cap ON/OFF — force-cut a position when it hits the ROE threshold"),
+    hard_roe_cap_roe_pct: Optional[float] = Query(None, ge=-99.0, le=0.0, description="Hard ROE Cap threshold ROE % (negative, e.g. -8.0)"),
+    # ── Leverage Tier (ATR-based tiered leverage, 2026-04-25) ──
+    leverage_tier_enabled: Optional[bool] = Query(None, description="Leverage Tier ON/OFF (ATR-based tiering)"),
+    leverage_tier_atr_low_pct: Optional[float] = Query(None, ge=0.5, le=5.0, description="Low-tier ATR threshold (%) — below=low lev"),
+    leverage_tier_low: Optional[int] = Query(None, ge=2, le=20, description="Low-tier leverage multiplier"),
+    leverage_tier_atr_high_pct: Optional[float] = Query(None, ge=1.0, le=5.0, description="High-tier ATR threshold (%) — at/above=high lev"),
+    leverage_tier_high: Optional[int] = Query(None, ge=2, le=20, description="High-tier leverage multiplier"),
     # ── 30M Thesis Invalidation ──
-    thesis_invalidation_enabled: Optional[bool] = Query(None, description="30M 구조적 전환 감시 ON/OFF"),
-    thesis_invalidation_min_hold_h: Optional[float] = Query(None, ge=0.5, le=4.0, description="최소 보유 시간 (시간)"),
-    thesis_invalidation_max_peak_pct: Optional[float] = Query(None, ge=0.1, le=1.0, description="peak 수익 임계값 (%)"),
+    thesis_invalidation_enabled: Optional[bool] = Query(None, description="30M structural-shift monitoring ON/OFF"),
+    thesis_invalidation_min_hold_h: Optional[float] = Query(None, ge=0.5, le=4.0, description="Min hold time (hours)"),
+    thesis_invalidation_max_peak_pct: Optional[float] = Query(None, ge=0.1, le=1.0, description="Peak-profit threshold (%)"),
     # ── Morning Shield / Guard ──
-    morning_shield_enabled: Optional[bool] = Query(None, description="Morning Shield (야간 수익 보호) ON/OFF"),
-    morning_guard_enabled: Optional[bool] = Query(None, description="Morning Guard (아침 진입 제한) ON/OFF"),
-    morning_shield_lock_pct: Optional[float] = Query(None, ge=10, le=90, description="수익 확보율 (%)"),
-    morning_guard_conviction_boost: Optional[float] = Query(None, ge=0, le=50, description="[100점] 아침 conviction 상향 (default 15)"),
-    morning_guard_end_hour_kst: Optional[float] = Query(None, ge=7.0, le=12.0, description="Guard 종료 시각 (KST)"),
-    event_shield_enabled: Optional[bool] = Query(None, description="Event Shield (경제이벤트 방패) ON/OFF"),
-    event_shield_times_kst: Optional[str] = Query(None, description="이벤트 시각 CSV ('2026-06-10 21:30, ...') KST"),
-    event_shield_window_min: Optional[float] = Query(None, ge=0, le=180, description="이벤트 後 윈도우 (분)"),
-    event_shield_lead_min: Optional[float] = Query(None, ge=0, le=120, description="슬리피지 리드 — 이벤트 前은 window+lead분 (군중보다 먼저)"),
-    event_shield_lock_pct: Optional[float] = Query(None, ge=10, le=95, description="이벤트 SL 조임 시 이익 보존율 (%)"),
-    event_shield_auto_fetch: Optional[bool] = Query(None, description="ForexFactory USD High impact 자동 fetch ON/OFF"),
-    auto_tp_enabled: Optional[bool] = Query(None, description="Auto Take-Profit (트레일링 거두기) ON/OFF"),
-    auto_tp_usdt: Optional[float] = Query(None, ge=0, description="무장 임계 (순익 이 값 넘으면 그 이익 지킴·USDT)"),
-    auto_tp_peak_giveback_pct: Optional[float] = Query(None, ge=0, le=1, description="무장 후 peak 순익에서 이 비율 반납 시 거둠 (0~1)"),
-    auto_sl_pct_enabled: Optional[bool] = Query(None, description="Auto Stop-Loss (손실 N% 자동컷) ON/OFF — 평소 OFF"),
-    auto_sl_pct: Optional[float] = Query(None, ge=0, le=100, description="컷 손실률 (%)"),
-    dual_direction_observe: Optional[bool] = Query(None, description="양방향 평가 Phase 1 관찰 (진입 변경 X · 반대 방향 그림자 채점 기록) ON/OFF"),
-    dual_direction_enabled: Optional[bool] = Query(None, description="양방향 평가 Phase 2 — 실제 진입 방향을 높은 쪽으로 결정 (direction_mode=both 일 때) ON/OFF"),
+    morning_shield_enabled: Optional[bool] = Query(None, description="Morning Shield (protect overnight profits) ON/OFF"),
+    morning_guard_enabled: Optional[bool] = Query(None, description="Morning Guard (restrict morning entries) ON/OFF"),
+    morning_shield_lock_pct: Optional[float] = Query(None, ge=10, le=90, description="Profit-secure rate (%)"),
+    morning_guard_conviction_boost: Optional[float] = Query(None, ge=0, le=50, description="[100-scale] morning conviction raise (default 15)"),
+    morning_guard_end_hour_kst: Optional[float] = Query(None, ge=7.0, le=12.0, description="Guard end time (KST)"),
+    event_shield_enabled: Optional[bool] = Query(None, description="Event Shield (economic-event shield) ON/OFF"),
+    event_shield_times_kst: Optional[str] = Query(None, description="Event times CSV ('2026-06-10 21:30, ...') KST"),
+    event_shield_window_min: Optional[float] = Query(None, ge=0, le=180, description="Post-event window (min)"),
+    event_shield_lead_min: Optional[float] = Query(None, ge=0, le=120, description="Slippage lead — before an event use window+lead minutes (ahead of the crowd)"),
+    event_shield_lock_pct: Optional[float] = Query(None, ge=10, le=95, description="Profit-preservation rate when tightening SL for an event (%)"),
+    event_shield_auto_fetch: Optional[bool] = Query(None, description="Auto-fetch ForexFactory USD High-impact events ON/OFF"),
+    auto_tp_enabled: Optional[bool] = Query(None, description="Auto Take-Profit (trailing harvest) ON/OFF"),
+    auto_tp_usdt: Optional[float] = Query(None, ge=0, description="Arm threshold (once net profit exceeds this, protect that profit, USDT)"),
+    auto_tp_peak_giveback_pct: Optional[float] = Query(None, ge=0, le=1, description="After arming, harvest when it gives back this ratio from peak net profit (0~1)"),
+    auto_sl_pct_enabled: Optional[bool] = Query(None, description="Auto Stop-Loss (auto-cut at N% loss) ON/OFF — usually OFF"),
+    auto_sl_pct: Optional[float] = Query(None, ge=0, le=100, description="Cut loss rate (%)"),
+    dual_direction_observe: Optional[bool] = Query(None, description="Dual-direction evaluation Phase 1 observation (no entry change, records the opposite-direction shadow score) ON/OFF"),
+    dual_direction_enabled: Optional[bool] = Query(None, description="Dual-direction evaluation Phase 2 — pick the actual entry direction as the higher one (when direction_mode=both) ON/OFF"),
     # ── Erosion Guard ──
-    erosion_guard_enabled: Optional[bool] = Query(None, description="Erosion Guard (수익 침식 방지) ON/OFF"),
-    erosion_guard_peak_pct: Optional[float] = Query(None, ge=0.1, le=3.0, description="peak 최소 (%)"),
-    erosion_guard_ratio: Optional[float] = Query(None, ge=0.1, le=0.9, description="침식 비율 트리거"),
+    erosion_guard_enabled: Optional[bool] = Query(None, description="Erosion Guard (prevent profit erosion) ON/OFF"),
+    erosion_guard_peak_pct: Optional[float] = Query(None, ge=0.1, le=3.0, description="peak min (%)"),
+    erosion_guard_ratio: Optional[float] = Query(None, ge=0.1, le=0.9, description="Erosion-ratio trigger"),
     # ── SL Dodge ──
     sl_dodge_enabled: Optional[bool] = Query(None, description="SL Dodge ON/OFF"),
-    sl_dodge_proximity_pct: Optional[float] = Query(None, ge=0.5, le=5.0, description="SL 근접 기준 (%)"),
-    sl_dodge_retreat_pct: Optional[float] = Query(None, ge=0.5, le=5.0, description="후퇴 비율 (%)"),
-    sl_dodge_max_count: Optional[int] = Query(None, ge=1, le=10, description="최대 dodge 횟수"),
-    sl_dodge_max_total_pct: Optional[float] = Query(None, ge=1.0, le=20.0, description="총 dodge 한도 (%)"),
+    sl_dodge_proximity_pct: Optional[float] = Query(None, ge=0.5, le=5.0, description="SL-proximity threshold (%)"),
+    sl_dodge_retreat_pct: Optional[float] = Query(None, ge=0.5, le=5.0, description="Retreat ratio (%)"),
+    sl_dodge_max_count: Optional[int] = Query(None, ge=1, le=10, description="Max dodge count"),
+    sl_dodge_max_total_pct: Optional[float] = Query(None, ge=1.0, le=20.0, description="Total dodge cap (%)"),
     # ── SL Decay ──
-    sl_decay_enabled: Optional[bool] = Query(None, description="SL Decay (시간경과 SL 축소) ON/OFF"),
-    sl_decay_2h_ratio: Optional[float] = Query(None, ge=0.1, le=1.0, description="2시간 후 SL 비율"),
-    sl_decay_3h_ratio: Optional[float] = Query(None, ge=0.1, le=1.0, description="3시간 후 SL 비율"),
+    sl_decay_enabled: Optional[bool] = Query(None, description="SL Decay (shrink SL over time) ON/OFF"),
+    sl_decay_2h_ratio: Optional[float] = Query(None, ge=0.1, le=1.0, description="SL ratio after 2 hours"),
+    sl_decay_3h_ratio: Optional[float] = Query(None, ge=0.1, le=1.0, description="SL ratio after 3 hours"),
     # ── Fast-Reject ──
-    fast_reject_enabled: Optional[bool] = Query(None, description="Fast-Reject (조기 손절) ON/OFF"),
-    fast_reject_min_sec: Optional[float] = Query(None, ge=60, le=3600, description="발동 최소 보유 (초)"),
-    fast_reject_max_sec: Optional[float] = Query(None, ge=60, le=3600, description="발동 최대 보유 (초)"),
-    fast_reject_peak_threshold_pct: Optional[float] = Query(None, ge=0.0, le=2.0, description="peak 미달 임계 (%)"),
-    fast_reject_trigger_pnl_pct: Optional[float] = Query(None, ge=-5.0, le=0.0, description="발동 pnl 임계 (%, 음수)"),
+    fast_reject_enabled: Optional[bool] = Query(None, description="Fast-Reject (early stop-loss) ON/OFF"),
+    fast_reject_min_sec: Optional[float] = Query(None, ge=60, le=3600, description="Trigger min hold (sec)"),
+    fast_reject_max_sec: Optional[float] = Query(None, ge=60, le=3600, description="Trigger max hold (sec)"),
+    fast_reject_peak_threshold_pct: Optional[float] = Query(None, ge=0.0, le=2.0, description="peak-shortfall threshold (%)"),
+    fast_reject_trigger_pnl_pct: Optional[float] = Query(None, ge=-5.0, le=0.0, description="Trigger pnl threshold (%, negative)"),
     # ── Entry Quality Filter ──
-    entry_quality_enabled: Optional[bool] = Query(None, description="Entry Quality Filter (M5 마이크로타이밍) ON/OFF"),
-    eq_momentum_enabled: Optional[bool] = Query(None, description="M5 모멘텀 필터 ON/OFF"),
-    eq_momentum_count: Optional[int] = Query(None, ge=1, le=5, description="검사 봉 수"),
-    eq_momentum_min_agree: Optional[int] = Query(None, ge=1, le=5, description="최소 일치 봉 수"),
-    eq_bb_enabled: Optional[bool] = Query(None, description="BB 위치 필터 ON/OFF"),
-    eq_bb_upper_pct: Optional[float] = Query(None, ge=50, le=99, description="LONG 차단 BB% 상한"),
-    eq_bb_lower_pct: Optional[float] = Query(None, ge=1, le=50, description="SHORT 차단 BB% 하한"),
-    eq_nbar_enabled: Optional[bool] = Query(None, description="N봉 추세 필터 ON/OFF"),
-    eq_nbar_count: Optional[int] = Query(None, ge=3, le=10, description="추세 검사 봉 수"),
-    eq_nbar_min_ratio: Optional[float] = Query(None, ge=0.3, le=1.0, description="HH/LH 최소 비율"),
+    entry_quality_enabled: Optional[bool] = Query(None, description="Entry Quality Filter (M5 micro-timing) ON/OFF"),
+    eq_momentum_enabled: Optional[bool] = Query(None, description="M5 momentum filter ON/OFF"),
+    eq_momentum_count: Optional[int] = Query(None, ge=1, le=5, description="Bars to inspect"),
+    eq_momentum_min_agree: Optional[int] = Query(None, ge=1, le=5, description="Min matching bars"),
+    eq_bb_enabled: Optional[bool] = Query(None, description="BB-position filter ON/OFF"),
+    eq_bb_upper_pct: Optional[float] = Query(None, ge=50, le=99, description="LONG-block BB% upper bound"),
+    eq_bb_lower_pct: Optional[float] = Query(None, ge=1, le=50, description="SHORT-block BB% lower bound"),
+    eq_nbar_enabled: Optional[bool] = Query(None, description="N-bar trend filter ON/OFF"),
+    eq_nbar_count: Optional[int] = Query(None, ge=3, le=10, description="Trend-inspection bars"),
+    eq_nbar_min_ratio: Optional[float] = Query(None, ge=0.3, le=1.0, description="HH/LH min ratio"),
     # ── Advanced ──
-    rr_ratio: Optional[float] = Query(None, ge=1.0, le=10.0, description="Risk-Reward 비율"),
-    adaptive_cooldown: Optional[bool] = Query(None, description="적응형 쿨다운 ON/OFF"),
-    emergency_tp_tiers: Optional[bool] = Query(None, description="비상 TP 단계 ON/OFF"),
-    coin_repeat_window_hours: Optional[float] = Query(None, ge=1, le=72, description="반복 브레이크 윈도우 (시간)"),
-    scanner_blacklist: Optional[str] = Query(None, description="스캐너 블랙리스트 (쉼표 구분, 예: CLUSDT,ABCUSDT)"),
-    # ── Manual Exit Penalty (수동 탈출 쿨다운) ──
-    manual_exit_penalty_enabled: Optional[bool] = Query(None, description="수동 탈출 시 재진입 쿨다운 ON/OFF (OFF=항상 면제)"),
-    manual_exit_penalty_hours: Optional[float] = Query(None, ge=0.0, le=24.0, description="손실 탈출 시 쿨다운 시간 (시간)"),
-    phase3_context_bonus_enabled: Optional[bool] = Query(None, description="Phase 3 시간대(±4)+코인(+2) 가산점 ON/OFF"),
-    # ── [2026-05-19] Advanced 숨겨진 설정 124개 — Query params ──
+    rr_ratio: Optional[float] = Query(None, ge=1.0, le=10.0, description="Risk-Reward ratio"),
+    adaptive_cooldown: Optional[bool] = Query(None, description="Adaptive cooldown ON/OFF"),
+    emergency_tp_tiers: Optional[bool] = Query(None, description="Emergency TP tier ON/OFF"),
+    coin_repeat_window_hours: Optional[float] = Query(None, ge=1, le=72, description="Repeat-brake window (hours)"),
+    scanner_blacklist: Optional[str] = Query(None, description="Scanner blacklist (comma-separated, e.g. CLUSDT,ABCUSDT)"),
+    # ── Manual Exit Penalty (manual-exit cooldown) ──
+    manual_exit_penalty_enabled: Optional[bool] = Query(None, description="Re-entry cooldown on manual exit ON/OFF (OFF=always exempt)"),
+    manual_exit_penalty_hours: Optional[float] = Query(None, ge=0.0, le=24.0, description="Cooldown time on a losing exit (hours)"),
+    phase3_context_bonus_enabled: Optional[bool] = Query(None, description="Phase 3 time-of-day (±4) + coin (+2) bonus ON/OFF"),
+    # ── [2026-05-19] 124 advanced hidden settings — Query params ──
     # A. Core TF
     primary_tf: Optional[str] = Query(None, description="Primary TF (60=H1, 240=H4)"),
     entry_tf: Optional[str] = Query(None, description="Entry TF (5=M5)"),
-    # ★ [2026-05-31 부모 server-b lock_market race 진짜 fix] /config POST 가 lock_market 무시 → 빈 string 보내도 서버 그대로 → 영원히 박힘.
+    # ★ [2026-05-31 owner server-b lock_market race real fix] /config POST ignored lock_market → even sending an empty string left the server unchanged → stuck forever.
     lock_market: Optional[str] = Query(None, description="Lock to single market (empty=auto-scan / Unlock)"),
     # B. Post-Trade Pause
-    post_trade_pause_enabled: Optional[bool] = Query(None, description="거래 후 쿨다운 ON/OFF"),
-    post_trade_pause_profit_sec: Optional[float] = Query(None, ge=0, le=14400, description="익절 후 쿨다운 (초)"),
-    post_trade_pause_loss_sec: Optional[float] = Query(None, ge=0, le=14400, description="손절 후 쿨다운 (초)"),
-    post_trade_pause_fastreject_sec: Optional[float] = Query(None, ge=0, le=14400, description="Fast Reject 후 쿨다운 (초)"),
-    post_trade_pause_loss_sliding_enabled: Optional[bool] = Query(None, description="슬라이딩 손실 쿨다운 ON/OFF"),
-    post_trade_pause_loss_tier1_pct: Optional[float] = Query(None, ge=0, le=100, description="Tier1 손실 %"),
-    post_trade_pause_loss_tier1_sec: Optional[float] = Query(None, ge=0, le=14400, description="Tier1 쿨다운 (초)"),
-    post_trade_pause_loss_tier2_pct: Optional[float] = Query(None, ge=0, le=100, description="Tier2 손실 %"),
-    post_trade_pause_loss_tier2_sec: Optional[float] = Query(None, ge=0, le=14400, description="Tier2 쿨다운 (초)"),
-    post_trade_pause_loss_tier3_pct: Optional[float] = Query(None, ge=0, le=100, description="Tier3 손실 %"),
-    post_trade_pause_loss_tier3_sec: Optional[float] = Query(None, ge=0, le=14400, description="Tier3 쿨다운 (초)"),
-    post_trade_pause_loss_tier4_pct: Optional[float] = Query(None, ge=0, le=100, description="Tier4 손실 %"),
-    post_trade_pause_loss_tier4_sec: Optional[float] = Query(None, ge=0, le=86400, description="Tier4 쿨다운 (초)"),
-    post_trade_pause_loss_tier5_sec: Optional[float] = Query(None, ge=0, le=86400, description="Tier5 쿨다운 (초)"),
+    post_trade_pause_enabled: Optional[bool] = Query(None, description="Post-trade cooldown ON/OFF"),
+    post_trade_pause_profit_sec: Optional[float] = Query(None, ge=0, le=14400, description="Cooldown after take-profit (sec)"),
+    post_trade_pause_loss_sec: Optional[float] = Query(None, ge=0, le=14400, description="Cooldown after stop-loss (sec)"),
+    post_trade_pause_fastreject_sec: Optional[float] = Query(None, ge=0, le=14400, description="Cooldown after Fast Reject (sec)"),
+    post_trade_pause_loss_sliding_enabled: Optional[bool] = Query(None, description="Sliding loss cooldown ON/OFF"),
+    post_trade_pause_loss_tier1_pct: Optional[float] = Query(None, ge=0, le=100, description="Tier1 loss %"),
+    post_trade_pause_loss_tier1_sec: Optional[float] = Query(None, ge=0, le=14400, description="Tier1 cooldown (sec)"),
+    post_trade_pause_loss_tier2_pct: Optional[float] = Query(None, ge=0, le=100, description="Tier2 loss %"),
+    post_trade_pause_loss_tier2_sec: Optional[float] = Query(None, ge=0, le=14400, description="Tier2 cooldown (sec)"),
+    post_trade_pause_loss_tier3_pct: Optional[float] = Query(None, ge=0, le=100, description="Tier3 loss %"),
+    post_trade_pause_loss_tier3_sec: Optional[float] = Query(None, ge=0, le=14400, description="Tier3 cooldown (sec)"),
+    post_trade_pause_loss_tier4_pct: Optional[float] = Query(None, ge=0, le=100, description="Tier4 loss %"),
+    post_trade_pause_loss_tier4_sec: Optional[float] = Query(None, ge=0, le=86400, description="Tier4 cooldown (sec)"),
+    post_trade_pause_loss_tier5_sec: Optional[float] = Query(None, ge=0, le=86400, description="Tier5 cooldown (sec)"),
     # C. Direction Exhaustion
-    direction_exhaustion_enabled: Optional[bool] = Query(None, description="방향 소진 차단 ON/OFF"),
-    direction_exhaustion_window_sec: Optional[float] = Query(None, ge=60, le=14400, description="감시 윈도우 (초)"),
-    direction_exhaustion_profit_count: Optional[int] = Query(None, ge=1, le=10, description="익절 횟수 임계"),
-    direction_exhaustion_block_sec: Optional[float] = Query(None, ge=60, le=14400, description="차단 시간 (초)"),
+    direction_exhaustion_enabled: Optional[bool] = Query(None, description="Direction-exhaustion block ON/OFF"),
+    direction_exhaustion_window_sec: Optional[float] = Query(None, ge=60, le=14400, description="Monitoring window (sec)"),
+    direction_exhaustion_profit_count: Optional[int] = Query(None, ge=1, le=10, description="Take-profit count threshold"),
+    direction_exhaustion_block_sec: Optional[float] = Query(None, ge=60, le=14400, description="Block duration (sec)"),
     # D. Coin Reentry Penalty
-    coin_reentry_penalty_enabled: Optional[bool] = Query(None, description="재진입 감점 ON/OFF"),
-    coin_reentry_penalty_window_sec: Optional[float] = Query(None, ge=60, le=14400, description="감시 윈도우 (초)"),
-    coin_reentry_penalty_per_count: Optional[float] = Query(None, ge=0, le=50, description="회당 감점 (100점)"),
+    coin_reentry_penalty_enabled: Optional[bool] = Query(None, description="Re-entry penalty ON/OFF"),
+    coin_reentry_penalty_window_sec: Optional[float] = Query(None, ge=60, le=14400, description="Monitoring window (sec)"),
+    coin_reentry_penalty_per_count: Optional[float] = Query(None, ge=0, le=50, description="Per-occurrence penalty (100-scale)"),
     # E. Trailing TP
     trailing_tp_enabled: Optional[bool] = Query(None, description="Trailing TP ON/OFF"),
-    trailing_tp_min_progress: Optional[float] = Query(None, ge=0, le=1, description="발동 진행률"),
-    trailing_tp_follow_low: Optional[float] = Query(None, ge=0.5, le=1, description="저변동 추적률"),
-    trailing_tp_follow_mid: Optional[float] = Query(None, ge=0.5, le=1, description="중변동 추적률"),
-    trailing_tp_follow_high: Optional[float] = Query(None, ge=0.5, le=1, description="고변동 추적률"),
+    trailing_tp_min_progress: Optional[float] = Query(None, ge=0, le=1, description="Trigger progress"),
+    trailing_tp_follow_low: Optional[float] = Query(None, ge=0.5, le=1, description="Low-volatility trailing rate"),
+    trailing_tp_follow_mid: Optional[float] = Query(None, ge=0.5, le=1, description="Medium-volatility trailing rate"),
+    trailing_tp_follow_high: Optional[float] = Query(None, ge=0.5, le=1, description="High-volatility trailing rate"),
     # F. Portfolio SL Rate
-    portfolio_sl_rate_enabled: Optional[bool] = Query(None, description="포트폴리오 SL 비율 ON/OFF"),
-    portfolio_sl_rate_window_min: Optional[int] = Query(None, ge=1, le=60, description="감시 윈도우 (분)"),
-    portfolio_sl_rate_threshold: Optional[int] = Query(None, ge=1, le=20, description="SL 횟수 임계"),
-    portfolio_sl_rate_pause_min: Optional[int] = Query(None, ge=1, le=360, description="일시정지 시간 (분)"),
+    portfolio_sl_rate_enabled: Optional[bool] = Query(None, description="Portfolio SL ratio ON/OFF"),
+    portfolio_sl_rate_window_min: Optional[int] = Query(None, ge=1, le=60, description="Monitoring window (min)"),
+    portfolio_sl_rate_threshold: Optional[int] = Query(None, ge=1, le=20, description="SL count threshold"),
+    portfolio_sl_rate_pause_min: Optional[int] = Query(None, ge=1, le=360, description="Pause time (min)"),
     # G. BTC+B12 Combined Cap
-    btc_b12_combined_cap_enabled: Optional[bool] = Query(None, description="BTC+B12 동시 한도 ON/OFF"),
-    btc_b12_combined_cap_max: Optional[int] = Query(None, ge=1, le=10, description="합산 최대 슬롯"),
+    btc_b12_combined_cap_enabled: Optional[bool] = Query(None, description="BTC+B12 simultaneous cap ON/OFF"),
+    btc_b12_combined_cap_max: Optional[int] = Query(None, ge=1, le=10, description="Combined max slots"),
     # H. Override Slot
-    override_min_adx: Optional[float] = Query(None, ge=0, le=100, description="Override 최소 ADX"),
-    override_min_mtf_align: Optional[int] = Query(None, ge=0, le=6, description="Override 최소 MTF align"),
-    override_min_b12_n: Optional[int] = Query(None, ge=0, le=20, description="Override 최소 B12 N"),
-    override_require_btc_trend_match: Optional[bool] = Query(None, description="Override BTC 트렌드 일치 요구"),
-    override_max_extra_slots: Optional[int] = Query(None, ge=0, le=10, description="Override 최대 추가 슬롯"),
-    override_breakeven_trigger_pct: Optional[float] = Query(None, ge=0, le=5, description="Override BE 트리거 (%)"),
+    override_min_adx: Optional[float] = Query(None, ge=0, le=100, description="Override min ADX"),
+    override_min_mtf_align: Optional[int] = Query(None, ge=0, le=6, description="Override min MTF align"),
+    override_min_b12_n: Optional[int] = Query(None, ge=0, le=20, description="Override min B12 N"),
+    override_require_btc_trend_match: Optional[bool] = Query(None, description="Require Override BTC trend match"),
+    override_max_extra_slots: Optional[int] = Query(None, ge=0, le=10, description="Override max extra slots"),
+    override_breakeven_trigger_pct: Optional[float] = Query(None, ge=0, le=5, description="Override BE trigger (%)"),
     # J. Pair Block
     pair_block_enabled: Optional[bool] = Query(None, description="Pair Block ON/OFF"),
-    pair_block_mode: Optional[str] = Query(None, description="Pair Block 모드 (aggressive/conservative)"),
-    pair_block_same_limit: Optional[int] = Query(None, ge=1, le=10, description="같은 방향 최대 페어"),
+    pair_block_mode: Optional[str] = Query(None, description="Pair Block mode (aggressive/conservative)"),
+    pair_block_same_limit: Optional[int] = Query(None, ge=1, le=10, description="Max pairs in the same direction"),
     # K. Coin Profit Lock-in
     coin_profit_lockin_enabled: Optional[bool] = Query(None, description="Profit Lock-in ON/OFF"),
-    coin_profit_lockin_window_hours: Optional[float] = Query(None, ge=0.5, le=48, description="보호 시간 (h)"),
-    coin_profit_lockin_min_realized: Optional[float] = Query(None, ge=0, le=1000, description="발동 최소 실현 수익 ($)"),
-    coin_profit_lockin_protect_ratio: Optional[float] = Query(None, ge=0, le=1, description="보호 비율"),
-    coin_profit_lockin_require_be: Optional[bool] = Query(None, description="BE 도달 후 발동"),
+    coin_profit_lockin_window_hours: Optional[float] = Query(None, ge=0.5, le=48, description="Protection time (h)"),
+    coin_profit_lockin_min_realized: Optional[float] = Query(None, ge=0, le=1000, description="Trigger min realized profit ($)"),
+    coin_profit_lockin_protect_ratio: Optional[float] = Query(None, ge=0, le=1, description="Protection ratio"),
+    coin_profit_lockin_require_be: Optional[bool] = Query(None, description="Trigger after reaching BE"),
     # L. PA Weight
     pa_weight_enabled: Optional[bool] = Query(None, description="PA Weight ON/OFF"),
-    pa_weight_pin_bar: Optional[int] = Query(None, ge=0, le=10, description="PIN_BAR 가중치"),
-    pa_weight_engulfing: Optional[int] = Query(None, ge=0, le=10, description="ENGULFING 가중치"),
-    pa_weight_star_v1: Optional[int] = Query(None, ge=0, le=10, description="STAR_V1 가중치"),
-    pa_weight_star_v2: Optional[int] = Query(None, ge=0, le=10, description="STAR_V2 가중치"),
-    pa_weight_squeeze_break: Optional[int] = Query(None, ge=0, le=10, description="SQUEEZE_BREAK 가중치"),
-    pa_weight_bos: Optional[int] = Query(None, ge=0, le=10, description="BOS 가중치"),
-    pa_weight_zone_bonus: Optional[int] = Query(None, ge=0, le=10, description="Zone 보너스"),
-    pa_zone_proximity_atr: Optional[float] = Query(None, ge=0, le=5, description="Zone ATR 배수"),
-    pa_location_penalty_far: Optional[float] = Query(None, ge=0, le=5, description="멀리 페널티"),
+    pa_weight_pin_bar: Optional[int] = Query(None, ge=0, le=10, description="PIN_BAR weight"),
+    pa_weight_engulfing: Optional[int] = Query(None, ge=0, le=10, description="ENGULFING weight"),
+    pa_weight_star_v1: Optional[int] = Query(None, ge=0, le=10, description="STAR_V1 weight"),
+    pa_weight_star_v2: Optional[int] = Query(None, ge=0, le=10, description="STAR_V2 weight"),
+    pa_weight_squeeze_break: Optional[int] = Query(None, ge=0, le=10, description="SQUEEZE_BREAK weight"),
+    pa_weight_bos: Optional[int] = Query(None, ge=0, le=10, description="BOS weight"),
+    pa_weight_zone_bonus: Optional[int] = Query(None, ge=0, le=10, description="Zone bonus"),
+    pa_zone_proximity_atr: Optional[float] = Query(None, ge=0, le=5, description="Zone ATR multiplier"),
+    pa_location_penalty_far: Optional[float] = Query(None, ge=0, le=5, description="Far penalty"),
     # O. Session Profile times
-    sess_quiet_start_kst: Optional[float] = Query(None, ge=0, le=24, description="quiet 시작 KST (h)"),
-    sess_quiet_end_kst: Optional[float] = Query(None, ge=0, le=24, description="quiet 종료 KST (h)"),
-    sess_active_start_kst: Optional[float] = Query(None, ge=0, le=24, description="active 시작 KST (h)"),
-    sess_active_end_kst: Optional[float] = Query(None, ge=0, le=24, description="active 종료 KST (h)"),
+    sess_quiet_start_kst: Optional[float] = Query(None, ge=0, le=24, description="quiet start KST (h)"),
+    sess_quiet_end_kst: Optional[float] = Query(None, ge=0, le=24, description="quiet end KST (h)"),
+    sess_active_start_kst: Optional[float] = Query(None, ge=0, le=24, description="active start KST (h)"),
+    sess_active_end_kst: Optional[float] = Query(None, ge=0, le=24, description="active end KST (h)"),
     # P. Direction Memory details
     dm_window_count: Optional[int] = Query(None, ge=1, le=20, description="DM window count"),
     dm_lookback_days: Optional[float] = Query(None, ge=0.5, le=30, description="DM lookback days"),
@@ -1399,46 +1399,46 @@ def focus_set_config(
     reverse_drift_atr_period: Optional[int] = Query(None, ge=3, le=50, description="Reverse Drift ATR period"),
     profit_exit_block_min_pnl: Optional[float] = Query(None, ge=0, le=10, description="Profit Exit Block min pnl"),
     # ── Context Engine (2026-04-19) ──
-    session_profile_enabled: Optional[bool] = Query(None, description="Session Profile (KST 시간대 conviction ±) ON/OFF"),
-    direction_memory_enabled: Optional[bool] = Query(None, description="Direction Memory (코인+방향 연패 soft penalty) ON/OFF"),
-    dm_streak_block_enabled: Optional[bool] = Query(None, description="Direction Memory hard block (N연패 시 진입 차단) ON/OFF"),
-    dm_streak_block: Optional[int] = Query(None, ge=2, le=20, description="Hard block 발동 연패 횟수 (기본 4)"),
-    dm_streak_block_hours: Optional[float] = Query(None, ge=0.1, le=168.0, description="DM Streak Hard block 차단 지속 시간(h)"),
-    dm_streak_block_opposite: Optional[bool] = Query(None, description="DM Streak: 반대 방향도 차단 (False=FLIP 허용)"),
-    # ★ Phase F (2026-04-20): Profit Exit Block 3-tuple 설정
+    session_profile_enabled: Optional[bool] = Query(None, description="Session Profile (conviction ± by KST time-of-day) ON/OFF"),
+    direction_memory_enabled: Optional[bool] = Query(None, description="Direction Memory (soft penalty on coin+direction losing streaks) ON/OFF"),
+    dm_streak_block_enabled: Optional[bool] = Query(None, description="Direction Memory hard block (block entry on N-loss streak) ON/OFF"),
+    dm_streak_block: Optional[int] = Query(None, ge=2, le=20, description="Hard-block trigger loss-streak count (default 4)"),
+    dm_streak_block_hours: Optional[float] = Query(None, ge=0.1, le=168.0, description="DM Streak hard-block duration (h)"),
+    dm_streak_block_opposite: Optional[bool] = Query(None, description="DM Streak: block the opposite direction too (False=allow FLIP)"),
+    # ★ Phase F (2026-04-20): Profit Exit Block 3-tuple setting
     profit_exit_block_enabled: Optional[bool] = Query(None, description="B10 Profit Exit Block ON/OFF"),
-    profit_exit_block_min_consecutive: Optional[int] = Query(None, ge=2, le=10, description="발동 연승 횟수 (기본 3)"),
-    profit_exit_block_hours: Optional[float] = Query(None, ge=1, le=72, description="차단 지속 시간(h)"),
-    profit_exit_block_block_opposite: Optional[bool] = Query(None, description="반대 방향도 차단 (기본 False=FLIP 허용)"),
-    # ── ★ [2026-05-18 부모 요청] Consecutive Loss Pause (옛 누락, router/UI 추가) ──
-    consecutive_loss_pause_enabled: Optional[bool] = Query(None, description="N연패 후 자동 정지 (큰 누적손실 회피)"),
-    consecutive_loss_pause_count: Optional[int] = Query(None, ge=2, le=20, description="발동 연패 횟수 (default 3, 검증 모드 권장 10)"),
-    consecutive_loss_pause_min: Optional[int] = Query(None, ge=1, le=1440, description="정지 시간 분 (default 60, 검증 모드 권장 10)"),
-    # ── ★ [2026-06-04 부모] 방향별 레짐 윈도우 실패 차단 ──
-    regime_direction_fail_enabled: Optional[bool] = Query(None, description="방향별 레짐 윈도우 실패 차단 ON/OFF — N시간 내 LONG N회 실패 → LONG만 차단, SHORT는 허용"),
-    regime_direction_fail_window_hours: Optional[float] = Query(None, ge=1, le=24, description="레짐 윈도우 (시간, 기본 4.0=H4 한 봉)"),
-    regime_direction_fail_max: Optional[int] = Query(None, ge=1, le=10, description="허용 실패 횟수 (기본 3, 초과 시 해당 방향 차단)"),
-    btc_regime_enabled: Optional[bool] = Query(None, description="BTC Regime (BTC primary_tf(H1) EMA 레짐 인식 - 역방향 페널티) ON/OFF"),
-    btc_regime_bear_long_delta: Optional[float] = Query(None, ge=-100, le=0, description="[100점 ×10] BEAR 시장 LONG 진입 페널티 (default -20). 입력 시 bull_short_delta 도 동일 적용."),
-    market_bias_enabled: Optional[bool] = Query(None, description="Market Bias (다중 코인 EXIT 쏠림 인식 - 역행 페널티) ON/OFF"),
-    mb_against_delta: Optional[float] = Query(None, ge=-100, le=0, description="[100점 ×10] 쏠림 역행 페널티 (default -10)"),
-    sess_quiet_delta: Optional[float] = Query(None, ge=-100, le=0, description="[100점 ×10] KST 01~06h quiet 시간 페널티 (default -10)"),
-    sess_active_delta: Optional[float] = Query(None, ge=0, le=100, description="[100점 ×10] KST 21~24h active 시간 보너스 (default +10)"),
-    dm_loss_count_delta: Optional[float] = Query(None, ge=-100, le=0, description="[100점 ×10] 같은 코인×방향 연패 페널티 (default -20)"),
-    # ── B11 Regime Direction Lock (2026-04-19 하드 차단, 3축 토글) ──
-    regime_direction_lock_enabled: Optional[bool] = Query(None, description="B11 Regime Direction Lock 마스터 (BULL→LONG only / BEAR→SHORT only / NEUTRAL→REST)"),
-    regime_lock_use_slope: Optional[bool] = Query(None, description="B11 Slope 축 — EMA20 기울기 ≥0.3% 엄격 판정 ON/OFF"),
-    regime_lock_use_distance: Optional[bool] = Query(None, description="B11 Distance 축 — EMA50 대비 거리 ≥1.0% 엄격 판정 ON/OFF"),
-    regime_lock_use_cross: Optional[bool] = Query(None, description="B11 Direction 축 — EMA20 vs EMA50 방향 판정 ON/OFF (코어)"),
-    # ── B12 Scanner Breadth Lock (2026-04-23 부모 직접 요청, B11과 mutually exclusive) ──
-    regime_lock_mode: Optional[str] = Query(None, description="Regime Lock Mode: B11 (BTC EMA) / B12 (Scanner 합창) / OFF (둘 다 해제)"),
-    b12_threshold_n: Optional[int] = Query(None, ge=1, le=20, description="B12 N: 같은 방향 가리키는 최소 마켓 수 (default 6 = 75% of 8)"),
-    b12_window_sec: Optional[float] = Query(None, ge=60.0, le=3600.0, description="B12 투표 집계 윈도우 (sec, default 1200=20분, 데이터 분석 기반)"),
-    # ── 방향별 슬롯 상한 (2026-04-20 형 지시, -1=Auto, 0=차단, N=명시) ──
-    max_long_positions: Optional[int] = Query(None, ge=-1, le=50, description="LONG 슬롯 상한 (-1=Auto=max_same_direction, 0=완전 차단, N=명시)"),
-    max_short_positions: Optional[int] = Query(None, ge=-1, le=50, description="SHORT 슬롯 상한 (-1=Auto=max_same_direction, 0=완전 차단, N=명시)"),
-    auto_first_dir_lock: Optional[bool] = Query(None, description="[2026-04-26] Auto 모드 첫 발 방향 잠금 (true=초단타, false=롱홀드 양방향 자유)"),
-    # 똑똑하게 #2,#4,#5,#6,#7 (2026-04-26 부모님 1단계)
+    profit_exit_block_min_consecutive: Optional[int] = Query(None, ge=2, le=10, description="Trigger win-streak count (default 3)"),
+    profit_exit_block_hours: Optional[float] = Query(None, ge=1, le=72, description="Block duration (h)"),
+    profit_exit_block_block_opposite: Optional[bool] = Query(None, description="Block the opposite direction too (default False=allow FLIP)"),
+    # ── ★ [2026-05-18 owner request] Consecutive Loss Pause (previously missing, added to router/UI) ──
+    consecutive_loss_pause_enabled: Optional[bool] = Query(None, description="Auto-pause after N consecutive losses (avoids large cumulative loss)"),
+    consecutive_loss_pause_count: Optional[int] = Query(None, ge=2, le=20, description="Trigger loss-streak count (default 3, validation mode recommends 10)"),
+    consecutive_loss_pause_min: Optional[int] = Query(None, ge=1, le=1440, description="Pause time minutes (default 60, validation mode recommends 10)"),
+    # ── ★ [2026-06-04 owner] Per-direction regime-window failure block ──
+    regime_direction_fail_enabled: Optional[bool] = Query(None, description="Per-direction regime-window failure block ON/OFF — N LONG failures within N hours → block LONG only, allow SHORT"),
+    regime_direction_fail_window_hours: Optional[float] = Query(None, ge=1, le=24, description="Regime window (hours, default 4.0=one H4 bar)"),
+    regime_direction_fail_max: Optional[int] = Query(None, ge=1, le=10, description="Allowed failures (default 3, blocks that direction when exceeded)"),
+    btc_regime_enabled: Optional[bool] = Query(None, description="BTC Regime (recognize the BTC primary_tf(H1) EMA regime - counter-direction penalty) ON/OFF"),
+    btc_regime_bear_long_delta: Optional[float] = Query(None, ge=-100, le=0, description="[100-scale ×10] BEAR-market LONG-entry penalty (default -20). When set, applies equally to bull_short_delta."),
+    market_bias_enabled: Optional[bool] = Query(None, description="Market Bias (recognize multi-coin EXIT skew - counter penalty) ON/OFF"),
+    mb_against_delta: Optional[float] = Query(None, ge=-100, le=0, description="[100-scale ×10] skew-counter penalty (default -10)"),
+    sess_quiet_delta: Optional[float] = Query(None, ge=-100, le=0, description="[100-scale ×10] KST 01~06h quiet-hours penalty (default -10)"),
+    sess_active_delta: Optional[float] = Query(None, ge=0, le=100, description="[100-scale ×10] KST 21~24h active-hours bonus (default +10)"),
+    dm_loss_count_delta: Optional[float] = Query(None, ge=-100, le=0, description="[100-scale ×10] same coin×direction losing-streak penalty (default -20)"),
+    # ── B11 Regime Direction Lock (2026-04-19 hard block, 3-axis toggle) ──
+    regime_direction_lock_enabled: Optional[bool] = Query(None, description="B11 Regime Direction Lock master (BULL→LONG only / BEAR→SHORT only / NEUTRAL→REST)"),
+    regime_lock_use_slope: Optional[bool] = Query(None, description="B11 Slope axis — strict EMA20 slope ≥0.3% determination ON/OFF"),
+    regime_lock_use_distance: Optional[bool] = Query(None, description="B11 Distance axis — strict distance ≥1.0% from EMA50 determination ON/OFF"),
+    regime_lock_use_cross: Optional[bool] = Query(None, description="B11 Direction axis — EMA20 vs EMA50 direction determination ON/OFF (core)"),
+    # ── B12 Scanner Breadth Lock (2026-04-23 owner direct request, mutually exclusive with B11) ──
+    regime_lock_mode: Optional[str] = Query(None, description="Regime Lock Mode: B11 (BTC EMA) / B12 (Scanner chorus) / OFF (both off)"),
+    b12_threshold_n: Optional[int] = Query(None, ge=1, le=20, description="B12 N: min markets pointing the same direction (default 6 = 75% of 8)"),
+    b12_window_sec: Optional[float] = Query(None, ge=60.0, le=3600.0, description="B12 vote aggregation window (sec, default 1200=20min, data-analysis based)"),
+    # ── Per-direction slot cap (2026-04-20 this agent's instruction, -1=Auto, 0=block, N=explicit) ──
+    max_long_positions: Optional[int] = Query(None, ge=-1, le=50, description="LONG slot cap (-1=Auto=max_same_direction, 0=fully blocked, N=explicit)"),
+    max_short_positions: Optional[int] = Query(None, ge=-1, le=50, description="SHORT slot cap (-1=Auto=max_same_direction, 0=fully blocked, N=explicit)"),
+    auto_first_dir_lock: Optional[bool] = Query(None, description="[2026-04-26] Lock the first-shot direction in Auto mode (true=scalping, false=long-hold both directions free)"),
+    # Smartly #2,#4,#5,#6,#7 (2026-04-26 owner stage 1)
     regime_reversal_pause_enabled: Optional[bool] = Query(None),
     regime_reversal_ema_gap_threshold_pct: Optional[float] = Query(None, ge=0.01, le=5.0),
     regime_reversal_adx_threshold: Optional[float] = Query(None, ge=5.0, le=50.0),
@@ -1446,13 +1446,13 @@ def focus_set_config(
     conv_sizing_enabled: Optional[bool] = Query(None),
     conv_sizing_low_threshold: Optional[float] = Query(None, ge=0, le=100),
     conv_sizing_high_threshold: Optional[float] = Query(None, ge=0, le=100),
-    conv_risk_scale_enabled: Optional[bool] = Query(None, description="[진입점수=확신] guard점수 기준 risk 역U자 스케일 ON/OFF (default OFF)"),
-    conv_risk_peak_conv: Optional[float] = Query(None, ge=0, le=200, description="[진입점수=확신] sweet spot 시작/정점 conviction (default 65)"),
-    conv_risk_peak_mult: Optional[float] = Query(None, ge=0.1, le=3, description="[진입점수=확신] sweet spot risk 배수 (default 1.5)"),
-    conv_risk_chop_conv: Optional[float] = Query(None, ge=0, le=200, description="[진입점수=확신] 끝물 라인 (default 80)"),
-    conv_risk_chop_mult: Optional[float] = Query(None, ge=0.1, le=2, description="[진입점수=확신] 끝물 risk 컷 배수 (default 0.6)"),
-    conv_risk_floor_mult: Optional[float] = Query(None, ge=0.1, le=2, description="[진입점수=확신] 임계 미만 배수 (default 0.5)"),
-    conv_risk_max_mult: Optional[float] = Query(None, ge=0.5, le=5, description="[진입점수=확신] factor 안전 상한 (default 2.0)"),
+    conv_risk_scale_enabled: Optional[bool] = Query(None, description="[entry score=conviction] inverse-U risk scaling based on the guard score ON/OFF (default OFF)"),
+    conv_risk_peak_conv: Optional[float] = Query(None, ge=0, le=200, description="[entry score=conviction] sweet-spot start/peak conviction (default 65)"),
+    conv_risk_peak_mult: Optional[float] = Query(None, ge=0.1, le=3, description="[entry score=conviction] sweet-spot risk multiplier (default 1.5)"),
+    conv_risk_chop_conv: Optional[float] = Query(None, ge=0, le=200, description="[entry score=conviction] late line (default 80)"),
+    conv_risk_chop_mult: Optional[float] = Query(None, ge=0.1, le=2, description="[entry score=conviction] late risk-cut multiplier (default 0.6)"),
+    conv_risk_floor_mult: Optional[float] = Query(None, ge=0.1, le=2, description="[entry score=conviction] below-threshold multiplier (default 0.5)"),
+    conv_risk_max_mult: Optional[float] = Query(None, ge=0.5, le=5, description="[entry score=conviction] factor safety cap (default 2.0)"),
     btc_trend_conv_bonus_enabled: Optional[bool] = Query(None),
     btc_trend_conv_bonus: Optional[float] = Query(None, ge=0, le=30),
     winners_add_self_growth_enabled: Optional[bool] = Query(None),
@@ -1463,185 +1463,185 @@ def focus_set_config(
     multi_be_lock_stage2_pct: Optional[float] = Query(None, ge=0.1, le=10.0),
     multi_be_lock_stage3_pct: Optional[float] = Query(None, ge=0.1, le=10.0),
     multi_be_lock_stage4_pct: Optional[float] = Query(None, ge=0.1, le=10.0),
-    multi_be_lock_fee_cushion_pct: Optional[float] = Query(None, ge=0.0, le=2.0, description="stage1 fee cushion (기본 0.05, BE 후 건당 소액 fee 손실 방지)"),
-    # ── ★ [2026-06-04 부모] Smart BE Lock ──
-    be_lock_smart_rsi_check: Optional[bool] = Query(None, description="① RSI 이윤 방향 체크 — 달리는 중이면 BE 보류"),
-    be_lock_smart_candle_check: Optional[bool] = Query(None, description="② 직전 N봉 연속 이윤 방향 체크 — 가속 중이면 BE 보류"),
-    be_lock_smart_rsi_long_min: Optional[float] = Query(None, ge=40, le=80, description="LONG: RSI ≥ 이 값 = 달리는 중 (기본 55)"),
-    be_lock_smart_rsi_short_max: Optional[float] = Query(None, ge=20, le=60, description="SHORT: RSI ≤ 이 값 = 달리는 중 (기본 45)"),
-    be_lock_smart_candle_count: Optional[int] = Query(None, ge=2, le=10, description="직전 N봉(5M) 연속 이윤 방향 (기본 3)"),
+    multi_be_lock_fee_cushion_pct: Optional[float] = Query(None, ge=0.0, le=2.0, description="stage1 fee cushion (default 0.05, prevents small per-trade fee loss after BE)"),
+    # ── ★ [2026-06-04 owner] Smart BE Lock ──
+    be_lock_smart_rsi_check: Optional[bool] = Query(None, description="① RSI profit-direction check — defer BE if it's running"),
+    be_lock_smart_candle_check: Optional[bool] = Query(None, description="② Check the last N bars for a consecutive profit direction — defer BE if accelerating"),
+    be_lock_smart_rsi_long_min: Optional[float] = Query(None, ge=40, le=80, description="LONG: RSI ≥ this = running (default 55)"),
+    be_lock_smart_rsi_short_max: Optional[float] = Query(None, ge=20, le=60, description="SHORT: RSI ≤ this = running (default 45)"),
+    be_lock_smart_candle_count: Optional[int] = Query(None, ge=2, le=10, description="Consecutive profit direction over the last N bars (5M) (default 3)"),
     parent_roe_guard_enabled: Optional[bool] = Query(None),
     parent_max_roe_loss_pct: Optional[float] = Query(None, ge=10.0, le=99.0),
-    # ── Phase J v2 (2026-04-21): ADX 하락 중 방향 무관 skip — 시장 식어감 감지 ──
-    adx_slope_check_enabled: Optional[bool] = Query(None, description="Phase J v2: ADX 하락 중 방향 무관 진입 skip ON/OFF"),
-    adx_slope_lookback_bars: Optional[int] = Query(None, ge=1, le=10, description="Phase J v2: 몇 primary_tf(H1) 봉 전 대비 비교 (기본 3=3h)"),
-    adx_slope_decline_threshold_pct: Optional[float] = Query(None, ge=0.5, le=30.0, description="Phase J v2: N% 이상 하락 시 skip (기본 2.0)"),
+    # ── Phase J v2 (2026-04-21): skip (any direction) while ADX is falling — detects the market cooling ──
+    adx_slope_check_enabled: Optional[bool] = Query(None, description="Phase J v2: skip entries (any direction) while ADX is falling ON/OFF"),
+    adx_slope_lookback_bars: Optional[int] = Query(None, ge=1, le=10, description="Phase J v2: compare against how many primary_tf(H1) bars ago (default 3=3h)"),
+    adx_slope_decline_threshold_pct: Optional[float] = Query(None, ge=0.5, le=30.0, description="Phase J v2: skip on a drop of ≥ N% (default 2.0)"),
     # ── Phase K (2026-04-21): Regime Transition Preemptive Entry ──
-    # ⚠️ J v2 와 상호 배제 — K=True 면 J v2 자동 무시. 같은 ADX 하락 신호에 K=flip 우선.
-    # paper_mode=True 면 진입 없이 phase_k_paper_log.jsonl 만 기록.
-    regime_transition_enabled: Optional[bool] = Query(None, description="Phase K: Regime Transition Preemptive Entry ON/OFF (⚠️ J v2 자동 OFF)"),
-    regime_transition_paper_mode: Optional[bool] = Query(None, description="Phase K: paper mode (True=진입없이 JSONL기록만, False=실진입)"),
-    regime_transition_size_mult: Optional[float] = Query(None, ge=0.1, le=0.5, description="Phase K: size multiplier (0.3 floor → 0.5 CAP — 검수 Q4 확정)"),
-    regime_transition_tp_mult: Optional[float] = Query(None, ge=0.3, le=1.5, description="Phase K: TP multiplier (기본 0.7 초단기)"),
-    regime_transition_sl_mult: Optional[float] = Query(None, ge=0.3, le=1.5, description="Phase K: SL multiplier (기본 0.8 타이트)"),
-    regime_transition_adx_decline_ratio: Optional[float] = Query(None, ge=0.80, le=0.99, description="Phase K: adx_now < adx_past × ratio 조건 (기본 0.95)"),
-    regime_transition_ema_gap_threshold_pct: Optional[float] = Query(None, ge=0.1, le=2.0, description="Phase K: BTC |EMA20-50|/price 임계 (기본 0.3%)"),
-    regime_transition_min_conviction: Optional[float] = Query(None, ge=0, le=100, description="[100점] Phase K 최소 conviction (default 75)"),
-    regime_transition_last_change_age_min: Optional[float] = Query(None, ge=30.0, le=1440.0, description="Phase K: regime 전환 후 최소 age (분, 기본 180)"),
-    regime_transition_daily_fail_limit: Optional[int] = Query(None, ge=1, le=20, description="Phase K: 일일 실패 한도 (기본 3, v2 자동 off 로직)"),
-    regime_transition_weekly_fail_limit: Optional[int] = Query(None, ge=1, le=50, description="Phase K: 주간 실패 한도 (기본 5)"),
-    regime_transition_min_mtf_align: Optional[int] = Query(None, ge=1, le=5, description="Phase K: MTF 정렬 최소 수 (v1 미사용)"),
+    # ⚠️ Mutually exclusive with J v2 — when K=True, J v2 is auto-ignored. On the same ADX-fall signal, K=flip takes priority.
+    # When paper_mode=True, only logs to phase_k_paper_log.jsonl without entering.
+    regime_transition_enabled: Optional[bool] = Query(None, description="Phase K: Regime Transition Preemptive Entry ON/OFF (⚠️ auto-turns J v2 OFF)"),
+    regime_transition_paper_mode: Optional[bool] = Query(None, description="Phase K: paper mode (True=JSONL records only, no entry; False=real entry)"),
+    regime_transition_size_mult: Optional[float] = Query(None, ge=0.1, le=0.5, description="Phase K: size multiplier (0.3 floor → 0.5 CAP — finalized in Q4 review)"),
+    regime_transition_tp_mult: Optional[float] = Query(None, ge=0.3, le=1.5, description="Phase K: TP multiplier (default 0.7 ultra-short)"),
+    regime_transition_sl_mult: Optional[float] = Query(None, ge=0.3, le=1.5, description="Phase K: SL multiplier (default 0.8 tight)"),
+    regime_transition_adx_decline_ratio: Optional[float] = Query(None, ge=0.80, le=0.99, description="Phase K: condition adx_now < adx_past × ratio (default 0.95)"),
+    regime_transition_ema_gap_threshold_pct: Optional[float] = Query(None, ge=0.1, le=2.0, description="Phase K: BTC |EMA20-50|/price threshold (default 0.3%)"),
+    regime_transition_min_conviction: Optional[float] = Query(None, ge=0, le=100, description="[100-scale] Phase K min conviction (default 75)"),
+    regime_transition_last_change_age_min: Optional[float] = Query(None, ge=30.0, le=1440.0, description="Phase K: min age after a regime transition (min, default 180)"),
+    regime_transition_daily_fail_limit: Optional[int] = Query(None, ge=1, le=20, description="Phase K: daily failure cap (default 3, v2 auto-off logic)"),
+    regime_transition_weekly_fail_limit: Optional[int] = Query(None, ge=1, le=50, description="Phase K: weekly failure cap (default 5)"),
+    regime_transition_min_mtf_align: Optional[int] = Query(None, ge=1, le=5, description="Phase K: min MTF alignment count (unused in v1)"),
     # ── Phase L (2026-04-22): S3 Fee-Aware net_ev Gate ──
-    # 형 letter #11 검수 기준 10항목 + 엣지 7건. paper_mode 1주 → 7 조건 통과 → live.
+    # This agent's letter #11 review: 10 criteria + 7 edge cases. paper_mode for 1 week → pass 7 conditions → live.
     s3_gate_enabled: Optional[bool] = Query(None, description="Phase L: S3 Fee-Aware Gate ON/OFF (default OFF)"),
-    s3_gate_paper_mode: Optional[bool] = Query(None, description="Phase L: paper mode (True=skip 안 함, 가상 카운터)"),
-    s3_gate_min_net_ev_usdt: Optional[float] = Query(None, ge=-10.0, le=100.0, description="Phase L: net_ev 임계 ($), 기본 0 = 손익분기"),
-    s3_gate_fee_multiplier: Optional[float] = Query(None, ge=1.0, le=5.0, description="Phase L: 수수료 안전 마진 배수 (기본 2 = 왕복)"),
-    s3_gate_slippage_bps: Optional[float] = Query(None, ge=0.0, le=50.0, description="Phase L: 슬리피지 bp (기본 5 = 0.05%)"),
-    s3_gate_link_multiplier: Optional[float] = Query(None, ge=1.0, le=3.0, description="Phase L: LINK 도박기질 가드 배수 (기본 1.3)"),
-    # 🪙 Orderbook 깊이 사이즈 적응 (2026-06-09 부모 "잔돈 없는 환전소")
-    orderbook_depth_sizing_enabled: Optional[bool] = Query(None, description="🪙 진입 사이즈를 호가 수용량에 맞춤 — 미체결 방지 (default OFF)"),
-    orderbook_depth_max_slippage_pct: Optional[float] = Query(None, ge=0.05, le=2.0, description="이 % 이내 호가까지 체결가능으로 집계 (기본 0.3)"),
-    orderbook_depth_min_fill_ratio: Optional[float] = Query(None, ge=0.1, le=1.0, description="수용량/의도 < 이 비율이면 skip (기본 0.5)"),
-    # ── Phase L.1 ─ Fast-Reject 강화 (Harpoon 0-6 → FOCUS 이식) ──
-    fast_reject_v2_enabled: Optional[bool] = Query(None, description="Phase L.1: 30초 peak 0% 즉시 컷 (default OFF)"),
-    fast_reject_v2_max_sec: Optional[float] = Query(None, ge=10.0, le=300.0, description="Phase L.1: 검사 최대 초"),
-    fast_reject_v2_peak_threshold_pct: Optional[float] = Query(None, ge=0.0, le=1.0, description="Phase L.1: peak 임계 (%)"),
-    fast_reject_v2_pnl_pct: Optional[float] = Query(None, ge=-2.0, le=0.0, description="Phase L.1: pnl 임계 (%, 음수)"),
-    # ── Phase L.2 ─ 재진입 30분 cooldown (Harpoon 0-7 → FOCUS 이식) ──
-    reentry_cooldown_v2_enabled: Optional[bool] = Query(None, description="Phase L.2: SL 후 30분 동일 코인+방향 차단 (default OFF)"),
-    reentry_cooldown_v2_min: Optional[float] = Query(None, ge=5.0, le=240.0, description="Phase L.2: 차단 분"),
-    # ── Phase L.3 ─ PA 2건 합의 (S3 Gate 품질 게이트) ──
-    pa_double_confirm_enabled: Optional[bool] = Query(None, description="Phase L.3: PA 2건 합의 시 S3 Gate net_ev × 1.10 (default OFF)"),
-    pa_double_confirm_window_sec: Optional[float] = Query(None, ge=30.0, le=300.0, description="Phase L.3: 합의 윈도우 (초)"),
-    # ── ★★★ [2026-05-27 부모 정신] Phase 6 — H4/H1 PA + 점수 통합 + 5M 긴급탈출 ──
-    # α. Phase 6 점수 통합 (Master)
-    guard_score_mode_enabled: Optional[bool] = Query(None, description="Phase 6 점수 통합 마스터 — 가드 차단 → conv 가산/감점 (운영자 5-27)"),
-    guard_score_mode_auto_paper: Optional[bool] = Query(None, description="auto_paper: paper 자동 ON / LIVE 자동 OFF (사무실 보호)"),
-    guard_score_threshold: Optional[float] = Query(None, ge=0, le=200, description="Phase 6 진입 임계 (default 80)"),
-    # ★ [2026-06-12] 추세정렬 multicollinearity 캡
-    regime_align_cap_enabled: Optional[bool] = Query(None, description="추세정렬(Frame+Trend+AltBTC) 합산 캡 — 역행 다리 핸디캡 축소(SHORT 공평) ON/OFF"),
-    regime_align_cap: Optional[float] = Query(None, ge=0, le=60, description="추세정렬 합산 클램프 ±값 (default 15)"),
-    combo_f_dedupe_enabled: Optional[bool] = Query(None, description="combo_f 방향 이중계산(F1 MTF·F2 M5) 제거 — SHORT 적자 최대원인 fix ON/OFF"),
-    guard_dir_dedupe_enabled: Optional[bool] = Query(None, description="guard 방향 이중계산(Frame/Trend/AltBTC/BTC정렬=conviction과 중복) 제거 ON/OFF"),
+    s3_gate_paper_mode: Optional[bool] = Query(None, description="Phase L: paper mode (True=doesn't skip, virtual counter)"),
+    s3_gate_min_net_ev_usdt: Optional[float] = Query(None, ge=-10.0, le=100.0, description="Phase L: net_ev threshold ($), default 0 = break-even"),
+    s3_gate_fee_multiplier: Optional[float] = Query(None, ge=1.0, le=5.0, description="Phase L: fee safety-margin multiplier (default 2 = round-trip)"),
+    s3_gate_slippage_bps: Optional[float] = Query(None, ge=0.0, le=50.0, description="Phase L: slippage bp (default 5 = 0.05%)"),
+    s3_gate_link_multiplier: Optional[float] = Query(None, ge=1.0, le=3.0, description="Phase L: LINK gambler-trait guard multiplier (default 1.3)"),
+    # 🪙 Order-book depth size adaptation (2026-06-09 owner "an exchange with no change")
+    orderbook_depth_sizing_enabled: Optional[bool] = Query(None, description="🪙 Fit entry size to the order-book capacity — prevents non-fills (default OFF)"),
+    orderbook_depth_max_slippage_pct: Optional[float] = Query(None, ge=0.05, le=2.0, description="Count order-book levels within this % as fillable (default 0.3)"),
+    orderbook_depth_min_fill_ratio: Optional[float] = Query(None, ge=0.1, le=1.0, description="Skip if capacity/intended < this ratio (default 0.5)"),
+    # ── Phase L.1 ─ Fast-Reject reinforcement (ported Harpoon 0-6 → FOCUS) ──
+    fast_reject_v2_enabled: Optional[bool] = Query(None, description="Phase L.1: instant cut on a 30s peak of 0% (default OFF)"),
+    fast_reject_v2_max_sec: Optional[float] = Query(None, ge=10.0, le=300.0, description="Phase L.1: max inspection seconds"),
+    fast_reject_v2_peak_threshold_pct: Optional[float] = Query(None, ge=0.0, le=1.0, description="Phase L.1: peak threshold (%)"),
+    fast_reject_v2_pnl_pct: Optional[float] = Query(None, ge=-2.0, le=0.0, description="Phase L.1: pnl threshold (%, negative)"),
+    # ── Phase L.2 ─ 30-min re-entry cooldown (ported Harpoon 0-7 → FOCUS) ──
+    reentry_cooldown_v2_enabled: Optional[bool] = Query(None, description="Phase L.2: block the same coin+direction for 30 min after an SL (default OFF)"),
+    reentry_cooldown_v2_min: Optional[float] = Query(None, ge=5.0, le=240.0, description="Phase L.2: block minutes"),
+    # ── Phase L.3 ─ Agreement of 2 PAs (S3 Gate quality gate) ──
+    pa_double_confirm_enabled: Optional[bool] = Query(None, description="Phase L.3: on agreement of 2 PAs, S3 Gate net_ev × 1.10 (default OFF)"),
+    pa_double_confirm_window_sec: Optional[float] = Query(None, ge=30.0, le=300.0, description="Phase L.3: agreement window (sec)"),
+    # ── ★★★ [2026-05-27 owner spirit] Phase 6 — H4/H1 PA + score integration + 5M emergency exit ──
+    # α. Phase 6 score integration (Master)
+    guard_score_mode_enabled: Optional[bool] = Query(None, description="Phase 6 score-integration master — guard block → conv bonus/penalty (operator 5-27)"),
+    guard_score_mode_auto_paper: Optional[bool] = Query(None, description="auto_paper: auto-ON in paper / auto-OFF in LIVE (office protection)"),
+    guard_score_threshold: Optional[float] = Query(None, ge=0, le=200, description="Phase 6 entry threshold (default 80)"),
+    # ★ [2026-06-12] Trend-alignment multicollinearity cap
+    regime_align_cap_enabled: Optional[bool] = Query(None, description="Trend-alignment (Frame+Trend+AltBTC) sum cap — reduces the counter-leg handicap (fair for SHORT) ON/OFF"),
+    regime_align_cap: Optional[float] = Query(None, ge=0, le=60, description="Trend-alignment sum clamp ±value (default 15)"),
+    combo_f_dedupe_enabled: Optional[bool] = Query(None, description="Remove combo_f direction double-counting (F1 MTF, F2 M5) — fixes the biggest cause of SHORT losses ON/OFF"),
+    guard_dir_dedupe_enabled: Optional[bool] = Query(None, description="Remove guard direction double-counting (Frame/Trend/AltBTC/BTC-alignment = overlaps conviction) ON/OFF"),
     # β. PA Completion (Sig + ไส้หลัง) ⭐
-    pa_completion_enabled: Optional[bool] = Query(None, description="PA Completion — Pat 1/2/3 외 진입 불가 ⭐ 운영자 핵심"),
+    pa_completion_enabled: Optional[bool] = Query(None, description="PA Completion — no entry outside Pat 1/2/3 ⭐ operator core"),
     pa_completion_auto_paper: Optional[bool] = Query(None, description="auto_paper: paper ON / LIVE OFF"),
-    pa_completion_huikkang_min_ratio: Optional[float] = Query(None, ge=0.5, le=5, description="ไส้หลัง body 최소 배수 (default 1.5)"),
+    pa_completion_huikkang_min_ratio: Optional[float] = Query(None, ge=0.5, le=5, description="Tail body min multiplier (default 1.5)"),
     pa_completion_lookback_bars: Optional[int] = Query(None, ge=2, le=10, description="lookback bars (default 3)"),
-    pa_completion_sig_max_ratio: Optional[float] = Query(None, ge=0.3, le=3, description="Sig body 최대 비율 (default 1.0)"),
+    pa_completion_sig_max_ratio: Optional[float] = Query(None, ge=0.3, le=3, description="Sig body max ratio (default 1.0)"),
     # γ. H4 Pulse Only
-    h4_pulse_only_enabled: Optional[bool] = Query(None, description="H4 Pulse Only — H4 마감 후 N분만 진입"),
+    h4_pulse_only_enabled: Optional[bool] = Query(None, description="H4 Pulse Only — enter only within N minutes after the H4 close"),
     h4_pulse_auto_paper: Optional[bool] = Query(None, description="auto_paper: paper ON / LIVE OFF"),
-    h4_pulse_window_min: Optional[int] = Query(None, ge=5, le=240, description="H4 펄스 창 분 (default 60)"),
-    # ── [패치 v2-A] Pre-Close 선행 진입 ──
-    preclose_entry_enabled: Optional[bool] = Query(None, description="[패치v2-A] H4 마감 전 형태완성 선진입 ON/OFF (default OFF)"),
-    preclose_min_elapsed_pct: Optional[float] = Query(None, ge=50, le=100, description="[패치v2-A] H4 진행봉 경과율 임계 (default 88)"),
-    preclose_size_ratio: Optional[float] = Query(None, ge=0.05, le=1.0, description="[패치v2-A] 선행 진입 사이즈 비율 (default 0.5)"),
-    preclose_wick_ratio_min: Optional[float] = Query(None, ge=0.5, le=5.0, description="[패치v2-A] 핀바 꼬리/몸통 비율 (default 1.5)"),
-    preclose_body_dir_required: Optional[bool] = Query(None, description="[패치v2-A] 몸통방향+종가위치 조건 사용 (default True)"),
-    preclose_max_per_day: Optional[int] = Query(None, ge=0, le=50, description="[패치v2-A] 일일 선행 진입 상한 (default 5)"),
-    preclose_min_conviction: Optional[float] = Query(None, ge=0, le=200, description="[패치v2-A] 선행 자격 base conviction 하한 (default 50)"),
-    preclose_topup_enabled: Optional[bool] = Query(None, description="[패치v2-A2] 마감 확인 증액(2차 진입) ON/OFF (default OFF)"),
-    preclose_topup_min_pnl_pct: Optional[float] = Query(None, ge=-5, le=10, description="[패치v2-A2] 증액 확인 pnl 하한 % (default 0)"),
-    preclose_topup_max_chase_pct: Optional[float] = Query(None, ge=0, le=10, description="[패치v2-A2] 과다추격 캡 % (default 1)"),
-    preclose_topup_require_candle_dir: Optional[bool] = Query(None, description="[패치v2-A2] 직전 마감 H4봉 방향 일치 요구 (default True)"),
-    preclose_topup_grace_min: Optional[float] = Query(None, ge=5, le=240, description="[패치v2-A2] 마감 후 증액 허용 창(분) (default 60)"),
+    h4_pulse_window_min: Optional[int] = Query(None, ge=5, le=240, description="H4 pulse window minutes (default 60)"),
+    # ── [patch v2-A] Pre-Close leading entry ──
+    preclose_entry_enabled: Optional[bool] = Query(None, description="[patch v2-A] pre-entry on pattern completion before the H4 close ON/OFF (default OFF)"),
+    preclose_min_elapsed_pct: Optional[float] = Query(None, ge=50, le=100, description="[patch v2-A] H4 in-progress bar elapsed-ratio threshold (default 88)"),
+    preclose_size_ratio: Optional[float] = Query(None, ge=0.05, le=1.0, description="[patch v2-A] leading-entry size ratio (default 0.5)"),
+    preclose_wick_ratio_min: Optional[float] = Query(None, ge=0.5, le=5.0, description="[patch v2-A] pin-bar tail/body ratio (default 1.5)"),
+    preclose_body_dir_required: Optional[bool] = Query(None, description="[patch v2-A] use the body-direction + close-position condition (default True)"),
+    preclose_max_per_day: Optional[int] = Query(None, ge=0, le=50, description="[patch v2-A] daily leading-entry cap (default 5)"),
+    preclose_min_conviction: Optional[float] = Query(None, ge=0, le=200, description="[patch v2-A] leading-eligibility base-conviction floor (default 50)"),
+    preclose_topup_enabled: Optional[bool] = Query(None, description="[patch v2-A2] add on close confirmation (second entry) ON/OFF (default OFF)"),
+    preclose_topup_min_pnl_pct: Optional[float] = Query(None, ge=-5, le=10, description="[patch v2-A2] add-confirmation pnl floor % (default 0)"),
+    preclose_topup_max_chase_pct: Optional[float] = Query(None, ge=0, le=10, description="[patch v2-A2] over-chase cap % (default 1)"),
+    preclose_topup_require_candle_dir: Optional[bool] = Query(None, description="[patch v2-A2] require the last closed H4 bar's direction to match (default True)"),
+    preclose_topup_grace_min: Optional[float] = Query(None, ge=5, le=240, description="[patch v2-A2] window allowing the add after close (min) (default 60)"),
     # δ. H1 PA Pulse
-    h1_pa_pulse_enabled: Optional[bool] = Query(None, description="H1 PA Pulse — H4 외 H1 PA 도 진입 (운영자 5-27 ②)"),
+    h1_pa_pulse_enabled: Optional[bool] = Query(None, description="H1 PA Pulse — also enter on H1 PA besides H4 (operator 5-27 ②)"),
     h1_pa_pulse_auto_paper: Optional[bool] = Query(None, description="auto_paper: paper ON / LIVE OFF"),
-    h1_pa_pulse_window_min: Optional[int] = Query(None, ge=5, le=60, description="H1 펄스 창 분 (default 15)"),
+    h1_pa_pulse_window_min: Optional[int] = Query(None, ge=5, le=60, description="H1 pulse window minutes (default 15)"),
     h1_pa_pulse_lookback_bars: Optional[int] = Query(None, ge=1, le=5, description="lookback bars (default 2)"),
     h1_pa_pulse_min_confidence: Optional[float] = Query(None, ge=0, le=1, description="min confidence (default 0.5)"),
-    h1_pa_pulse_require_day_dir: Optional[bool] = Query(None, description="day_direction 정렬 강제 (default true)"),
+    h1_pa_pulse_require_day_dir: Optional[bool] = Query(None, description="Force day_direction alignment (default true)"),
     # ε. Anchor Fast-Track
-    anchor_fasttrack_enabled: Optional[bool] = Query(None, description="Anchor 근처 즉시 진입 — microtiming 5M 우회"),
+    anchor_fasttrack_enabled: Optional[bool] = Query(None, description="Immediate entry near the anchor — bypasses 5M microtiming"),
     anchor_fasttrack_auto_paper: Optional[bool] = Query(None, description="auto_paper: paper ON / LIVE OFF"),
     anchor_fasttrack_max_proximity: Optional[float] = Query(None, ge=0.05, le=1.0, description="max proximity (default 0.33)"),
     # ζ. Day Box Guard
-    day_box_guard_enabled: Optional[bool] = Query(None, description="Day Box — D1 9시 박스 핑퐁 상하한선 (운영자 5-27 ③)"),
+    day_box_guard_enabled: Optional[bool] = Query(None, description="Day Box — D1 09:00 box ping-pong upper/lower bounds (operator 5-27 ③)"),
     day_box_guard_auto_paper: Optional[bool] = Query(None, description="auto_paper: paper ON / LIVE OFF"),
-    day_box_window_hours: Optional[float] = Query(None, ge=1, le=12, description="박스 형성 시간 (default 4.0)"),
-    day_box_lock_min_hours: Optional[float] = Query(None, ge=0.5, le=12, description="lock 판정 가능 최소 시간 (default 3.5)"),
-    day_box_max_atr_ratio: Optional[float] = Query(None, ge=0.1, le=3, description="최대 ATR 비율 (default 0.8)"),
-    day_box_min_touches: Optional[int] = Query(None, ge=1, le=10, description="양극점 최소 터치 (default 2)"),
-    day_box_edge_pct: Optional[float] = Query(None, ge=0.01, le=0.3, description="Edge 구간 (0~1, default 0.05)"),
-    day_box_breakout_pct: Optional[float] = Query(None, ge=0.01, le=2, description="돌파 판정 % (default 0.10)"),
+    day_box_window_hours: Optional[float] = Query(None, ge=1, le=12, description="Box formation time (default 4.0)"),
+    day_box_lock_min_hours: Optional[float] = Query(None, ge=0.5, le=12, description="Min time before a lock can be determined (default 3.5)"),
+    day_box_max_atr_ratio: Optional[float] = Query(None, ge=0.1, le=3, description="Max ATR ratio (default 0.8)"),
+    day_box_min_touches: Optional[int] = Query(None, ge=1, le=10, description="Min touches at both extremes (default 2)"),
+    day_box_edge_pct: Optional[float] = Query(None, ge=0.01, le=0.3, description="Edge zone (0~1, default 0.05)"),
+    day_box_breakout_pct: Optional[float] = Query(None, ge=0.01, le=2, description="Breakout-determination % (default 0.10)"),
     # η. TF Round TP/SL
-    tf_round_tpsl_enabled: Optional[bool] = Query(None, description="TF-Round TP/SL — H4/H1 PA anchor 라운드사다리"),
+    tf_round_tpsl_enabled: Optional[bool] = Query(None, description="TF-Round TP/SL — round ladder off the H4/H1 PA anchor"),
     tf_round_tpsl_auto_paper: Optional[bool] = Query(None, description="auto_paper: paper ON / LIVE OFF"),
     tf_round_anchor_tf: Optional[str] = Query(None, description="anchor TF (60=H1, 240=H4)"),
     tf_round_atr_period: Optional[int] = Query(None, ge=3, le=50, description="ATR period (default 14)"),
-    tf_round_tp_atr_mult: Optional[float] = Query(None, ge=0.3, le=5, description="TP1 ATR 배수 (default 1.0)"),
-    tf_round_tp2_atr_mult: Optional[float] = Query(None, ge=0.5, le=10, description="TP2 ATR 배수 (default 2.0)"),
-    tf_round_sl_ratio: Optional[float] = Query(None, ge=0.1, le=1, description="SL 비율 TP1 대비 (default 0.3333)"),
+    tf_round_tp_atr_mult: Optional[float] = Query(None, ge=0.3, le=5, description="TP1 ATR multiplier (default 1.0)"),
+    tf_round_tp2_atr_mult: Optional[float] = Query(None, ge=0.5, le=10, description="TP2 ATR multiplier (default 2.0)"),
+    tf_round_sl_ratio: Optional[float] = Query(None, ge=0.1, le=1, description="SL ratio relative to TP1 (default 0.3333)"),
     tf_round_anchor_offset: Optional[int] = Query(None, ge=0, le=5, description="anchor offset (default 0)"),
-    tf_round_hold_enabled: Optional[bool] = Query(None, description="견딤 모드 (단기컷 OFF)"),
+    tf_round_hold_enabled: Optional[bool] = Query(None, description="Endure mode (short cuts OFF)"),
     # θ. Frame Guard Option B
     frame_guard_option_b_enabled: Optional[bool] = Query(None, description="Frame Guard Option B — 90s silent skip"),
     frame_guard_option_b_auto_paper: Optional[bool] = Query(None, description="auto_paper: paper ON / LIVE OFF"),
     # ι. 5M Emergency Exit ⭐
-    exit_5m_emergency_enabled: Optional[bool] = Query(None, description="5M 긴급 탈출 — RSI/MACD/BB '여기서 그만!' ⭐ 운영자 핵심"),
+    exit_5m_emergency_enabled: Optional[bool] = Query(None, description="5M emergency exit — RSI/MACD/BB 'stop here!' ⭐ operator core"),
     exit_5m_emergency_auto_paper: Optional[bool] = Query(None, description="auto_paper: paper ON / LIVE OFF"),
-    exit_5m_rsi_overbought: Optional[float] = Query(None, ge=50, le=100, description="LONG 청산 RSI 임계 (default 70)"),
-    exit_5m_rsi_oversold: Optional[float] = Query(None, ge=0, le=50, description="SHORT 청산 RSI 임계 (default 30)"),
-    exit_5m_bb_top_pct: Optional[float] = Query(None, ge=50, le=100, description="LONG 청산 BB position 임계 (default 90)"),
-    exit_5m_bb_bottom_pct: Optional[float] = Query(None, ge=0, le=50, description="SHORT 청산 BB position 임계 (default 10)"),
-    exit_5m_min_score: Optional[int] = Query(None, ge=1, le=3, description="3종 중 N 충족 (default 2)"),
+    exit_5m_rsi_overbought: Optional[float] = Query(None, ge=50, le=100, description="LONG-exit RSI threshold (default 70)"),
+    exit_5m_rsi_oversold: Optional[float] = Query(None, ge=0, le=50, description="SHORT-exit RSI threshold (default 30)"),
+    exit_5m_bb_top_pct: Optional[float] = Query(None, ge=50, le=100, description="LONG-exit BB-position threshold (default 90)"),
+    exit_5m_bb_bottom_pct: Optional[float] = Query(None, ge=0, le=50, description="SHORT-exit BB-position threshold (default 10)"),
+    exit_5m_min_score: Optional[int] = Query(None, ge=1, le=3, description="Meet ≥ N of the 3 (default 2)"),
     # κ. Guard Score Weights
-    guard_score_pa_completion_ok: Optional[float] = Query(None, ge=0, le=100, description="PA 완성 가산점 (default 30)"),
-    guard_score_pa_completion_none: Optional[float] = Query(None, ge=-100, le=0, description="PA 없음 감점 (default -25)"),
-    guard_score_d1_pa_ok: Optional[float] = Query(None, ge=0, le=100, description="D1 PA OK 가산점 (default 25)"),
-    guard_score_d1_pa_none: Optional[float] = Query(None, ge=-100, le=0, description="D1 PA 없음 감점 (default -15)"),
-    guard_score_btc_aligned: Optional[float] = Query(None, ge=0, le=100, description="BTC 정렬 가산점 (default 15)"),
-    guard_score_btc_opposite: Optional[float] = Query(None, ge=-100, le=0, description="BTC 역행 감점 (default -15)"),
-    guard_score_adx_strong: Optional[float] = Query(None, ge=0, le=100, description="ADX 강 가산점 (default 10)"),
-    guard_score_adx_weak: Optional[float] = Query(None, ge=-50, le=0, description="ADX 약 감점 (default -5)"),
-    guard_score_adx_strong_requires_trend: Optional[bool] = Query(None, description="ADX 강가점을 구조 SIDEWAYS면 면제(점수↔차트 정합). default OFF=라이브 0변화"),
-    naked_sl_guard_enabled: Optional[bool] = Query(None, description="서버SL 미확정+SL근접 시 즉시 시장가 청산(무사통과 청산 방지). 안전망, 기본 ON"),
-    naked_sl_guard_buffer_pct: Optional[float] = Query(None, ge=0, le=5, description="naked SL 근접 버퍼 %%(grace 후 선제 컷)"),
-    server_sl_verify_enabled: Optional[bool] = Query(None, description="SYNC마다 거래소 실제 stopLoss 읽어 대조→없/불일치 재배치. 안전망, 기본 ON"),
-    guard_score_vol_big_align: Optional[float] = Query(None, ge=0, le=50, description="vol big 가산점 (default 10)"),
-    guard_score_trend_high_conf: Optional[float] = Query(None, ge=0, le=50, description="Trend 고신뢰 가산점 (default 10)"),
-    guard_score_trend_low_conf: Optional[float] = Query(None, ge=-50, le=0, description="Trend 저신뢰 감점 (default -5)"),
-    guard_score_rsi_extreme: Optional[float] = Query(None, ge=0, le=50, description="RSI 극단 가산점 (default 10)"),
-    guard_score_h4_pulse_in: Optional[float] = Query(None, ge=0, le=100, description="H4 펄스 안 가산점 (default 20)"),
-    guard_score_h4_pulse_out: Optional[float] = Query(None, ge=-100, le=0, description="H4 펄스 밖 감점 (default -10)"),
-    guard_score_h1_pa_in: Optional[float] = Query(None, ge=0, le=100, description="H1 PA 통과 가산점 (default 15)"),
-    guard_score_h1_pa_out: Optional[float] = Query(None, ge=-50, le=0, description="H1 PA 미통과 감점 (default -5)"),
-    guard_score_frame_aligned: Optional[float] = Query(None, ge=0, le=100, description="Frame 정렬 가산점 (default 15)"),
-    guard_score_frame_neutral: Optional[float] = Query(None, ge=-20, le=50, description="Frame 중립 (default 5)"),
-    guard_score_frame_opposite: Optional[float] = Query(None, ge=-100, le=0, description="Frame 반대 감점 (default -20)"),
-    guard_score_anchor_close: Optional[float] = Query(None, ge=0, le=100, description="Anchor 가까움 가산점 (default 20)"),
-    guard_score_anchor_far: Optional[float] = Query(None, ge=-100, le=0, description="Anchor 멀음 감점 (default -10)"),
-    guard_score_day_box_edge: Optional[float] = Query(None, ge=0, le=50, description="Day Box edge 가산점 (default 10)"),
-    guard_score_day_box_inside: Optional[float] = Query(None, ge=-100, le=0, description="Day Box 안 감점 (default -15)"),
-    guard_score_microtiming_ok: Optional[float] = Query(None, ge=0, le=50, description="microtiming OK 가산점 (default 10)"),
-    guard_score_microtiming_no: Optional[float] = Query(None, ge=-50, le=0, description="microtiming X 감점 (default -5)"),
-    guard_score_raw_body_align: Optional[float] = Query(None, ge=0, le=50, description="raw_body 정렬 가산점 (default 5)"),
-    guard_score_raw_body_against: Optional[float] = Query(None, ge=-100, le=0, description="raw_body 반대 감점 (default -15)"),
-    guard_score_momentum_deriv_align: Optional[float] = Query(None, ge=0, le=50, description="momentum 일치 가산점 (default 5)"),
-    guard_score_momentum_deriv_against: Optional[float] = Query(None, ge=-50, le=0, description="momentum 반대 감점 (default -10)"),
-    # ── ★ [2026-06-03 부모] D1 추세 가중 + 갭 체크 게이트 ──
-    d1_trend_weight: Optional[float] = Query(None, ge=0, le=3, description="D1(일봉) 추세 가중 (default 1.0, ×6=최대)"),
-    cr_speed_sign_guard_enabled: Optional[bool] = Query(None, description="Fix A — cr 방향(개수)이 UP인데 실제 변화율 음수면 중립(가짜 UP 가점 차단). BEAT사고. default OFF"),
-    cr_blowoff_extreme_guard_enabled: Optional[bool] = Query(None, description="Fix B — 극단 폭등/폭락(blowoff)=끝물 → cr 방향 중립. D1 +103% 잔상 차단. default OFF"),
-    cr_blowoff_extreme_ratio: Optional[float] = Query(None, ge=1, le=20, description="blowoff 임계 speed/ATR ratio (default 4.0, 낮출수록 자주 끝물 판정)"),
-    cr_trend_agree_guard_enabled: Optional[bool] = Query(None, description="Fix C — 5캔들 방향이 더 긴 추세(lookback)와 반대면 중립. 잔물결을 추세로 착각 차단. default OFF"),
-    cr_trend_agree_lookback: Optional[int] = Query(None, ge=6, le=120, description="Fix C 큰 추세 판정 캔들수 (default 20)"),
-    gap_check_enabled: Optional[bool] = Query(None, description="갭 체크 게이트 — 진입 전 TF×N봉 천장/바닥까지 거리 확인 ON/OFF"),
-    gap_check_tf: Optional[str] = Query(None, description="갭 체크 TF (5 / 15 / 30 / 60)"),
-    gap_check_lookback_bars: Optional[int] = Query(None, ge=6, le=48, description="갭 체크 lookback 봉수 (default 12, 12×15M=3h)"),
-    gap_check_min_pct: Optional[float] = Query(None, ge=0, le=5, description="최소 갭 % (0=OFF, 0.3 권장)"),
-    gap_check_atr_adaptive_enabled: Optional[bool] = Query(None, description="갭 ATR 적응 — 등락폭 큰 코인은 필요 갭↑ (꼭대기 추격 차단, 2026-06-07)"),
-    gap_check_atr_mult: Optional[float] = Query(None, ge=0, le=3, description="필요 갭 = ATR% × 이값 (default 0.7, 클수록 더 아래에서만 진입)"),
-    gap_check_atr_cap_pct: Optional[float] = Query(None, ge=0.1, le=5, description="ATR 적응 필요갭 상한 % (default 1.5)"),
-    gap_proximity_exit_enabled: Optional[bool] = Query(None, description="갭 접근 청산 — 천장/바닥 근접 선제 탈출 ON/OFF"),
-    gap_proximity_exit_tf: Optional[str] = Query(None, description="갭 접근 청산 TF (5 / 15 / 30 / 60)"),
-    gap_proximity_exit_pct: Optional[float] = Query(None, ge=0.1, le=2, description="접근 임계 % (이 이내 접근 시 청산, default 0.2)"),
-    # ── ★ [2026-06-15 해결안 B·C] 관측 토글 (진입 로직 불침, default OFF) ──
-    gate_ledger_enabled: Optional[bool] = Query(None, description="B: 게이트 통과/거절 집계('왜 침묵했나'). 관측만, 진입 무관"),
-    dual_observe_auto_off_weak: Optional[bool] = Query(None, description="C: 약서버(RAM≤임계)에서 dual observe 자동 OFF (부하↓). 진입 불변, 강서버 무영향"),
+    guard_score_pa_completion_ok: Optional[float] = Query(None, ge=0, le=100, description="PA-completion bonus (default 30)"),
+    guard_score_pa_completion_none: Optional[float] = Query(None, ge=-100, le=0, description="No-PA penalty (default -25)"),
+    guard_score_d1_pa_ok: Optional[float] = Query(None, ge=0, le=100, description="D1 PA OK bonus (default 25)"),
+    guard_score_d1_pa_none: Optional[float] = Query(None, ge=-100, le=0, description="D1 no-PA penalty (default -15)"),
+    guard_score_btc_aligned: Optional[float] = Query(None, ge=0, le=100, description="BTC-alignment bonus (default 15)"),
+    guard_score_btc_opposite: Optional[float] = Query(None, ge=-100, le=0, description="BTC-counter penalty (default -15)"),
+    guard_score_adx_strong: Optional[float] = Query(None, ge=0, le=100, description="ADX-strong bonus (default 10)"),
+    guard_score_adx_weak: Optional[float] = Query(None, ge=-50, le=0, description="ADX-weak penalty (default -5)"),
+    guard_score_adx_strong_requires_trend: Optional[bool] = Query(None, description="Exempt the ADX-strong bonus when the structure is SIDEWAYS (score↔chart consistency). default OFF=no live change"),
+    naked_sl_guard_enabled: Optional[bool] = Query(None, description="Market-close immediately when the server SL is unconfirmed + price is near SL (prevents a pass-through liquidation). Safety net, default ON"),
+    naked_sl_guard_buffer_pct: Optional[float] = Query(None, ge=0, le=5, description="Naked-SL proximity buffer %% (preemptive cut after grace)"),
+    server_sl_verify_enabled: Optional[bool] = Query(None, description="On each SYNC, read and compare the exchange's actual stopLoss → re-place if missing/mismatched. Safety net, default ON"),
+    guard_score_vol_big_align: Optional[float] = Query(None, ge=0, le=50, description="High-volume bonus (default 10)"),
+    guard_score_trend_high_conf: Optional[float] = Query(None, ge=0, le=50, description="Trend high-confidence bonus (default 10)"),
+    guard_score_trend_low_conf: Optional[float] = Query(None, ge=-50, le=0, description="Trend low-confidence penalty (default -5)"),
+    guard_score_rsi_extreme: Optional[float] = Query(None, ge=0, le=50, description="RSI-extreme bonus (default 10)"),
+    guard_score_h4_pulse_in: Optional[float] = Query(None, ge=0, le=100, description="Inside-H4-pulse bonus (default 20)"),
+    guard_score_h4_pulse_out: Optional[float] = Query(None, ge=-100, le=0, description="Outside-H4-pulse penalty (default -10)"),
+    guard_score_h1_pa_in: Optional[float] = Query(None, ge=0, le=100, description="H1 PA-pass bonus (default 15)"),
+    guard_score_h1_pa_out: Optional[float] = Query(None, ge=-50, le=0, description="H1 PA-fail penalty (default -5)"),
+    guard_score_frame_aligned: Optional[float] = Query(None, ge=0, le=100, description="Frame-alignment bonus (default 15)"),
+    guard_score_frame_neutral: Optional[float] = Query(None, ge=-20, le=50, description="Frame-neutral (default 5)"),
+    guard_score_frame_opposite: Optional[float] = Query(None, ge=-100, le=0, description="Frame-opposite penalty (default -20)"),
+    guard_score_anchor_close: Optional[float] = Query(None, ge=0, le=100, description="Near-anchor bonus (default 20)"),
+    guard_score_anchor_far: Optional[float] = Query(None, ge=-100, le=0, description="Far-from-anchor penalty (default -10)"),
+    guard_score_day_box_edge: Optional[float] = Query(None, ge=0, le=50, description="Day Box edge bonus (default 10)"),
+    guard_score_day_box_inside: Optional[float] = Query(None, ge=-100, le=0, description="Inside-Day-Box penalty (default -15)"),
+    guard_score_microtiming_ok: Optional[float] = Query(None, ge=0, le=50, description="microtiming-OK bonus (default 10)"),
+    guard_score_microtiming_no: Optional[float] = Query(None, ge=-50, le=0, description="microtiming-fail penalty (default -5)"),
+    guard_score_raw_body_align: Optional[float] = Query(None, ge=0, le=50, description="raw_body-alignment bonus (default 5)"),
+    guard_score_raw_body_against: Optional[float] = Query(None, ge=-100, le=0, description="raw_body-opposite penalty (default -15)"),
+    guard_score_momentum_deriv_align: Optional[float] = Query(None, ge=0, le=50, description="momentum-match bonus (default 5)"),
+    guard_score_momentum_deriv_against: Optional[float] = Query(None, ge=-50, le=0, description="momentum-opposite penalty (default -10)"),
+    # ── ★ [2026-06-03 owner] D1 trend weighting + gap-check gate ──
+    d1_trend_weight: Optional[float] = Query(None, ge=0, le=3, description="D1 (daily) trend weight (default 1.0, ×6=max)"),
+    cr_speed_sign_guard_enabled: Optional[bool] = Query(None, description="Fix A — if the cr direction (count) is UP but the actual change is negative, neutralize (blocks a fake UP bonus). BEAT incident. default OFF"),
+    cr_blowoff_extreme_guard_enabled: Optional[bool] = Query(None, description="Fix B — extreme spike/dump (blowoff)=late → neutralize the cr direction. Blocks the D1 +103% afterimage. default OFF"),
+    cr_blowoff_extreme_ratio: Optional[float] = Query(None, ge=1, le=20, description="blowoff threshold speed/ATR ratio (default 4.0, lower=judges late more often)"),
+    cr_trend_agree_guard_enabled: Optional[bool] = Query(None, description="Fix C — if the 5-candle direction opposes the longer trend (lookback), neutralize. Blocks mistaking ripples for a trend. default OFF"),
+    cr_trend_agree_lookback: Optional[int] = Query(None, ge=6, le=120, description="Fix C candles for determining the larger trend (default 20)"),
+    gap_check_enabled: Optional[bool] = Query(None, description="Gap-check gate — verify the distance to the TF×N-bar top/bottom before entry ON/OFF"),
+    gap_check_tf: Optional[str] = Query(None, description="Gap-check TF (5 / 15 / 30 / 60)"),
+    gap_check_lookback_bars: Optional[int] = Query(None, ge=6, le=48, description="Gap-check lookback bars (default 12, 12×15M=3h)"),
+    gap_check_min_pct: Optional[float] = Query(None, ge=0, le=5, description="Min gap % (0=OFF, 0.3 recommended)"),
+    gap_check_atr_adaptive_enabled: Optional[bool] = Query(None, description="Gap ATR adaptation — high-range coins need a larger gap↑ (blocks top-chasing, 2026-06-07)"),
+    gap_check_atr_mult: Optional[float] = Query(None, ge=0, le=3, description="Required gap = ATR% × this (default 0.7, larger=enters only lower)"),
+    gap_check_atr_cap_pct: Optional[float] = Query(None, ge=0.1, le=5, description="ATR-adaptive required-gap cap % (default 1.5)"),
+    gap_proximity_exit_enabled: Optional[bool] = Query(None, description="Gap-approach exit — preemptive exit near the top/bottom ON/OFF"),
+    gap_proximity_exit_tf: Optional[str] = Query(None, description="Gap-approach exit TF (5 / 15 / 30 / 60)"),
+    gap_proximity_exit_pct: Optional[float] = Query(None, ge=0.1, le=2, description="Approach threshold % (exit when within this, default 0.2)"),
+    # ── ★ [2026-06-15 solution B·C] Observation toggles (does not touch entry logic, default OFF) ──
+    gate_ledger_enabled: Optional[bool] = Query(None, description="B: tally gate pass/reject ('why was it silent'). Observation only, no entry impact"),
+    dual_observe_auto_off_weak: Optional[bool] = Query(None, description="C: auto-OFF dual observe on weak servers (RAM ≤ threshold) (lowers load). Entry unchanged, no effect on strong servers"),
 ):
     """Update FOCUS configuration (partial update)."""
     fm = _get_fm(request)
@@ -1693,10 +1693,10 @@ def focus_set_config(
         "coin_loss_cap_enabled": coin_loss_cap_enabled,
         "coin_loss_cap_amount": coin_loss_cap_amount,
         "coin_loss_cap_window_hours": coin_loss_cap_window_hours,
-        # ★ Per-Coin Size Cap (2026-05-08 부모님 결정)
+        # ★ Per-Coin Size Cap (2026-05-08 owner decision)
         "per_coin_size_cap_enabled": per_coin_size_cap_enabled,
         "per_coin_size_cap_pct": per_coin_size_cap_pct,
-        # ★ Conviction Override Slot (2026-05-10 부모님 결정)
+        # ★ Conviction Override Slot (2026-05-10 owner decision)
         "override_slot_enabled": override_slot_enabled,
         "override_min_conviction": override_min_conviction,
         "override_locked_slot_min_hours": override_locked_slot_min_hours,
@@ -1713,25 +1713,25 @@ def focus_set_config(
         "coin_repeat_brake_enabled": coin_repeat_brake_enabled,
         "coin_repeat_free_count": coin_repeat_free_count,
         "coin_repeat_cooldown_base": coin_repeat_cooldown_base,
-        # ★ BE Stall Exit (2026-05-14 부모 — UI 노출)
+        # ★ BE Stall Exit (2026-05-14 owner — exposed in UI)
         "be_stall_exit_enabled": be_stall_exit_enabled,
         "be_stall_exit_sec": be_stall_exit_sec,
         "be_stall_intelligent_enabled": be_stall_intelligent_enabled,
         "be_stall_intelligent_rsi_strong": be_stall_intelligent_rsi_strong,
         "be_stall_intelligent_rsi_weak": be_stall_intelligent_rsi_weak,
-        # ★ Pre-BE Stall Exit (2026-04-23 부모 지시)
+        # ★ Pre-BE Stall Exit (2026-04-23 owner instruction)
         "pre_be_stall_exit_mode": pre_be_stall_exit_mode,
         "pre_be_stall_min_profit_pct": pre_be_stall_min_profit_pct,
         "pre_be_stall_sec": pre_be_stall_sec,
         "pre_be_stall_volatility_threshold_pct": pre_be_stall_volatility_threshold_pct,
         "pre_be_stall_max_since_peak_sec": pre_be_stall_max_since_peak_sec,
-        # 🐢 Pre-BE 손실방지선 (2026-06-09 부모 "지금 나우")
+        # 🐢 Pre-BE loss guard (2026-06-09 owner "right now")
         "pre_be_loss_guard_enabled": pre_be_loss_guard_enabled,
         "pre_be_loss_guard_peak_max_pct": pre_be_loss_guard_peak_max_pct,
         "pre_be_loss_guard_trigger_loss_pct": pre_be_loss_guard_trigger_loss_pct,
         "pre_be_loss_guard_min_hold_sec": pre_be_loss_guard_min_hold_sec,
         "pre_be_loss_guard_max_age_sec": pre_be_loss_guard_max_age_sec,
-        # ★ Reverse Drift Exit (2026-05-16 부모 지시)
+        # ★ Reverse Drift Exit (2026-05-16 owner instruction)
         "reverse_drift_exit_enabled": reverse_drift_exit_enabled,
         "reverse_drift_peak_min_pct": reverse_drift_peak_min_pct,
         "reverse_drift_peak_max_pct": reverse_drift_peak_max_pct,
@@ -1741,7 +1741,7 @@ def focus_set_config(
         "reverse_drift_atr_adaptive_enabled": reverse_drift_atr_adaptive_enabled,
         "reverse_drift_atr_multiplier": reverse_drift_atr_multiplier,
         "reverse_drift_atr_cap_pct": reverse_drift_atr_cap_pct,
-        # ★ 끝물 추격 차단 (Overextension) — 2026-06-07 부모
+        # ★ Late-chase block (Overextension) — 2026-06-07 owner
         "overextension_enabled": overextension_enabled,
         "overextension_range_pos_pct": overextension_range_pos_pct,
         "overextension_min_move_pct": overextension_min_move_pct,
@@ -1753,19 +1753,19 @@ def focus_set_config(
         "blowoff_extreme_pct": blowoff_extreme_pct,
         "blowoff_max_penalty": blowoff_max_penalty,
         "blowoff_chase_only": blowoff_chase_only,
-        # 🎯 변곡 setup 점수 (2026-06-12)
+        # 🎯 Inflection setup score (2026-06-12)
         "inflection_setup_enabled": inflection_setup_enabled,
         "inflection_setup_weight": inflection_setup_weight,
         "inflection_setup_cap": inflection_setup_cap,
         "inflection_setup_base": inflection_setup_base,
         "inflection_setup_slope_scale": inflection_setup_slope_scale,
-        # 🎣 Retest setup 점수 (2026-06-12)
+        # 🎣 Retest setup score (2026-06-12)
         "retest_setup_enabled": retest_setup_enabled,
         "retest_setup_weight": retest_setup_weight,
         "retest_setup_turn_bonus": retest_setup_turn_bonus,
         "retest_retr_lo": retest_retr_lo,
         "retest_retr_hi": retest_retr_hi,
-        # 🌋 변동성 각성 SL 적응 (2026-06-11)
+        # 🌋 Volatility-awakening SL adaptation (2026-06-11)
         "awaken_sl_enabled": awaken_sl_enabled,
         "awaken_sl_mode": awaken_sl_mode,
         "awaken_atr_ratio": awaken_atr_ratio,
@@ -1774,12 +1774,12 @@ def focus_set_config(
         "awaken_require_day_align": awaken_require_day_align,
         "awaken_swing_lookback": awaken_swing_lookback,
         "awaken_atr_buffer": awaken_atr_buffer,
-        # ② 끝물 상한 감점 (2026-06-09)
+        # ② Late ceiling penalty (2026-06-09)
         "conviction_ceiling_enabled": conviction_ceiling_enabled,
         "conviction_ceiling_start": conviction_ceiling_start,
         "conviction_ceiling_target": conviction_ceiling_target,
         "conviction_ceiling_adx_exempt": conviction_ceiling_adx_exempt,
-        # ★ 이윤 여력 페널티 (2026-06-09)
+        # ★ Headroom penalty (2026-06-09)
         "headroom_penalty_enabled": headroom_penalty_enabled,
         "headroom_sr_penalty": headroom_sr_penalty,
         "headroom_sr_near_pct": headroom_sr_near_pct,
@@ -1789,19 +1789,19 @@ def focus_set_config(
         "headroom_bb_penalty": headroom_bb_penalty,
         "headroom_bb_hi_pctb": headroom_bb_hi_pctb,
         "headroom_bb_lo_pctb": headroom_bb_lo_pctb,
-        # 🌊 거시하락 능동 SHORT 진입 2단계 (2026-06-11)
+        # 🌊 Macro-down active SHORT entry, stage 2 (2026-06-11)
         "macro_short_timing_enabled": macro_short_timing_enabled,
         "macro_short_timing_delta": macro_short_timing_delta,
         "macro_short_timing_min_signals": macro_short_timing_min_signals,
         "macro_short_timing_bounce_pct": macro_short_timing_bounce_pct,
         "macro_short_timing_lookback": macro_short_timing_lookback,
-        # ★ 레짐역행 보유탈출 P3 (router 배선 누락 fix 2026-06-07)
+        # ★ Regime-counter holding exit P3 (fix for missing router wiring 2026-06-07)
         "macro_exit_enabled": macro_exit_enabled,
         "macro_exit_breadth_min": macro_exit_breadth_min,
         "macro_exit_sl_cushion_pct": macro_exit_sl_cushion_pct,
         "macro_exit_strong_coin_exempt": macro_exit_strong_coin_exempt,
         "macro_exit_exempt_min_roe": macro_exit_exempt_min_roe,
-        # ★ router 배선 누락 일괄 fix (2026-06-07) — 12필드
+        # ★ Batch fix for missing router wiring (2026-06-07) — 12 fields
         "bb_block_trend_bypass_adx": bb_block_trend_bypass_adx,
         "bb_trend_bypass_require_di": bb_trend_bypass_require_di,
         "bb_trend_bypass_macd_min": bb_trend_bypass_macd_min,
@@ -1829,12 +1829,12 @@ def focus_set_config(
         "multi_be_lock_atr_adaptive_enabled": multi_be_lock_atr_adaptive_enabled,
         "multi_be_lock_atr_min_stage1_trigger_pct": multi_be_lock_atr_min_stage1_trigger_pct,
         "multi_be_lock_atr_max_stage1_trigger_pct": multi_be_lock_atr_max_stage1_trigger_pct,
-        # ★ [2026-05-18 부모 비전 #6] Entry Grace Period + Market Bias Grace Exit + News Grace Exit
+        # ★ [2026-05-18 owner vision #6] Entry Grace Period + Market Bias Grace Exit + News Grace Exit
         "entry_grace_period_sec": entry_grace_period_sec,
         "market_bias_grace_exit_enabled": market_bias_grace_exit_enabled,
         "news_grace_exit_enabled": news_grace_exit_enabled,
         "news_grace_exit_threshold": news_grace_exit_threshold,
-        # ★★★★ [2026-05-18 부모 비전 #6 B 옵션] 시간 무관 OR 조건
+        # ★★★★ [2026-05-18 owner vision #6 option B] Time-independent OR condition
         "exit_consensus_enabled": exit_consensus_enabled,
         "exit_consensus_news_threshold": exit_consensus_news_threshold,
         # ★ Long Hold Timeout (3-tier, 2026-04-25)
@@ -1845,23 +1845,23 @@ def focus_set_config(
         "long_hold_timeout_tier2_peak_pct": long_hold_timeout_tier2_peak_pct,
         "long_hold_timeout_tier3_min": long_hold_timeout_tier3_min,
         "long_hold_timeout_tier3_peak_pct": long_hold_timeout_tier3_peak_pct,
-        # ★ Entry Expectation (2026-05-14 부모 — 진입 기대치 메커니즘)
+        # ★ Entry Expectation (2026-05-14 owner — entry-expectation mechanism)
         "entry_expectation_enabled": entry_expectation_enabled,
         "expectation_progress_exit_enabled": expectation_progress_exit_enabled,
         "expectation_progress_t1_min": expectation_progress_t1_min,
         "expectation_progress_t1_pct": expectation_progress_t1_pct,
         "expectation_progress_t2_min": expectation_progress_t2_min,
         "expectation_progress_t2_pct": expectation_progress_t2_pct,
-        # ★ 음수 progress 즉시 컷 (2026-05-15 부모)
+        # ★ Negative-progress instant cut (2026-05-15 owner)
         "expectation_progress_neg_cut_enabled": expectation_progress_neg_cut_enabled,
         "expectation_progress_neg_cut_pct": expectation_progress_neg_cut_pct,
         "expectation_progress_neg_cut_min": expectation_progress_neg_cut_min,
-        # ★ Entry Quality Gates (2026-05-15 부모)
+        # ★ Entry Quality Gates (2026-05-15 owner)
         "entry_expectation_gate_enabled": entry_expectation_gate_enabled,
         "entry_expectation_min_rr": entry_expectation_min_rr,
         "entry_expectation_min_reward_pct": entry_expectation_min_reward_pct,
         "entry_expectation_max_risk_pct": entry_expectation_max_risk_pct,
-        # ★ 거시 레짐 방향 게이트 (2026-06-02 부모)
+        # ★ Macro regime direction gate (2026-06-02 owner)
         "breadth_strong_n": breadth_strong_n,
         "breadth_mid_n": breadth_mid_n,
         "breadth_aligned_strong": breadth_aligned_strong,
@@ -1887,7 +1887,7 @@ def focus_set_config(
         "mom_decouple_pos_lo": mom_decouple_pos_lo,
         "mom_decouple_btc_cache_sec": mom_decouple_btc_cache_sec,
         "reversal_score": reversal_score,
-        # ★ TF 추세 가중 (2026-06-03 부모)
+        # ★ TF trend weighting (2026-06-03 owner)
         "h4_trend_weight": h4_trend_weight,
         "h1_trend_weight": h1_trend_weight,
         "m30_trend_weight": m30_trend_weight,
@@ -1930,10 +1930,10 @@ def focus_set_config(
         "max_sl_distance_pct": max_sl_distance_pct,
         "max_atr_pct": max_atr_pct,
         "cycle_min_rr": cycle_min_rr,
-        # ★ Min TP fee-guard (2026-05-15 부모)
+        # ★ Min TP fee-guard (2026-05-15 owner)
         "min_tp_distance_enabled": min_tp_distance_enabled,
         "min_tp_distance_pct": min_tp_distance_pct,
-        # ★ 5m Microtiming Gate (2026-05-16 부모)
+        # ★ 5m Microtiming Gate (2026-05-16 owner)
         "microtiming_5m_enabled": microtiming_5m_enabled,
         "microtiming_5m_min_score": microtiming_5m_min_score,
         "microtiming_5m_defer_sec": microtiming_5m_defer_sec,
@@ -1943,7 +1943,7 @@ def focus_set_config(
         "microtiming_5m_bb_low_pct": microtiming_5m_bb_low_pct,
         "microtiming_5m_bb_recover_pct": microtiming_5m_bb_recover_pct,
         "microtiming_5m_phase_k_exempt": microtiming_5m_phase_k_exempt,
-        # ★ DrawdownShield base (2026-05-16 부모)
+        # ★ DrawdownShield base (2026-05-16 owner)
         "drawdown_shield_use_cash_only": drawdown_shield_use_cash_only,
         "drawdown_shield_caution_pct": drawdown_shield_caution_pct,
         "drawdown_shield_defend_pct": drawdown_shield_defend_pct,
@@ -1954,7 +1954,7 @@ def focus_set_config(
         "drawdown_shield_caution_pen": drawdown_shield_caution_pen,
         "drawdown_shield_defend_pen": drawdown_shield_defend_pen,
         "drawdown_shield_crisis_pen": drawdown_shield_crisis_pen,
-        # ★ [2026-05-16 부모] Same-coin Flip Cooldown + 5m Raw Body Guard + Imminent Flip
+        # ★ [2026-05-16 owner] Same-coin Flip Cooldown + 5m Raw Body Guard + Imminent Flip
         "same_coin_flip_cooldown_enabled": same_coin_flip_cooldown_enabled,
         "same_coin_flip_cooldown_min": same_coin_flip_cooldown_min,
         "micro_1m_check_enabled": micro_1m_check_enabled,
@@ -1988,7 +1988,7 @@ def focus_set_config(
         "cfid_lookback": cfid_lookback,
         "cfid_bypass_momentum_deriv": cfid_bypass_momentum_deriv,
         "cfid_bypass_mtf_align": cfid_bypass_mtf_align,
-        # ★ [2026-05-18 부모 비전 #5] Leading Entry
+        # ★ [2026-05-18 owner vision #5] Leading Entry
         "leading_entry_mode": leading_entry_mode,
         "cfid_leading_min_strength": cfid_leading_min_strength,
         "cfid_leading_size_pct": cfid_leading_size_pct,
@@ -2010,7 +2010,7 @@ def focus_set_config(
         "phase6_combo_c_5step_min": phase6_combo_c_5step_min,
         "phase6_combo_d_bonus": phase6_combo_d_bonus,
         "phase6_combo_d_news_abs_min": phase6_combo_d_news_abs_min,
-        # ★ [2026-05-19] BB 차단 가드 임계
+        # ★ [2026-05-19] BB block-guard thresholds
         "bb_block_threshold_pct": bb_block_threshold_pct,
         "bb_penalty_threshold_pct": bb_penalty_threshold_pct,
         "bb_penalty_amount": bb_penalty_amount,
@@ -2042,7 +2042,7 @@ def focus_set_config(
         # ★ Hard ROE Cap (2026-04-25)
         "hard_roe_cap_enabled": hard_roe_cap_enabled,
         "hard_roe_cap_roe_pct": hard_roe_cap_roe_pct,
-        # ★ Leverage Tier (ATR 기반 차등, 2026-04-25)
+        # ★ Leverage Tier (ATR-based tiering, 2026-04-25)
         "leverage_tier_enabled": leverage_tier_enabled,
         "leverage_tier_atr_low_pct": leverage_tier_atr_low_pct,
         "leverage_tier_low": leverage_tier_low,
@@ -2057,14 +2057,14 @@ def focus_set_config(
         "morning_shield_lock_pct": morning_shield_lock_pct,
         "morning_guard_conviction_boost": morning_guard_conviction_boost,
         "morning_guard_end_hour_kst": morning_guard_end_hour_kst,
-        # Event Shield (경제이벤트 방패)
+        # Event Shield (economic-event shield)
         "event_shield_enabled": event_shield_enabled,
         "event_shield_times_kst": event_shield_times_kst,
         "event_shield_window_min": event_shield_window_min,
         "event_shield_lead_min": event_shield_lead_min,
         "event_shield_lock_pct": event_shield_lock_pct,
         "event_shield_auto_fetch": event_shield_auto_fetch,
-        # Auto Take-Profit (트레일링 거두기) / Stop-Loss (2026-06-08 부모 승자 거두기)
+        # Auto Take-Profit (trailing harvest) / Stop-Loss (2026-06-08 owner, harvest winners)
         "auto_tp_enabled": auto_tp_enabled,
         "auto_tp_usdt": auto_tp_usdt,
         "auto_tp_peak_giveback_pct": auto_tp_peak_giveback_pct,
@@ -2112,7 +2112,7 @@ def focus_set_config(
         "manual_exit_penalty_enabled": manual_exit_penalty_enabled,
         "manual_exit_penalty_hours": manual_exit_penalty_hours,
         "phase3_context_bonus_enabled": phase3_context_bonus_enabled,
-        # [2026-05-19] Advanced 124개
+        # [2026-05-19] 124 advanced
         "primary_tf": primary_tf,
         "entry_tf": entry_tf,
         "post_trade_pause_enabled": post_trade_pause_enabled,
@@ -2211,7 +2211,7 @@ def focus_set_config(
         "profit_exit_block_min_consecutive": profit_exit_block_min_consecutive,
         "profit_exit_block_hours": profit_exit_block_hours,
         "profit_exit_block_block_opposite": profit_exit_block_block_opposite,
-        # ★ [2026-05-18] Consecutive Loss Pause (옛 누락 추가)
+        # ★ [2026-05-18] Consecutive Loss Pause (added, was missing)
         "consecutive_loss_pause_enabled": consecutive_loss_pause_enabled,
         "consecutive_loss_pause_count": consecutive_loss_pause_count,
         "consecutive_loss_pause_min": consecutive_loss_pause_min,
@@ -2220,25 +2220,25 @@ def focus_set_config(
         "regime_direction_fail_max": regime_direction_fail_max,
         "btc_regime_enabled": btc_regime_enabled,
         "btc_regime_bear_long_delta": btc_regime_bear_long_delta,
-        # 입력 시 bull_short_delta 도 동일 값 적용 (역방향 페널티 통일)
+        # When set, applies the same value to bull_short_delta (unifies the counter-direction penalty)
         "btc_regime_bull_short_delta": btc_regime_bear_long_delta,
         "market_bias_enabled": market_bias_enabled,
         "mb_against_delta": mb_against_delta,
         "sess_quiet_delta": sess_quiet_delta,
         "sess_active_delta": sess_active_delta,
         "dm_loss_count_delta": dm_loss_count_delta,
-        # B11 Regime Direction Lock (2026-04-19 하드 차단, 3축 토글)
+        # B11 Regime Direction Lock (2026-04-19 hard block, 3-axis toggle)
         "regime_direction_lock_enabled": regime_direction_lock_enabled,
         "regime_lock_use_slope": regime_lock_use_slope,
         "regime_lock_use_distance": regime_lock_use_distance,
         "regime_lock_use_cross": regime_lock_use_cross,
         "regime_direction_lock_freeze_sec": regime_direction_lock_freeze_sec,
         "regime_direction_lock_neutral_block": regime_direction_lock_neutral_block,
-        # ★ B12 Scanner Breadth Lock (2026-04-23 부모 지시)
+        # ★ B12 Scanner Breadth Lock (2026-04-23 owner instruction)
         "regime_lock_mode": regime_lock_mode,
         "b12_threshold_n": b12_threshold_n,
         "b12_window_sec": b12_window_sec,
-        # 방향별 슬롯 상한 (2026-04-20 형 지시)
+        # Per-direction slot cap (2026-04-20 this agent's instruction)
         "max_long_positions": max_long_positions,
         "max_short_positions": max_short_positions,
         "auto_first_dir_lock": auto_first_dir_lock,
@@ -2274,7 +2274,7 @@ def focus_set_config(
         "be_lock_smart_candle_count": be_lock_smart_candle_count,
         "parent_roe_guard_enabled": parent_roe_guard_enabled,
         "parent_max_roe_loss_pct": parent_max_roe_loss_pct,
-        # ★ Phase J v2 (2026-04-21): ADX 하락 skip
+        # ★ Phase J v2 (2026-04-21): skip on ADX fall
         "adx_slope_check_enabled": adx_slope_check_enabled,
         "adx_slope_lookback_bars": adx_slope_lookback_bars,
         "adx_slope_decline_threshold_pct": adx_slope_decline_threshold_pct,
@@ -2298,7 +2298,7 @@ def focus_set_config(
         "s3_gate_fee_multiplier": s3_gate_fee_multiplier,
         "s3_gate_slippage_bps": s3_gate_slippage_bps,
         "s3_gate_link_multiplier": s3_gate_link_multiplier,
-        # 🪙 Orderbook 깊이 사이즈 적응 (2026-06-09)
+        # 🪙 Order-book depth size adaptation (2026-06-09)
         "orderbook_depth_sizing_enabled": orderbook_depth_sizing_enabled,
         "orderbook_depth_max_slippage_pct": orderbook_depth_max_slippage_pct,
         "orderbook_depth_min_fill_ratio": orderbook_depth_min_fill_ratio,
@@ -2311,8 +2311,8 @@ def focus_set_config(
         "reentry_cooldown_v2_min": reentry_cooldown_v2_min,
         "pa_double_confirm_enabled": pa_double_confirm_enabled,
         "pa_double_confirm_window_sec": pa_double_confirm_window_sec,
-        # ★★★ [2026-05-27 부모 정신] Phase 6 — H4/H1 PA + 점수 통합 + 5M 긴급탈출 ★★★
-        # α. Phase 6 점수 통합 (Master)
+        # ★★★ [2026-05-27 owner spirit] Phase 6 — H4/H1 PA + score integration + 5M emergency exit ★★★
+        # α. Phase 6 score integration (Master)
         "guard_score_mode_enabled": guard_score_mode_enabled,
         "guard_score_mode_auto_paper": guard_score_mode_auto_paper,
         "guard_score_threshold": guard_score_threshold,
@@ -2417,7 +2417,7 @@ def focus_set_config(
         "guard_score_raw_body_against": guard_score_raw_body_against,
         "guard_score_momentum_deriv_align": guard_score_momentum_deriv_align,
         "guard_score_momentum_deriv_against": guard_score_momentum_deriv_against,
-        # ── ★ [2026-06-03 부모] D1 추세 가중 + 갭 체크 게이트 ──
+        # ── ★ [2026-06-03 owner] D1 trend weighting + gap-check gate ──
         "d1_trend_weight": d1_trend_weight,
         "cr_speed_sign_guard_enabled": cr_speed_sign_guard_enabled,
         "cr_blowoff_extreme_guard_enabled": cr_blowoff_extreme_guard_enabled,
@@ -2434,36 +2434,36 @@ def focus_set_config(
         "gap_proximity_exit_enabled": gap_proximity_exit_enabled,
         "gap_proximity_exit_tf": gap_proximity_exit_tf,
         "gap_proximity_exit_pct": gap_proximity_exit_pct,
-        # ── ★ [2026-06-15 해결안 B·C] 관측 토글 ──
+        # ── ★ [2026-06-15 solution B·C] Observation toggles ──
         "gate_ledger_enabled": gate_ledger_enabled,
         "dual_observe_auto_off_weak": dual_observe_auto_off_weak,
     }.items():
         if v is not None:
             patch[k] = v
 
-    # ★ [2026-05-18] leading_entry_mode 정규화 + 검증
+    # ★ [2026-05-18] Normalize + validate leading_entry_mode
     if leading_entry_mode is not None:
         _le_norm = str(leading_entry_mode).strip().upper()
         if _le_norm not in ("OFF", "CFID", "PATTERN"):
             return {"ok": False, "error": f"leading_entry_mode must be OFF/CFID/PATTERN (got '{leading_entry_mode}')"}
         patch["leading_entry_mode"] = _le_norm
 
-    # scanner_blacklist: 쉼표 구분 문자열 → 리스트 변환
+    # scanner_blacklist: convert a comma-separated string → list
     if scanner_blacklist is not None:
         if scanner_blacklist.strip() == "":
             patch["scanner_blacklist"] = []
         else:
             patch["scanner_blacklist"] = [s.strip().upper() for s in scanner_blacklist.split(",") if s.strip()]
 
-    # ★ [2026-05-31 부모 server-b race fix] lock_market 명시적 제공 시만 update (None=부분 호출 → 옛값 유지).
-    #   부모님 Save Config 시 JS 가 항상 빈 string 보냄 → 여기서 빈 string 저장 → 다음 polling 빈값.
+    # ★ [2026-05-31 owner server-b race fix] update lock_market only when explicitly provided (None=partial call → keep old value).
+    #   On the owner's Save Config the JS always sends an empty string → it gets stored here → next polling returns empty.
     if lock_market is not None:
         patch["lock_market"] = lock_market.strip().upper()
 
     result = fm.update_config(patch)
-    # ★ [2026-05-19] 자동 snapshot 저장 (silent fail — config 변경은 무영향)
-    # ★ [2026-06-20] 백그라운드 스레드 — 스냅샷이 _calc_pnl_24h(저널 풀파싱, 느린 서버 ~33s)를 호출해
-    #    config 저장 POST 가 그만큼 블록되던 근본 fix (드로다운 리셋 2s vs config 33s). 스냅샷=비필수라 응답 안 막음.
+    # ★ [2026-05-19] Auto snapshot save (silent fail — does not affect config changes)
+    # ★ [2026-06-20] Background thread — the snapshot calls _calc_pnl_24h (full journal parse, ~33s on slow servers),
+    #    which was the root cause of the config-save POST blocking that long (drawdown reset 2s vs config 33s). The snapshot is non-essential, so it no longer blocks the response.
     import threading as _th_snap
     _th_snap.Thread(target=_save_config_snapshot, args=(result, patch), daemon=True).start()
     return {"ok": True, "config": result}
@@ -2506,15 +2506,15 @@ def focus_manual_entry(
     request: Request,
     market: str = Query(..., description="Market symbol (e.g. BTCUSDT)"),
     direction: str = Query(..., description="LONG or SHORT"),
-    wait_for_signal: bool = Query(False, description="[2026-05-29 운영자] True 시 즉시 X. 운영자 방향 신호 확인 후 자동 실행 (default timeout 1시간)"),
-    timeout_sec: Optional[float] = Query(None, description="Smart Manual Entry 대기 시간 (default 3600s)"),
+    wait_for_signal: bool = Query(False, description="[2026-05-29 operator] No immediate execution when True. Auto-executes after the operator confirms the direction signal (default timeout 1 hour)"),
+    timeout_sec: Optional[float] = Query(None, description="Smart Manual Entry wait time (default 3600s)"),
 ):
-    """[2026-05-16 부모] 수동 강제 진입 — 게이트 우회 (microtiming/EE/MTF FLIP).
+    """[2026-05-16 owner] Manual forced entry — bypasses gates (microtiming/EE/MTF FLIP).
 
-    안전 가드는 유지: reentry / Bybit duplicate / cross-strategy / qty/margin.
-    부모님이 시스템 판단을 무시하고 직접 진입할 때 사용.
+    Safety guards are kept: reentry / Bybit duplicate / cross-strategy / qty/margin.
+    Used when the owner overrides the system's judgment and enters directly.
 
-    [2026-05-29 부모] wait_for_signal=True 시 신호 확인 대기 모드.
+    [2026-05-29 owner] When wait_for_signal=True, waits in signal-confirmation mode.
     """
     fm = _get_fm(request)
     direction = (direction or "").upper()
@@ -2533,7 +2533,7 @@ def focus_manual_entry(
 
 @router.get("/pending-manual-entries")
 def focus_pending_manual_entries(request: Request):
-    """[2026-05-29 부모] Smart Manual Entry 대기 큐 조회."""
+    """[2026-05-29 owner] Query the Smart Manual Entry waiting queue."""
     fm = _get_fm(request)
     import time as _time
     _now = _time.time()
@@ -2559,7 +2559,7 @@ def focus_cancel_pending_manual_entry(
     market: str = Query(..., description="Market symbol"),
     direction: str = Query(..., description="LONG or SHORT"),
 ):
-    """[2026-05-29 부모] Smart Manual Entry 큐 취소."""
+    """[2026-05-29 owner] Cancel a Smart Manual Entry queue item."""
     fm = _get_fm(request)
     market = (market or "").upper()
     direction = (direction or "").upper()
@@ -2618,11 +2618,11 @@ def focus_lock_market(
     from app.manager.focus_manager import FocusState
     fm = _get_fm(request)
     fm.config.lock_market = market.upper().strip()
-    # lock 설정 시 즉시 해당 코인으로 전환
+    # When lock is set, switch to that coin immediately
     if fm.config.lock_market:
         fm.selected_market = fm.config.lock_market
         if fm.state.value in ("DORMANT", "ALERT", "COOLDOWN"):
-            fm.state = FocusState.HUNT  # 다음 tick에서 HUNT 로직 실행
+            fm.state = FocusState.HUNT  # run the HUNT logic on the next tick
     else:
         logger.info("[FOCUS] Market unlocked — will auto-scan")
     fm._save_config()
@@ -2635,29 +2635,29 @@ def focus_lock_market(
 
 # ── Top 10 Live Scanner ─────────────────────────────────────
 
-# [2026-06-12] 스캔결과 단기 캐시 — 재오픈/다중 탭이 매번 11코인 풀스캔(코인당
-# greenpen+conviction+guard, 수십 API)을 재실행하지 않게. TTL 15초.
-# ★ engine_warnings(E-STOP/stale)는 캐시 hit 에도 매번 fresh 재계산 → 경고는 안 묵음.
+# [2026-06-12] Short cache of scan results — so re-opens / multiple tabs don't re-run a full 11-coin scan
+# (greenpen+conviction+guard, dozens of APIs per coin) every time. TTL 15 seconds.
+# ★ engine_warnings (E-STOP/stale) are recomputed fresh on every call even on a cache hit → warnings are never stale.
 _SCAN_RESULT_TTL = 15.0
 _SCAN_RESULT_CACHE: dict = {}  # top_n -> (ts, results_list)
 
 
 def _scan_engine_warnings(request, fm) -> list:
-    """엔진 메타 경고 (E-STOP / Scanner stale / FOCUS off) — 항상 fresh, API 호출 없음."""
+    """Engine meta warnings (E-STOP / Scanner stale / FOCUS off) — always fresh, no API calls."""
     import time as _time
     warnings = []
     try:
         _sys = request.app.state.system
         if getattr(_sys, 'emergency_stop', False):
-            warnings.append({'level': 'critical', 'tag': 'E_STOP', 'msg': '🆘 Emergency Stop ACTIVE — 모든 진입 차단 (Resume 필요)'})
+            warnings.append({'level': 'critical', 'tag': 'E_STOP', 'msg': '🆘 Emergency Stop ACTIVE — all entries blocked (Resume required)'})
     except Exception:
         pass
     try:
         _last = float(getattr(fm, 'last_scan_ts', 0) or 0)
         if _last > 0:
             _stale = _time.time() - _last
-            if _stale > 180:  # 3분+ stale
-                warnings.append({'level': 'warn', 'tag': 'SCAN_STALE', 'msg': f'⚠️ Scanner stale {int(_stale)}s — 엔진 멈춤 의심'})
+            if _stale > 180:  # 3min+ stale
+                warnings.append({'level': 'warn', 'tag': 'SCAN_STALE', 'msg': f'⚠️ Scanner stale {int(_stale)}s — engine may be stalled'})
     except Exception:
         pass
     try:
@@ -2680,7 +2680,7 @@ def focus_scan_list(
         from app.strategy.greenpen.pa_detector import OHLCV
         import time as _scan_t
 
-        # ── #2 스캔결과 캐시 hit (재오픈/다중탭 즉시화) ──
+        # ── #2 Scan-result cache hit (instant for re-opens / multiple tabs) ──
         _ck = int(top_n)
         _hit = _SCAN_RESULT_CACHE.get(_ck)
         if _hit and (_scan_t.time() - _hit[0]) < _SCAN_RESULT_TTL:
@@ -2692,7 +2692,7 @@ def focus_scan_list(
         # 1) Get top coins by 24h turnover (linear) — client seam (= Binance)
         tickers = fm._get_client().get_market_tickers()
 
-        # ★ [2026-06-13 부모] 그린팬 스캐너도 진입 필터(scanner_min_price_usdt)와 일관 — 저가코인 제외
+        # ★ [2026-06-13 owner] The greenpen scanner is consistent with the entry filter (scanner_min_price_usdt) — excludes low-price coins
         _scan_min_price = float(getattr(fm.config, "scanner_min_price_usdt", 0.0) or 0.0)
         scored = []
         for t in tickers:
@@ -2706,7 +2706,7 @@ def focus_scan_list(
             change = float(t.get("price24hPcnt", 0) or 0) * 100
             if turnover < 1_000_000:
                 continue
-            if _scan_min_price > 0 and 0 < price < _scan_min_price:  # ★ 저가코인 스캐너에서도 제외
+            if _scan_min_price > 0 and 0 < price < _scan_min_price:  # ★ exclude low-price coins from the scanner too
                 continue
             scored.append({"symbol": symbol, "turnover": turnover, "price": price, "change_pct": change})
 
@@ -2754,12 +2754,12 @@ def focus_scan_list(
                     conf = round(best.confidence * 100)
                     pa_type = "pa"
 
-                # PA 패턴 없을 때 → Market Structure 폴백
+                # When there's no PA pattern → fall back to Market Structure
                 if pa_type == "none":
                     _struct = gp.structure
                     _s_conf = round(float(getattr(_struct, "confidence", 0) or 0) * 100)
 
-                    # BOS(Break of Structure) 감지 시 우선 표시
+                    # Show first when a BOS (Break of Structure) is detected
                     _bos = getattr(_struct, "bos", None)
                     if _bos and getattr(_bos, "detected", False):
                         pa_name = f"BOS_{_bos.direction}"
@@ -2767,7 +2767,7 @@ def focus_scan_list(
                         pa_type = "bos"
                         signal = "BUY" if _bos.direction == "BULLISH" else "SELL"
                     elif _struct.trend.value != "SIDEWAYS":
-                        # 추세 중: 최근 스윙 패턴 표시 (HH/HL or LH/LL)
+                        # In a trend: show the recent swing pattern (HH/HL or LH/LL)
                         _swings = getattr(_struct, "swings", []) or []
                         if len(_swings) >= 2:
                             _last2 = [s.type.value for s in _swings[-2:]]
@@ -2777,7 +2777,7 @@ def focus_scan_list(
                         conf = _s_conf
                         pa_type = "structure"
                     else:
-                        # 횡보: SW range 표시
+                        # Ranging: show the SW range
                         _sw = getattr(_struct, "sw_range", None)
                         pa_name = "RANGE"
                         conf = _s_conf
@@ -2796,12 +2796,12 @@ def focus_scan_list(
                 except Exception:
                     pass
 
-                # ── Conviction score (★ 2026-05-11 Phase 1 통합) ──
-                # focus_manager 의 _compute_conviction_score 직접 호출 — 진입 결정 점수와 일치
-                # PA Pattern (0~6) + Phase 1 감점 (MTF Conflict + Momentum Reversal) 모두 반영
+                # ── Conviction score (★ 2026-05-11 Phase 1 integration) ──
+                # Call focus_manager's _compute_conviction_score directly — matches the entry-decision score
+                # Reflects both PA Pattern (0~6) + Phase 1 penalties (MTF Conflict + Momentum Reversal)
                 _direction = "LONG" if signal == "BUY" else ("SHORT" if signal == "SELL" else "")
                 try:
-                    # zones 도 전달 (PA Pattern 의 zone bonus 적용용)
+                    # Pass zones too (for applying the PA Pattern's zone bonus)
                     _zones_tuple = None
                     try:
                         _zones_list = getattr(gp, "zones", []) or []
@@ -2811,14 +2811,14 @@ def focus_scan_list(
                     except Exception:
                         _zones_tuple = None
                     _conv = fm._compute_conviction_score(symbol, candles, direction=_direction, zones=_zones_tuple)
-                    # ★ [2026-05-17] breakdown 즉시 copy — 다음 코인 평가 시 덮어쓰임 방지
+                    # ★ [2026-05-17] Copy the breakdown immediately — prevents it being overwritten when the next coin is evaluated
                     _conv_dbg = dict(getattr(fm, '_last_conviction_breakdown', {}) or {})
-                    # ★ [2026-05-17] Scanner 적용 최종 conviction 있으면 우선 사용 (BB 위치 감점 등 반영)
+                    # ★ [2026-05-17] If there's a final scanner-applied conviction, prefer it (reflects BB-position penalty etc.)
                     _scan_final_conv = (getattr(fm, '_last_scan_conviction', {}) or {}).get(symbol)
                     if _scan_final_conv is not None:
                         _conv = _scan_final_conv
                 except Exception:
-                    # Fallback: 단순 ADX 기반 (예전 logic)
+                    # Fallback: simple ADX-based (old logic)
                     _conv = 0
                     _conv_dbg = {}
                     if _adx_val >= 40: _conv = 3
@@ -2836,7 +2836,7 @@ def focus_scan_list(
                     if _elapsed < 300:
                         _status = f"COOL {int(300-_elapsed)}s"
 
-                # ★ [2026-05-17] Scanner cycle 차단 이유 (UI STATUS 칼럼)
+                # ★ [2026-05-17] Scanner cycle block reason (UI STATUS column)
                 _block_reason = ""
                 try:
                     _scan_cache = getattr(fm, '_last_scan_filter', None) or {}
@@ -2844,7 +2844,7 @@ def focus_scan_list(
                 except Exception:
                     pass
 
-                # ── [2026-05-20 Phase 6 Stage 6] Energy bar 변화율 + 시계열 (UI sparkline 용) ──
+                # ── [2026-05-20 Phase 6 Stage 6] Energy-bar change rate + time series (for the UI sparkline) ──
                 _conf_delta_pp = 0.0
                 _conf_samples = 0
                 _conf_history = []
@@ -2855,14 +2855,14 @@ def focus_scan_list(
                         _conf_samples = int(_vel.get('samples', 0))
                     _hist_deque = getattr(fm, '_confidence_history', {}).get(symbol)
                     if _hist_deque:
-                        # 최근 N개만 sparkline 용 (timestamp 생략, confidence% 만)
+                        # Only the last N for the sparkline (omit timestamps, confidence% only)
                         _conf_history = [round(float(e[2]) * 100, 1) for e in list(_hist_deque)[-30:]]
                 except Exception:
                     pass
 
-                # ★ [2026-05-28] 가드 점수 캐시 (_evaluate_entry 의 guard_score 평가 결과)
+                # ★ [2026-05-28] Guard-score cache (the guard_score result from _evaluate_entry)
                 _gs = dict((getattr(fm, '_last_guard_score', {}) or {}).get(symbol.upper(), {}) or {})
-                # 캐시 없으면 BUY/SELL 코인에 한해 직접 평가 (부모 5-28: 모든 행 4 컬럼)
+                # If not cached, evaluate directly for BUY/SELL coins only (owner 5-28: 4 columns on every row)
                 if not _gs and signal in ("BUY", "SELL") and hasattr(fm, '_compute_guard_score_modifiers'):
                     try:
                         _dir_tn = "LONG" if signal == "BUY" else "SHORT"
@@ -2880,7 +2880,7 @@ def focus_scan_list(
                         }
                     except Exception as _gse_tn:
                         logger.debug("[BINANCE_FUT_API] %s guard_score eval failed: %s", symbol, _gse_tn)
-                # ★ [2026-05-28 부모] 봇 의견 경고 배지 (BB 충돌/추세 충돌/점수 음수 등)
+                # ★ [2026-05-28 owner] Bot-opinion warning badge (BB conflict / trend conflict / negative score etc.)
                 _bot_op = _bot_opinion(signal, gp.structure.trend.value,
                                        _gs.get("total"), _gs.get("threshold"),
                                        _block_reason, pa_name)
@@ -2891,23 +2891,23 @@ def focus_scan_list(
                     "pa_type": pa_type,
                     "trend": gp.structure.trend.value,
                     "confidence": conf,
-                    "confidence_delta_pp": _conf_delta_pp,        # ★ Phase 6 Stage 6: 5분간 변화율 (%p)
-                    "confidence_samples": _conf_samples,          # 시계열 데이터 포인트 수
-                    "confidence_history": _conf_history,          # 최근 30개 confidence % (sparkline)
+                    "confidence_delta_pp": _conf_delta_pp,        # ★ Phase 6 Stage 6: 5-minute change rate (%p)
+                    "confidence_samples": _conf_samples,          # number of time-series data points
+                    "confidence_history": _conf_history,          # last 30 confidence % (sparkline)
                     "atr": round(gp.atr, 2),
                     "adx": _adx_val,
                     "zones": len(gp.zones),
                     "conviction": _conv,
-                    "conviction_breakdown": _conv_dbg,  # ★ Phase 5 항목별 점수 (UI tooltip)
-                    "block_reason": _block_reason,  # ★ Scanner cycle 차단 이유
+                    "conviction_breakdown": _conv_dbg,  # ★ Phase 5 per-item scores (UI tooltip)
+                    "block_reason": _block_reason,  # ★ Scanner cycle block reason
                     "status": _status,
-                    # ★ [2026-05-28] 가드 점수 분리 컬럼용
+                    # ★ [2026-05-28] For the separate guard-score column
                     "guard_base": _gs.get("base"),
                     "guard_deduction": _gs.get("deduction"),
                     "guard_total": _gs.get("total"),
                     "guard_threshold": _gs.get("threshold"),
                     "guard_breakdown": _gs.get("breakdown"),
-                    "bot_opinion": _bot_op,  # ★ [2026-05-28] 봇 의견 (없으면 None)
+                    "bot_opinion": _bot_op,  # ★ [2026-05-28] bot opinion (None if absent)
                     "price": c["price"],
                     "change_pct": round(c["change_pct"], 1),
                 })
@@ -2919,7 +2919,7 @@ def focus_scan_list(
                     "price": c["price"], "change_pct": round(c.get("change_pct", 0), 1),
                 })
 
-        # ★ lock_market이 Top N에 없으면 별도 분석 추가 (부모 5-28: 비어있어도 금 기본 첫 행)
+        # ★ If lock_market isn't in the Top N, add a separate analysis (owner 5-28: the gold default first row even when empty)
         _lock = (fm.config.lock_market or "").upper() or "XAUTUSDT"
         if _lock and not any(r["market"] == _lock for r in results):
             try:
@@ -2967,9 +2967,9 @@ def focus_scan_list(
                             _lk_adx = round(_lk_r.get("adx", 0), 1)
                     except Exception:
                         pass
-                    # lock_market 가격 정보
+                    # lock_market price info
                     _lk_price = _lk_candles[-1].close if _lk_candles else 0
-                    # conviction for lock_market (★ 2026-05-11 Phase 1 통합)
+                    # conviction for lock_market (★ 2026-05-11 Phase 1 integration)
                     _lk_direction = "LONG" if _lk_signal == "BUY" else ("SHORT" if _lk_signal == "SELL" else "")
                     try:
                         _lk_zones_tuple = None
@@ -2979,7 +2979,7 @@ def focus_scan_list(
                             _lk_zones_tuple = (float(_lk_first.price_low), float(_lk_first.price_high))
                         _lk_conv = fm._compute_conviction_score(_lock, _lk_candles, direction=_lk_direction, zones=_lk_zones_tuple)
                         _lk_conv_dbg = dict(getattr(fm, '_last_conviction_breakdown', {}) or {})
-                        # ★ Scanner 최종 conviction 우선
+                        # ★ Prefer the final scanner conviction
                         _lk_scan_final = (getattr(fm, '_last_scan_conviction', {}) or {}).get(_lock)
                         if _lk_scan_final is not None:
                             _lk_conv = _lk_scan_final
@@ -2995,12 +2995,12 @@ def focus_scan_list(
                         _lk_block = ((getattr(fm, '_last_scan_filter', None) or {}).get('items', {}) or {}).get(_lock, "")
                     except Exception:
                         pass
-                    # ★ [2026-05-28 부모] lock_market 도 guard_score 평가 — 4 컬럼 채우기
+                    # ★ [2026-05-28 owner] Evaluate guard_score for lock_market too — fills the 4 columns
                     _lk_gs_data = {}
                     try:
-                        # 캐시 우선 (이미 _evaluate_entry 통과한 경우)
+                        # Prefer the cache (when it already passed _evaluate_entry)
                         _lk_gs_data = dict((getattr(fm, '_last_guard_score', {}) or {}).get(_lock, {}) or {})
-                        # 캐시 없거나 방향 부합 시 직접 평가
+                        # Evaluate directly if not cached or the direction matches
                         if not _lk_gs_data and _lk_direction and hasattr(fm, '_compute_guard_score_modifiers'):
                             _lk_gs_entry = {"conviction_score": _lk_conv, "market": _lock, "direction": _lk_direction}
                             _lk_gs_total, _lk_gs_breakdown = fm._compute_guard_score_modifiers(_lock, _lk_direction, _lk_gs_entry)
@@ -3016,7 +3016,7 @@ def focus_scan_list(
                             }
                     except Exception as _gse:
                         logger.debug("[BINANCE_FUT_API] lock_market guard_score eval failed: %s", _gse)
-                    # ★ [2026-05-28] 봇 의견 (lock_market 도 적용)
+                    # ★ [2026-05-28] Bot opinion (applied to lock_market too)
                     _lk_bot_op = _bot_opinion(_lk_signal, _lk_gp.structure.trend.value,
                                               _lk_gs_data.get("total"), _lk_gs_data.get("threshold"),
                                               _lk_block, _lk_pa)
@@ -3026,23 +3026,23 @@ def focus_scan_list(
                         "confidence": _lk_conf, "atr": round(_lk_gp.atr, 2),
                         "adx": _lk_adx, "zones": len(_lk_gp.zones),
                         "conviction": _lk_conv,
-                        "conviction_breakdown": _lk_conv_dbg,  # ★ Phase 5 항목별 점수
-                        "block_reason": _lk_block,  # ★ Scanner cycle 차단 이유
+                        "conviction_breakdown": _lk_conv_dbg,  # ★ Phase 5 per-item scores
+                        "block_reason": _lk_block,  # ★ Scanner cycle block reason
                         "status": _lk_status,
-                        # ★ [2026-05-28] guard_score 분리 컬럼
+                        # ★ [2026-05-28] Separate guard_score column
                         "guard_base": _lk_gs_data.get("base"),
                         "guard_deduction": _lk_gs_data.get("deduction"),
                         "guard_total": _lk_gs_data.get("total"),
                         "guard_threshold": _lk_gs_data.get("threshold"),
                         "guard_breakdown": _lk_gs_data.get("breakdown"),
-                        "bot_opinion": _lk_bot_op,  # ★ [2026-05-28] 봇 의견
+                        "bot_opinion": _lk_bot_op,  # ★ [2026-05-28] bot opinion
                         "price": _lk_price, "change_pct": 0,
-                        "_is_lock": True,  # 정렬용 마커
+                        "_is_lock": True,  # sorting marker
                     })
             except Exception as _lke:
                 logger.debug("[BINANCE_FUT_API] lock_market scan failed: %s", _lke)
 
-        # Sort: lock_market 항상 첫 행 (부모 5-28 "금 전용 공간") → BUY/SELL → confidence
+        # Sort: lock_market always first row (owner 5-28 "dedicated gold space") → BUY/SELL → confidence
         signal_order = {"BUY": 0, "SELL": 1, "HOLD": 2, "ERR": 3, "-": 4}
         results.sort(key=lambda x: (
             0 if (x.get("_is_lock") or x.get("market", "").upper() == _lock) else 1,
@@ -3050,11 +3050,11 @@ def focus_scan_list(
             -x["confidence"]
         ))
 
-        # ── #2 스캔결과 캐시 저장 (성공 시만 — 에러 캐시 오염 방지) ──
+        # ── #2 Save the scan-result cache (only on success — prevents caching errors) ──
         _SCAN_RESULT_CACHE[_ck] = (_scan_t.time(), results)
 
-        # ★ [2026-05-17] 엔진 메타 상태 — 부모님 9개월 트라우마 ("엔진/E-STOP/Auto Engine") 대응
-        # ★ 항상 fresh (캐시 hit 경로와 동일 헬퍼) → E-STOP/stale 경고는 안 묵음.
+        # ★ [2026-05-17] Engine meta state — addresses the owner's 9-month trauma ("engine/E-STOP/Auto Engine")
+        # ★ Always fresh (same helper as the cache-hit path) → E-STOP/stale warnings are never stale.
         engine_warnings = _scan_engine_warnings(request, fm)
         return {"ok": True, "items": results, "count": len(results), "engine_warnings": engine_warnings}
     except Exception as exc:
@@ -3081,9 +3081,9 @@ def focus_tf_progress(
     request: Request,
     market: str = Query("BTCUSDT", description="Market e.g. BTCUSDT"),
 ):
-    """7개 TF (D/H4/H1/30M/15M/5M/3M) 의 진행 중 봉 정보 — 수동 진입 참고용.
+    """In-progress bar info for the 7 TFs (D/H4/H1/30M/15M/5M/3M) — for manual-entry reference.
 
-    [2026-05-21] 부모님 결정. 봉 닫히기 전 흐름 시각화. 진입 로직 변경 없음.
+    [2026-05-21] Owner decision. Visualizes the flow before a bar closes. No change to entry logic.
     """
     fm = _get_fm(request)
     if not fm:
@@ -3143,30 +3143,30 @@ def focus_analysis(
 
 
 # ============================================================
-# Trade Journal — FOCUS + Harpoon 장부
+# Trade Journal — FOCUS + Harpoon ledger
 # ============================================================
 
-# Peer Brief Scanner 응답 캐시 — near-miss 사후판정 enrichment 가 near_miss 마다
-# 현재가+5/15/30/60분 캔들을 fetch 해 무겁다. 여러 탭/서버가 20초마다 폴링하면 kline 벽에
-# 걸려 응답이 늦어졌다 빨라졌다(=패널 깜빡임). 함대 전체 동일 페이로드라 짧은 TTL 로 공유 재사용.
-# [2026-06-19 부모 "매끄럽지 못하다"] = 대시보드 느림 안티패턴(저널leak→b12풀파싱→kline벽)의 4번째.
+# Peer Brief Scanner response cache — the near-miss post-hoc enrichment fetches, for each near_miss,
+# the current price + 5/15/30/60-min candles, which is heavy. If many tabs/servers poll every 20s they hit the kline
+# wall and responses speed up and slow down (=panel flicker). The whole fleet shares the same payload, so a short TTL lets it be reused.
+# [2026-06-19 owner "it's not smooth"] = the 4th dashboard-slowness anti-pattern (journal leak → b12 full parse → kline wall).
 _PEER_CACHE_RESP_BOX: dict = {"ts": 0.0, "data": None}
-_PEER_CACHE_RESP_TTL = 25.0   # 초 — 대시보드 폴링 20초보다 약간 위라야 연속 폴링이 적중(단일 탭도 매끄럽게).
-                              #       사후판정은 5~60분 단위라 25초 staleness 는 무시 가능.
+_PEER_CACHE_RESP_TTL = 25.0   # seconds — slightly above the dashboard's 20s polling so consecutive polls hit (smooth even for a single tab).
+                              #       post-hoc judgments are on a 5~60min scale, so 25s staleness is negligible.
 
 
 @router.get("/peer-cache")
 def focus_peer_cache(request: Request):
-    """Peer Brief Scanner 용 — 옆 서버 캐시 + 자기(Home) brief 통합 (읽기전용, 추가 폴링 X).
-    servers[] = [self, peer1, peer2...] 균일 형식: positions/near_miss/losses/wins (2026-06-07 부모).
-    ★ 응답을 _PEER_CACHE_RESP_TTL 초 캐시 → 다중 탭/폴링이 무거운 enrichment 1회를 재사용(매끄러움)."""
-    # ★ [2026-06-23 부모 확인] 함대 peer-brief 프로토콜(/peer/brief, build_my_brief)은 *Bybit FOCUS*
-    #   포지션만 추적한다. Binance 를 도는 peer 가 함대에 없으므로 Binance 창에서는 빈 값이 정상.
-    #   Bybit 함대 데이터를 Binance 화면에 섞어 보여주지 않기 위해 여기서 빈 응답 반환(누수 차단).
-    #   (향후 함대 프로토콜이 거래소-aware 가 되면 이 가드 제거.)
+    """For the Peer Brief Scanner — combines peer-server caches + this (Home) server's brief (read-only, no extra polling).
+    servers[] = [self, peer1, peer2...] uniform format: positions/near_miss/losses/wins (2026-06-07 owner).
+    ★ Caches the response for _PEER_CACHE_RESP_TTL seconds → multiple tabs/polls reuse one heavy enrichment (smoothness)."""
+    # ★ [2026-06-23 owner confirmed] The fleet peer-brief protocol (/peer/brief, build_my_brief) tracks only *Bybit FOCUS*
+    #   positions. There is no Binance-running peer in the fleet, so empty values are normal in the Binance window.
+    #   To avoid mixing Bybit fleet data into the Binance screen, return an empty response here (blocks the leak).
+    #   (Remove this guard once the fleet protocol becomes exchange-aware.)
     return {"ok": True, "exchange": "binance_futures",
-            "note": "함대 peer-brief 는 현재 Bybit FOCUS 만 추적 · Binance peer 없음 (빈 값 정상)"}
-    import time as _t  # noqa: F841 (아래 원본 로직 — 거래소-aware 전환 시 위 가드만 제거)
+            "note": "The fleet peer-brief currently tracks only Bybit FOCUS · no Binance peer (empty is normal)"}
+    import time as _t  # noqa: F841 (original logic below — when switching to exchange-aware, just remove the guard above)
     from app.core import peer_brief as pb
     now = _t.time()
     _box = _PEER_CACHE_RESP_BOX
@@ -3239,16 +3239,16 @@ def focus_peer_cache(request: Request):
 
     def _verdict_label(age_min: float, ret_now):
         if ret_now is None:
-            return ("unknown", "판정대기")
+            return ("unknown", "Awaiting judgment")
         if age_min < 5.0:
-            return ("watching", "관찰중")
-        # ret_now = 막힌 방향으로 들어갔다면 현재 어느 정도 갔는가.
-        # +면 놓친 수익, 0/음수면 막은 게 유리했거나 횡보.
+            return ("watching", "Watching")
+        # ret_now = if we had entered in the blocked direction, how far it has gone now.
+        # Positive=missed profit, zero/negative=blocking was favorable or it ranged.
         if ret_now > 0.10:
-            return ("missed_entry", "아쉬운 차단")
+            return ("missed_entry", "Regrettable block")
         if ret_now <= 0.05:
-            return ("good_block", "좋은 차단")
-        return ("neutral", "중립")
+            return ("good_block", "Good block")
+        return ("neutral", "Neutral")
 
     def _enrich_near_miss(n: dict) -> dict:
         out = dict(n or {})
@@ -3288,7 +3288,7 @@ def focus_peer_cache(request: Request):
             out[px_key] = px_h
         return out
 
-    # self (Home) 먼저
+    # self (Home) first
     try:
         fm = _get_fm(request)
         mb = pb.build_my_brief(getattr(fm, "system", None))
@@ -3312,7 +3312,7 @@ def focus_peer_cache(request: Request):
     for srv in servers:
         try:
             srv["near_miss"] = [_enrich_near_miss(n) for n in (srv.get("near_miss") or []) if isinstance(n, dict)]
-        except Exception as exc:  # noqa: BLE001 — enrichment 실패해도 raw near_miss 유지(패널 안 비게)
+        except Exception as exc:  # noqa: BLE001 — keep the raw near_miss even if enrichment fails (so the panel isn't empty)
             logger.debug("[FOCUS] peer-cache enrich failed for %s: %s", srv.get("server_id"), exc)
     snap["servers"] = servers
     _PEER_CACHE_RESP_BOX["ts"] = now
@@ -3328,7 +3328,7 @@ def focus_journal(
     market: str = Query("", description="Market filter e.g. BTCUSDT"),
     include_blocked: bool = Query(False, description="Include BLOCKED events (default=hide)"),
 ):
-    """FOCUS + Harpoon 거래 장부 조회 (페이지네이션 + 코인 필터)."""
+    """Query the FOCUS + Harpoon trade ledger (pagination + coin filter)."""
     try:
         from app.manager.trade_journal import journal
         result = _bjournal().get_trades(
@@ -3351,7 +3351,7 @@ def focus_journal(
 
 @router.get("/journal/markets")
 def focus_journal_markets():
-    """사용 가능한 마켓 목록 조회."""
+    """Query the list of available markets."""
     try:
         from app.manager.trade_journal import journal
         markets = _bjournal().get_markets()
@@ -3362,7 +3362,7 @@ def focus_journal_markets():
 
 @router.get("/journal/summary")
 def focus_journal_summary():
-    """FOCUS + Harpoon 성과 요약 (Dynamic Trailing 비교 포함)."""
+    """FOCUS + Harpoon performance summary (includes a Dynamic Trailing comparison)."""
     try:
         from app.manager.trade_journal import journal
         summary = _bjournal().get_summary()
@@ -3375,7 +3375,7 @@ def focus_journal_summary():
 
 @router.get("/daily-snapshots")
 def focus_daily_snapshots():
-    """저장된 일별 성과 스냅샷 전체 조회 (차트용)."""
+    """Query all saved daily performance snapshots (for charts)."""
     try:
         from app.manager.focus_daily_snapshot import get_all_snapshots
         snapshots = get_all_snapshots(_BINANCE_FUT_SNAP_DIR)
@@ -3386,7 +3386,7 @@ def focus_daily_snapshots():
 
 @router.get("/daily-snapshots/{date}")
 def focus_daily_snapshot_detail(date: str):
-    """특정 날짜 스냅샷 상세 조회."""
+    """Query the detail of a specific date's snapshot."""
     try:
         from app.manager.focus_daily_snapshot import load_snapshot
         snap = load_snapshot(date, _BINANCE_FUT_SNAP_DIR)
@@ -3399,7 +3399,7 @@ def focus_daily_snapshot_detail(date: str):
 
 @router.post("/daily-snapshots/backfill")
 def focus_daily_snapshot_backfill(request: Request):
-    """journal에서 과거 스냅샷 일괄 생성 (빠진 날짜만)."""
+    """Batch-generate past snapshots from the journal (only missing dates)."""
     try:
         from app.manager.focus_daily_snapshot import backfill_from_journal
         fm = _get_fm(request)
@@ -3413,7 +3413,7 @@ def focus_daily_snapshot_backfill(request: Request):
 
 @router.post("/daily-snapshots/save-today")
 def focus_daily_snapshot_save_today(request: Request):
-    """현재 진행 중인 오늘 스냅샷을 수동 저장."""
+    """Manually save today's in-progress snapshot."""
     try:
         from app.manager.focus_daily_snapshot import build_snapshot, save_snapshot
         from app.manager.trade_journal import JOURNAL_PATH
@@ -3423,13 +3423,13 @@ def focus_daily_snapshot_save_today(request: Request):
 
         fm = _get_fm(request)
 
-        # 오늘 리셋 기준선
+        # Today's reset baseline
         now_utc = _dt.datetime.now(_dt.timezone.utc)
         boundary = now_utc.replace(hour=22, minute=0, second=0, microsecond=0)
         if now_utc.hour < 22:
             boundary -= _dt.timedelta(days=1)
 
-        # journal EXIT 거래 로드
+        # Load EXIT trades from the journal
         exits = []
         import os
         if os.path.exists(_BINANCE_FUT_JOURNAL_PATH):
@@ -3448,7 +3448,7 @@ def focus_daily_snapshot_save_today(request: Request):
         snap = build_snapshot(
             exits,
             boundary.timestamp(),
-            boundary.timestamp() + 86400,  # 다음 리셋까지
+            boundary.timestamp() + 86400,  # until the next reset
             asdict(fm.config),
         )
         path = save_snapshot(snap, _BINANCE_FUT_SNAP_DIR)
@@ -3457,48 +3457,48 @@ def focus_daily_snapshot_save_today(request: Request):
         return {"ok": False, "error": str(exc)}
 
 
-# ── Capital Tracking (입출금 + 순수 성과) ──────────────────
+# ── Capital Tracking (deposits/withdrawals + pure performance) ──────────────────
 
 @router.post("/capital/initial")
-def capital_set_initial(amount: float = Query(..., description="초기 자본 (USDT)")):
-    """초기 자본 설정 (처음 한 번)."""
+def capital_set_initial(amount: float = Query(..., description="Initial capital (USDT)")):
+    """Set the initial capital (once at the start)."""
     from app.manager.capital_tracker import capital_tracker
     return _bcapital().set_initial(amount)
 
 
 @router.post("/capital/deposit")
 def capital_deposit(
-    amount: float = Query(..., description="입금액 (USDT)"),
-    memo: str = Query("", description="메모"),
+    amount: float = Query(..., description="Deposit amount (USDT)"),
+    memo: str = Query("", description="Memo"),
 ):
-    """입금 기록."""
+    """Record a deposit."""
     from app.manager.capital_tracker import capital_tracker
     return _bcapital().deposit(amount, memo)
 
 
 @router.post("/capital/withdraw")
 def capital_withdraw(
-    amount: float = Query(..., description="출금액 (USDT)"),
-    memo: str = Query("", description="메모"),
+    amount: float = Query(..., description="Withdrawal amount (USDT)"),
+    memo: str = Query("", description="Memo"),
 ):
-    """출금 기록."""
+    """Record a withdrawal."""
     from app.manager.capital_tracker import capital_tracker
     return _bcapital().withdraw(amount, memo)
 
 
 @router.get("/capital/performance")
 def capital_performance(request: Request):
-    """순수 트레이딩 성과 조회 (입출금 보정)."""
+    """Query pure trading performance (adjusted for deposits/withdrawals)."""
     try:
         from app.manager.capital_tracker import capital_tracker
         from app.manager.trade_journal import journal
 
         fm = _get_fm(request)
 
-        # 현재 Bybit 잔고
+        # Current Bybit balance
         equity = fm._get_available_margin() or 0
 
-        # journal 총 실현 PnL
+        # Total realized PnL from the journal
         summary = _bjournal().get_summary()
         trading_pnl = summary.get("combined", {}).get("total_pnl", 0)
 
@@ -3510,7 +3510,7 @@ def capital_performance(request: Request):
 
 @router.get("/capital/events")
 def capital_events():
-    """입출금 이벤트 목록."""
+    """List of deposit/withdrawal events."""
     from app.manager.capital_tracker import capital_tracker
     events = _bcapital().get_events()
     return {"ok": True, "events": events, "count": len(events)}
@@ -3518,16 +3518,16 @@ def capital_events():
 
 @router.get("/capital/status")
 def capital_status():
-    """자본 추적 상태."""
+    """Capital-tracking status."""
     from app.manager.capital_tracker import capital_tracker
     return {"ok": True, **_bcapital().get_status()}
 
 
-# ── Time Analytics (요일별 + 시간대별 실적) ─────────────────────
+# ── Time Analytics (performance by weekday + time-of-day) ─────────────────────
 
 @router.get("/analytics/by-dow")
 def analytics_by_dow():
-    """요일별 실적 분석 (KST 기준)."""
+    """Performance analysis by weekday (KST)."""
     import json as _json, datetime as _dt, os
     journal_path = _BINANCE_FUT_JOURNAL_PATH
     if not os.path.exists(journal_path):
@@ -3575,7 +3575,7 @@ def analytics_by_dow():
 
 @router.get("/analytics/by-slot")
 def analytics_by_slot():
-    """4시간 슬롯별 실적 (KST 07:00 시작)."""
+    """Performance by 4-hour slot (starting at KST 07:00)."""
     import json as _json, datetime as _dt, os
     journal_path = _BINANCE_FUT_JOURNAL_PATH
     if not os.path.exists(journal_path):
@@ -3632,7 +3632,7 @@ def analytics_by_slot():
 
 
 # ════════════════════════════════════════════════════════════════
-# 형의 답례 선물 🎁 — Weekly Intelligence / Coin Report Card /
+# This agent's gift in return 🎁 — Weekly Intelligence / Coin Report Card /
 #   Correlation Guard / Drawdown Shield / Twin Battle
 # ════════════════════════════════════════════════════════════════
 
@@ -3640,53 +3640,53 @@ def analytics_by_slot():
 
 @router.get("/weekly-report")
 def weekly_report_current():
-    """현재 주간 인텔리전스 리포트. ★ [2026-06-23] weekly_intelligence 모듈은 전역(Bybit) 스냅샷/리포트
-    디렉터리를 읽는다 → Bybit 데이터 섞임 방지 위해 Binance 창에선 빈 값(거래·스냅 누적 후 별도 격리 예정)."""
-    return {"ok": False, "message": "Binance 주간 리포트 — 거래/스냅샷 누적 후 생성 (현재 데이터 없음)",
+    """Current weekly intelligence report. ★ [2026-06-23] the weekly_intelligence module reads the global (Bybit) snapshot/report
+    directory → to avoid mixing in Bybit data, return empty in the Binance window (to be isolated separately once trades/snapshots accumulate)."""
+    return {"ok": False, "message": "Binance weekly report — generated once trades/snapshots accumulate (no data yet)",
             "exchange": "binance_futures"}
 
 
 @router.get("/weekly-report/{week}")
 def weekly_report_by_week(week: str):
-    """특정 주간 리포트 조회. (Binance — 전역 Bybit 리포트 격리 위해 빈 값)"""
-    return {"ok": False, "message": f"Binance {week} 리포트 없음 (거래 누적 후 생성)"}
+    """Query a specific weekly report. (Binance — empty to isolate from the global Bybit report)"""
+    return {"ok": False, "message": f"No Binance {week} report (generated once trades accumulate)"}
 
 
 @router.get("/weekly-reports")
 def weekly_report_all():
-    """전체 주간 리포트 목록. (Binance — 빈 목록, 전역 Bybit 리포트 미노출)"""
+    """List of all weekly reports. (Binance — empty list, global Bybit report not exposed)"""
     return {"ok": True, "reports": []}
 
 
 @router.post("/weekly-report/generate")
 def weekly_report_generate(force: bool = Query(False)):
-    """지난 주 리포트 수동 생성. (Binance — 전역 모듈이 Bybit 스냅샷 기반이라 보류)"""
-    return {"ok": False, "message": "Binance 주간 리포트 생성은 거래소별 격리 후 지원 예정"}
+    """Manually generate last week's report. (Binance — held off since the global module is based on Bybit snapshots)"""
+    return {"ok": False, "message": "Binance weekly report generation will be supported after per-exchange isolation"}
 
 
 # ── Coin Report Card ────────────────────────────────────────────
 
 @router.get("/coin-grades")
 def coin_grades():
-    """코인별 성적표 — 등급 + 점수 + 통계."""
+    """Per-coin report card — grade + score + stats."""
     from app.manager.coin_report_card import coin_report_card
     return {"ok": True, **_bcoincard().get_full_report()}
 
 
 @router.get("/coin-grades/{coin}")
 def coin_grade_detail(coin: str):
-    """특정 코인 성적 상세."""
+    """Detail of a specific coin's report."""
     from app.manager.coin_report_card import coin_report_card
     report = _bcoincard().get_full_report()
     coin_upper = coin.upper()
     if coin_upper not in report.get("coins", {}):
-        return {"ok": False, "message": f"{coin_upper} 데이터 없음"}
+        return {"ok": False, "message": f"No data for {coin_upper}"}
     return {"ok": True, "coin": coin_upper, **report["coins"][coin_upper]}
 
 
 @router.post("/coin-grades/refresh")
-def coin_grades_refresh(days: int = Query(7, ge=1, le=90, description="분석 기간 (일)")):
-    """코인 성적표 새로고침."""
+def coin_grades_refresh(days: int = Query(7, ge=1, le=90, description="Analysis period (days)")):
+    """Refresh the coin report card."""
     from app.manager.coin_report_card import CoinReportCard
     card = _bcoincard(lookback_days=days)
     result = card.refresh()
@@ -3697,11 +3697,11 @@ def coin_grades_refresh(days: int = Query(7, ge=1, le=90, description="분석 �
 
 @router.get("/correlation/check")
 def correlation_check(
-    coin: str = Query(..., description="진입 예정 코인 (예: ETHUSDT)"),
-    direction: str = Query(..., description="LONG 또는 SHORT"),
+    coin: str = Query(..., description="Coin to enter (e.g. ETHUSDT)"),
+    direction: str = Query(..., description="LONG or SHORT"),
     request: Request = None,
 ):
-    """새 코인 진입 시 상관관계 감점 확인."""
+    """Check the correlation penalty when entering a new coin."""
     from app.manager.correlation_guard import correlation_guard
     fm = _get_fm(request)
     positions = [{"market": p.market, "direction": p.direction} for p in fm.positions]
@@ -3711,7 +3711,7 @@ def correlation_check(
 
 @router.get("/correlation/exposure")
 def correlation_exposure(request: Request):
-    """현재 포지션 상관관계 노출도."""
+    """Correlation exposure of current positions."""
     from app.manager.correlation_guard import correlation_guard
     fm = _get_fm(request)
     positions = [{"market": p.market, "direction": p.direction} for p in fm.positions]
@@ -3720,7 +3720,7 @@ def correlation_exposure(request: Request):
 
 @router.get("/correlation/matrix")
 def correlation_matrix():
-    """상관관계 매트릭스 (정적 + 동적)."""
+    """Correlation matrix (static + dynamic)."""
     from app.manager.correlation_guard import correlation_guard
     return {"ok": True, **correlation_guard.get_correlation_matrix()}
 
@@ -3729,27 +3729,27 @@ def correlation_matrix():
 
 @router.get("/drawdown/status")
 def drawdown_status():
-    """드로다운 실드 현재 상태."""
+    """Current drawdown-shield status."""
     from app.manager.drawdown_shield import drawdown_shield
     return {"ok": True, **drawdown_shield.get_status()}
 
 
 @router.get("/drawdown/history")
 def drawdown_history():
-    """일별 드로다운 기록."""
+    """Daily drawdown records."""
     from app.manager.drawdown_shield import drawdown_shield
     return {"ok": True, "history": drawdown_shield.get_history()}
 
 
 @router.post("/drawdown/update")
 def drawdown_update(
-    current_equity: float = Query(..., description="현재 equity (USDT)"),
-    today_pnl: float = Query(0, description="오늘 실현 PnL"),
+    current_equity: float = Query(..., description="Current equity (USDT)"),
+    today_pnl: float = Query(0, description="Today's realized PnL"),
 ):
-    """드로다운 실드 수동 업데이트.
+    """Manually update the drawdown shield.
 
-    [2026-04-18] PnL 기반 → Equity 기반 리팩토링.
-    첫 인자가 current_pnl → current_equity로 변경됨.
+    [2026-04-18] Refactored from PnL-based → Equity-based.
+    The first argument changed from current_pnl → current_equity.
     """
     from app.manager.drawdown_shield import drawdown_shield
     result = drawdown_shield.update(current_equity=current_equity, realized_pnl_today=today_pnl)
@@ -3758,10 +3758,10 @@ def drawdown_update(
 
 @router.post("/drawdown/reset-cumulative")
 def drawdown_reset_cumulative():
-    """누적 워터마크 수동 리셋 — 관리자용.
+    """Manually reset the cumulative watermark — for admins.
 
-    장기 정지/재시작 후 혹은 자본 변동(입금/출금) 시 사용.
-    max_drawdown_pct/amount 까지 초기화되어 깨끗한 재출발.
+    Used after a long pause/restart or on a capital change (deposit/withdrawal).
+    Resets max_drawdown_pct/amount too for a clean restart.
     """
     from app.manager.drawdown_shield import drawdown_shield
     drawdown_shield.reset_cumulative()
@@ -3770,11 +3770,11 @@ def drawdown_reset_cumulative():
 
 @router.post("/drawdown/reset-daily")
 def drawdown_reset_daily():
-    """일간 피크/현재/드로다운 수동 리셋 — Phase G (2026-04-20 형 Claude 진단).
+    """Manually reset daily peak/current/drawdown — Phase G (2026-04-20 this agent's diagnosis).
 
-    reset_daily() 호출 누락 버그로 daily_peak_pnl 이 영원히 고착되어
-    시장 좋아져도 CRISIS 페널티 -3 깔리는 현상 응급 해소용.
-    내일 07:00 KST 부터는 _maybe_reset_daily_counters 안 자동 호출됨.
+    A bug where reset_daily() wasn't called left daily_peak_pnl stuck forever,
+    for emergency relief of the CRISIS penalty -3 lingering even when the market improves.
+    From 07:00 KST tomorrow on, _maybe_reset_daily_counters is called automatically.
     """
     from app.manager.drawdown_shield import drawdown_shield
     drawdown_shield.reset_daily()
@@ -3785,14 +3785,14 @@ def drawdown_reset_daily():
 
 @router.get("/twin/export")
 def twin_export():
-    """형제 대결용 표준 스냅샷 내보내기."""
+    """Export a standard snapshot for the sibling battle."""
     from app.manager.twin_battle import twin_battle
     return {"ok": True, **twin_battle.export_snapshot()}
 
 
 @router.post("/twin/compare")
 def twin_compare(request: Request):
-    """상대 서버 스냅샷과 비교. Body에 상대 export 데이터 전달."""
+    """Compare against the other server's snapshot. Pass the other side's export data in the body."""
     import json as _json
     from app.manager.twin_battle import twin_battle
     try:
@@ -3800,14 +3800,14 @@ def twin_compare(request: Request):
     except Exception:
         body = {}
     if not body:
-        return {"ok": False, "message": "상대 서버 스냅샷 데이터를 Body에 전달해주세요"}
+        return {"ok": False, "message": "Please pass the other server's snapshot data in the body"}
     result = twin_battle.compare(body)
     return {"ok": True, **result}
 
 
 @router.post("/twin/name")
-def twin_set_name(name: str = Query(..., description="서버 이름 (예: server-a, server-b)")):
-    """서버 이름 설정."""
+def twin_set_name(name: str = Query(..., description="Server name (e.g. server-a, server-b)")):
+    """Set the server name."""
     from app.manager.twin_battle import twin_battle
     twin_battle.set_server_name(name)
     return {"ok": True, "server_name": name}
@@ -3815,32 +3815,32 @@ def twin_set_name(name: str = Query(..., description="서버 이름 (예: server
 
 @router.get("/twin/status")
 def twin_status():
-    """Twin Battle 상태."""
+    """Twin Battle status."""
     from app.manager.twin_battle import twin_battle
     return {"ok": True, **twin_battle.get_status()}
 
 
 # ── Phase K Layer 3 — Regime Transition Watch UI ───────────────
-# 자동거래 여부 무관 영구 감지기 (부모 통찰 2026-04-21).
-# paper_mode=True 일 때는 JSONL 기록만, 실진입 X.
-# UI 는 이 기록을 렌즈로 사용해 수동거래 보조.
-# 형 letter #10 α 조건부 배포 (2026-04-21 20:10 KST).
+# A permanent detector regardless of auto-trading (owner insight 2026-04-21).
+# When paper_mode=True, only logs to JSONL, no real entry.
+# The UI uses these records as a lens to assist manual trading.
+# This agent's letter #10 α conditional deployment (2026-04-21 20:10 KST).
 
 # ── Phase L (2026-04-22) — S3 Fee-Aware Gate UI/Promotion ──────
-# 형 letter #11 검수 기준 #6/#8/#10 + 승격 7 조건 자동 판정
-# 부모 ① D paper_mode + ② A FOCUS 이식 + ③ A 1주 paper
+# This agent's letter #11 review criteria #6/#8/#10 + auto-judgment of the 7 promotion conditions
+# Owner: ① D paper_mode + ② A FOCUS port + ③ A 1-week paper
 
 @router.get("/s3-gate/promotion-status")
 def s3_gate_promotion_status(request: Request):
-    """S3 Gate 7일 paper 데이터 기반 enabled=True 승격 자격 자동 판정.
+    """Auto-judge S3 Gate eligibility for promotion to enabled=True based on 7 days of paper data.
 
-    형 letter #11 4절 승격 4 조건 (Track A) AND 검사:
-      1. 7일 paper 최소 10건 skip 발동
-      2. 가상 net_saved ≥ $20
-      3. 실진입 net_vs_fee ≥ 0.5x
-      4. LINK 5경로 중 0건 우회
+    This agent's letter #11 section 4 promotion: 4 conditions (Track A), AND-checked:
+      1. At least 10 skips triggered over 7 days of paper
+      2. Virtual net_saved ≥ $20
+      3. Real-entry net_vs_fee ≥ 0.5x
+      4. 0 bypasses across LINK's 5 paths
 
-    Track B (Harpoon) 추가 3 조건은 30일 후 별도 endpoint.
+    Track B (Harpoon)'s additional 3 conditions are a separate endpoint after 30 days.
     """
     import os, json, time
     fm = _get_fm(request)
@@ -3863,9 +3863,9 @@ def s3_gate_promotion_status(request: Request):
     last_ts = float(summary.get("last_ts") or 0)
     age_days = (last_ts - first_ts) / 86400.0 if first_ts > 0 and last_ts > first_ts else 0.0
 
-    # ★ cond_3 real_net_vs_fee 계산 (형 PASS letter 4-2 즉시 구현)
-    # 최근 7일 FOCUS EXIT 의 sum(pnl_net) / sum(fee). 0.5x 이상 = 통과
-    # 데이터 부족 (거래 5건 미만) 시 None → 보수적 False
+    # ★ Compute cond_3 real_net_vs_fee (immediate implementation of this agent's PASS letter 4-2)
+    # sum(pnl_net) / sum(fee) of FOCUS EXITs over the last 7 days. ≥ 0.5x = pass
+    # Insufficient data (fewer than 5 trades) → None → conservatively False
     real_net_vs_fee = None
     real_net_vs_fee_data = {"trades": 0, "sum_gross": 0.0, "sum_fee": 0.0, "window_days": 7.0}
     try:
@@ -3885,24 +3885,24 @@ def s3_gate_promotion_status(request: Request):
             _g = float(_t.get("pnl_gross", 0) or 0)
             _f = float(_t.get("fee", 0) or 0)
             _sum_gross += _g
-            _sum_fee += abs(_f)  # fee 는 양수로 통일
+            _sum_fee += abs(_f)  # normalize fee to positive
             _n += 1
         real_net_vs_fee_data["trades"] = _n
         real_net_vs_fee_data["sum_gross"] = round(_sum_gross, 2)
         real_net_vs_fee_data["sum_fee"] = round(_sum_fee, 2)
         if _n >= 5 and _sum_fee > 0:
-            # ★ 정의 A 수정 (2026-04-22 21:35, paper 첫 응답 발견 모순):
-            #   형 비교표 v2 의 0.16x = 115.73 / 726.67 = gross/fee (정의 A)
-            #   동생 v2 코드는 (gross-fee)/fee (정의 B) 였음 — 형 자료와 불일치
-            #   즉시 수정: gross / fee 로 통일
+            # ★ Definition A fix (2026-04-22 21:35, contradiction found in the first paper response):
+            #   The 0.16x in this agent's comparison table v2 = 115.73 / 726.67 = gross/fee (definition A)
+            #   The sibling's v2 code was (gross-fee)/fee (definition B) — mismatched with this agent's data
+            #   Immediate fix: unify on gross / fee
             real_net_vs_fee = round(_sum_gross / _sum_fee, 4)
-            # 정의: net_vs_fee = gross / fee.
-            #   0.16x = 형 9일 baseline (수수료 1$ 당 gross 16센트, 적자)
-            #   0.5x  = 임계 (수수료 1$ 당 gross 50센트, 여전히 적자지만 절반 회복)
-            #   1.0x  = 수수료 = gross (손익분기)
-            #   1.5x+ = 수익권 (gross > fee × 1.5, 안정 수익)
+            # Definition: net_vs_fee = gross / fee.
+            #   0.16x = this agent's 9-day baseline (16 cents gross per $1 fee, a loss)
+            #   0.5x  = threshold (50 cents gross per $1 fee, still a loss but half recovered)
+            #   1.0x  = fee = gross (break-even)
+            #   1.5x+ = profitable (gross > fee × 1.5, stable profit)
     except Exception:
-        pass  # journal 접근 실패 시 None 유지 (안전)
+        pass  # keep None if journal access fails (safe)
 
     cond_1_min_skips = totals.get("paper_skips", 0) >= 10
     cond_2_net_saved = virtual_net_saved >= 20.0
@@ -3914,7 +3914,7 @@ def s3_gate_promotion_status(request: Request):
         "cond_2_net_saved":         {"value": cond_2_net_saved, "actual": round(virtual_net_saved, 2), "target": 20.0},
         "cond_3_real_net_vs_fee":   {"value": cond_3_real_net_vs_fee, "actual": real_net_vs_fee, "target": 0.5,
                                      "data": real_net_vs_fee_data,
-                                     "note": "최근 7일 FOCUS EXIT 의 sum_gross / sum_fee (정의 A, 형 비교표 v2 일치). 5건 이상 + fee>0 시 계산"},
+                                     "note": "sum_gross / sum_fee of FOCUS EXITs over the last 7 days (definition A, matches this agent's comparison table v2). Computed when ≥5 trades + fee>0"},
         "cond_4_link_bypass":       {"value": cond_4_link_bypass, "actual": link_bypass_count, "target": 0},
     }
 
@@ -3941,13 +3941,13 @@ def s3_gate_promotion_status(request: Request):
         },
         "promotion_conditions": conditions,
         "ready_for_live": all_passed,
-        "disclaimer": "Track A 4 조건 자동 판정 — Track B (Harpoon) 추가 3 조건은 별도. 형 letter #11 기준.",
+        "disclaimer": "Track A's 4 conditions are auto-judged — Track B (Harpoon)'s additional 3 are separate. Per this agent's letter #11.",
     }
 
 
 @router.get("/day-direction")
 def day_direction_status(request: Request):
-    """[2026-05-21 부모] 오늘의 Day Direction 상태 — 매일 09:00 KST 결정.
+    """[2026-05-21 owner] Today's Day Direction state — decided daily at 09:00 KST.
 
     Returns:
       {"ok": True, "day_direction": "LONG"/"SHORT"/"NEUTRAL",
@@ -3962,7 +3962,7 @@ def day_direction_status(request: Request):
         "conv_delta": float(getattr(fm.config, "day_direction_conv_delta", 5.0)),
         "enabled": bool(getattr(fm.config, "day_direction_enabled", True)),
         "target_hour_kst": float(getattr(fm.config, "day_direction_hour_kst", 9.0)),
-        # [2026-05-23 부모] 9시 H4 일일 등락폭 기준선
+        # [2026-05-23 owner] The 09:00 H4 daily range baseline
         "h4_atr_pct": float(getattr(fm, "day_h4_atr_pct", 0.0)),
         "tp1_expected_pct": float(getattr(fm, "day_tp1_expected_pct", 0.0)),
         "tp2_expected_pct": float(getattr(fm, "day_tp2_expected_pct", 0.0)),
@@ -3971,7 +3971,7 @@ def day_direction_status(request: Request):
 
 @router.get("/h4-pa-snapshot")
 def h4_pa_snapshot_status(request: Request):
-    """[2026-05-21 부모] 최근 H4 PA Snapshot — 매 4시간 (1/5/9/13/17/21 KST) 코인 상태.
+    """[2026-05-21 owner] Recent H4 PA Snapshot — coin state every 4 hours (1/5/9/13/17/21 KST).
 
     Returns:
       {"ok": True, "last_hour_kst": int, "ts": float,
@@ -3997,15 +3997,15 @@ def h4_pa_snapshot_status(request: Request):
 
 @router.get("/phase-k/recent")
 def phase_k_recent(request: Request, hours: float = 6.0):
-    """Phase K 최근 감지 기록 + 현재 시장 상태 (빈 카드 문구용).
+    """Phase K recent detection records + current market state (for the empty-card text).
 
     Returns:
       {
         "ok": True,
         "k_status": { enabled, paper_mode, btc_regime, btc_ema_gap_pct,
                       btc_regime_age_hours, adx_slope_check_enabled },
-        "recent_detections": [...],  // coin별 최신 1건 dedupe
-        "disclaimer": "실험적 신호 · 진입 권고 아님 · 1주 paper 후 정확도 공개",
+        "recent_detections": [...],  // dedupe to the latest one per coin
+        "disclaimer": "Experimental signal · not an entry recommendation · accuracy disclosed after 1 week of paper",
       }
     """
     import os, json, time
@@ -4014,7 +4014,7 @@ def phase_k_recent(request: Request, hours: float = 6.0):
     now_ts = time.time()
     cutoff = now_ts - max(0.1, float(hours)) * 3600.0
 
-    # k_status — 현재 상태 정보 (빈 카드 문구용)
+    # k_status — current state info (for the empty-card text)
     b11_state = getattr(fm, "_b11_regime_state", ("", 0.0))
     b11_regime = b11_state[0] if b11_state and b11_state[0] else ""
     b11_ts = b11_state[1] if b11_state and len(b11_state) > 1 else 0.0
@@ -4028,7 +4028,7 @@ def phase_k_recent(request: Request, hours: float = 6.0):
         "btc_ema_gap_pct": round(btc_gap, 3) if btc_gap is not None else None,
         "btc_regime_age_hours": round(age_hours, 1),
         "ema_gap_threshold_pct": float(getattr(cfg, "regime_transition_ema_gap_threshold_pct", 0.3)),
-        "min_conviction": float(getattr(cfg, "regime_transition_min_conviction", 80.0)),  # [2026-05-17 100점 ×10] 8→80, int→float
+        "min_conviction": float(getattr(cfg, "regime_transition_min_conviction", 80.0)),  # [2026-05-17 100-scale ×10] 8→80, int→float
         "min_regime_age_min": float(getattr(cfg, "regime_transition_last_change_age_min", 180.0)),
         "adx_slope_check_enabled": bool(getattr(cfg, "adx_slope_check_enabled", True)),
     }
@@ -4039,7 +4039,7 @@ def phase_k_recent(request: Request, hours: float = 6.0):
     count_today = {}         # market → count within window
     if os.path.exists(log_path):
         try:
-            # 간단한 tail — 파일이 작다 가정 (24h 롤링 기록이라 MB 미만)
+            # Simple tail — assumes the file is small (a 24h rolling log, under a MB)
             with open(log_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
@@ -4053,15 +4053,15 @@ def phase_k_recent(request: Request, hours: float = 6.0):
                     if ts < cutoff:
                         continue
                     mkt = e.get("market", "?")
-                    # 최신 1건 유지
+                    # Keep the latest one
                     if mkt not in detections_by_coin or ts > detections_by_coin[mkt].get("ts", 0):
                         detections_by_coin[mkt] = e
-                    # 누적 카운트
+                    # Cumulative count
                     count_today[mkt] = count_today.get(mkt, 0) + 1
         except Exception as exc:
             logger.debug("[Phase K] paper log read failed: %s", exc)
 
-    # 정리 — 시간 역순
+    # Sort — reverse chronological
     recent_detections = []
     for mkt, e in detections_by_coin.items():
         recent_detections.append({
@@ -4085,5 +4085,5 @@ def phase_k_recent(request: Request, hours: float = 6.0):
         "window_hours": float(hours),
         "k_status": k_status,
         "recent_detections": recent_detections,
-        "disclaimer": "실험적 신호 · 진입 권고 아님 · 1주 paper 후 정확도 공개",
+        "disclaimer": "Experimental signal · not an entry recommendation · accuracy disclosed after 1 week of paper",
     }

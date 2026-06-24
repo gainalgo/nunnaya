@@ -25,9 +25,9 @@ logger = logging.getLogger(__name__)
 
 
 def _load_plugin_params_override(system: Any) -> Dict[str, Any]:
-    """UI-set 전략별 튜닝 오버라이드 (runtime/strategy_plugin_params.json) — system 속성에 캐시.
-    POST /api/reserved/plugin-params 가 system._plugin_params_override 도 갱신 → 재시작 없이 다음 slot-fill 반영.
-    오버라이드 미설정 시 {} 반환(동작 변화 0)."""
+    """UI-set per-strategy tuning overrides (runtime/strategy_plugin_params.json) — cached on system attr.
+    POST /api/reserved/plugin-params also updates system._plugin_params_override → applied at next slot-fill without restart.
+    Returns {} when no override is set (zero behavior change)."""
     ov = getattr(system, "_plugin_params_override", None)
     if ov is not None:
         return ov if isinstance(ov, dict) else {}
@@ -143,7 +143,7 @@ def build_strategy_controls_payload(mode: str) -> Dict[str, Any]:
                 "z_buy": 1.5,
                 "max_vol_pct": 1.8,
                 "repeat_cooldown_sec": 3.0,
-                # Trend pullback tactic (BULL regime) - 완만한 상승장 진입용이하게 함
+                # Trend pullback tactic (BULL regime) - eases entry in a gentle uptrend
                 "pb_enabled": True,
                 "pb_rsi_min": 38,
                 # pb_rsi_max: 55,
@@ -170,23 +170,23 @@ def build_strategy_controls_payload(mode: str) -> Dict[str, Any]:
         
         elif m == "LADDER":
             payload["strategy"]["params"] = {
-                "step_pct": 1.0,      # 가격이 1% 하락할 때마다 추가 매수
-                "max_steps": 10,      # 최대 10회 분할 매수
-                "tp": 2.0,            # 평단 대비 2% 수익 시 전량 매도
-                "sl": -5.0,           # 손절 % (기본값)
-                "max_down_buys": 3,   # 연속 하락 추종 매수 제한
-                "reversal_pct": 1.5,  # 반등 전환 인식 기준
-                "martingale": 1.0,    # 매수 금액 증액 배수 (1.0=고정, 1.5=1.5배씩 증가)
+                "step_pct": 1.0,      # add-buy each time price drops 1%
+                "max_steps": 10,      # max 10 split buys
+                "tp": 2.0,            # sell all at 2% profit vs avg price
+                "sl": -5.0,           # stop-loss % (default)
+                "max_down_buys": 3,   # limit on consecutive downtrend-following buys
+                "reversal_pct": 1.5,  # rebound-reversal recognition threshold
+                "martingale": 1.0,    # buy-amount multiplier (1.0=fixed, 1.5=increase by 1.5x)
                 "min_order_usdt": 10.0,
-                "ai_influence": 0.0,  # Ladder는 기계적 대응 우선
-                # Trailing Entry (이동식 사다리)
-                "trailing_entry": True,      # 하락 추세 따라가다 반등 시 시작
-                "trailing_entry_pct": 0.5,   # 최저점 대비 0.5% 반등 시 진입
-                "reset_on_exit": True,       # 익절 후 기준가 리셋 (무한 루프)
-                "step_gap_atr_enabled": False, # ATR 기반 간격 자동 설정
+                "ai_influence": 0.0,  # Ladder prioritizes mechanical response
+                # Trailing Entry (moving ladder)
+                "trailing_entry": True,      # follow downtrend, start on rebound
+                "trailing_entry_pct": 0.5,   # enter on 0.5% rebound from the low
+                "reset_on_exit": True,       # reset reference price after take-profit (infinite loop)
+                "step_gap_atr_enabled": False, # ATR-based auto gap sizing
                 "step_gap_atr_period": 14,
-                "step_gap_atr_mult": 1.0,      # ATR * 1.0 만큼을 간격으로 사용
-                # GridV2 auto sync (Active Window 유지)
+                "step_gap_atr_mult": 1.0,      # use ATR * 1.0 as the gap
+                # GridV2 auto sync (keep Active Window)
                 "grid_auto_sync": True,
                 "auto_center": True,
                 "profit_borrow_enabled": False,
@@ -200,42 +200,42 @@ def build_strategy_controls_payload(mode: str) -> Dict[str, Any]:
             payload["strategy"]["params"] = {
                 "burst_window": 5,
                 "burst_threshold": 1.5,
-                "tp": 3.0,              # 익절 %
-                "sl": -2.0,             # 손절 %
+                "tp": 3.0,              # take-profit %
+                "sl": -2.0,             # stop-loss %
                 "atr_period": 14,
                 "atr_burst_mult": 3.0,
                 "ai_influence": 0.5,
-                "base_size_scale": 1.0,  # 기본 100% 진입
+                "base_size_scale": 1.0,  # default 100% entry
                 "min_order_usdt": 10.0,
                 "min_ai_confidence": 0.2,
             }
         
         elif m == "GAZUA":
             payload["strategy"]["params"] = {
-                "tp": 25.0,           # V2: 큰 파동용
-                "sl": -25.0,          # V2: 넓은 SL
-                "sl_price": 0.0,      # 손절 가격 (USDT, 0이면 sl % 사용)
-                "tp_price": 0.0,      # 목표 가격 (USDT, 0이면 tp % 사용)
-                "manual_exit": False, # True=알림만(수동), False=자동청산
-                "sell_fraction": 1.0,       # V2: 전량매도 기본, 부분매도는 gazua_partial 메커니즘으로
+                "tp": 25.0,           # V2: for big waves
+                "sl": -25.0,          # V2: wide SL
+                "sl_price": 0.0,      # stop-loss price (USDT, uses sl % if 0)
+                "tp_price": 0.0,      # target price (USDT, uses tp % if 0)
+                "manual_exit": False, # True=notify only (manual), False=auto exit
+                "sell_fraction": 1.0,       # V2: sell-all by default, partial sells via gazua_partial mechanism
                 "trail_tp_enabled": True,
-                "trail_dist_pct": 3.0,     # V2 기본 콜백
+                "trail_dist_pct": 3.0,     # V2 default callback
                 "hold_sell": False,
                 "user_sell_only": False,
-                # V2: 다단계 부분매도
-                "partial_sell_trigger_pct": 20.0,    # Stage 1: +20% → 30% 매도
-                "partial_sell_fraction": 0.3,        # Stage 1 매도 비율
-                "partial_sell_trigger2_pct": 35.0,   # Stage 2: +35% → 40% 매도
-                "partial_sell_fraction2": 0.4,       # Stage 2 매도 비율
-                # V2: Trailing Stop (TimeVolatility 연동)
-                "gazua_trailing_activate_pct": 10.0, # Trailing 활성화 +10%
-                "gazua_trailing_callback_pct": 3.0,  # 콜백 3% (시간대별 자동 조절)
-                # V2: DCA 분할 매수
-                "gazua_initial_ratio": 0.6,          # 초기 매수 예산의 60%
-                "gazua_dca_trigger_pct": -5.0,       # DCA 1단계: -5% 하락 시 40% 추가 매수
-                "gazua_dca_ratio": 0.4,              # DCA 1단계 비율
-                "gazua_dca2_trigger_pct": -10.0,     # DCA 2단계: -10% 하락 시 20% 추가 매수
-                "gazua_dca2_ratio": 0.2,             # DCA 2단계 비율
+                # V2: multi-stage partial sell
+                "partial_sell_trigger_pct": 20.0,    # Stage 1: +20% → sell 30%
+                "partial_sell_fraction": 0.3,        # Stage 1 sell fraction
+                "partial_sell_trigger2_pct": 35.0,   # Stage 2: +35% → sell 40%
+                "partial_sell_fraction2": 0.4,       # Stage 2 sell fraction
+                # V2: Trailing Stop (TimeVolatility linked)
+                "gazua_trailing_activate_pct": 10.0, # Trailing activation +10%
+                "gazua_trailing_callback_pct": 3.0,  # callback 3% (auto-adjusted by time of day)
+                # V2: DCA split buy
+                "gazua_initial_ratio": 0.6,          # 60% of initial buy budget
+                "gazua_dca_trigger_pct": -5.0,       # DCA stage 1: add-buy 40% on -5% drop
+                "gazua_dca_ratio": 0.4,              # DCA stage 1 ratio
+                "gazua_dca2_trigger_pct": -10.0,     # DCA stage 2: add-buy 20% on -10% drop
+                "gazua_dca2_ratio": 0.2,             # DCA stage 2 ratio
                 # Regime-aware entry profile
                 "profile_mode": "auto",
                 "sideways_ai_score_min": 0.58,
@@ -250,7 +250,7 @@ def build_strategy_controls_payload(mode: str) -> Dict[str, Any]:
                 "trend_ema_cross_required": True,
                 # 2-stage entry
                 "scale_in_enabled": True,
-                "entry_probe_frac": 0.60,   # V2: 초기 60%
+                "entry_probe_frac": 0.60,   # V2: initial 60%
                 "entry_confirm_frac": 0.40,  # V2: DCA 40%
                 "confirm_window_sec": 1200,
                 "confirm_profit_pct": 0.35,
@@ -265,10 +265,10 @@ def build_strategy_controls_payload(mode: str) -> Dict[str, Any]:
 
         elif m == "PINGPONG":
             payload["strategy"]["params"] = {
-                "tp": 3.0,            # 익절 % (기본 3%)
-                "sl": -2.0,           # 손절 %
-                "rsi_buy": 30,        # RSI 매수 기준
-                "rsi_sell": 70,       # RSI 매도 기준
+                "tp": 3.0,            # take-profit % (default 3%)
+                "sl": -2.0,           # stop-loss %
+                "rsi_buy": 30,        # RSI buy threshold
+                "rsi_sell": 70,       # RSI sell threshold
                 "rsi_len": 14,
                 "macd_fast": 12,
                 "macd_slow": 26,
@@ -279,41 +279,41 @@ def build_strategy_controls_payload(mode: str) -> Dict[str, Any]:
 
         elif m == "CONTRARIAN":
             payload["strategy"]["params"] = {
-                "tp": 15.0,           # 역행 목표 익절 % (Global Profit Take로 조기 회수 가능)
-                "sl": -50.0,          # 역행 기본 손절 % (깊은 보호선)
-                "trail_tp_enabled": False,  # TP 도달 즉시 청산 기본
-                "trail_dist_pct": 0.3,      # Trail 사용 시 촘촘한 간격
-                "use_atr": False,           # TP/SL 일관성 우선
+                "tp": 15.0,           # contrarian target take-profit % (early recovery possible via Global Profit Take)
+                "sl": -50.0,          # contrarian default stop-loss % (deep protection line)
+                "trail_tp_enabled": False,  # default: exit immediately on TP hit
+                "trail_dist_pct": 0.3,      # tight gap when Trail is used
+                "use_atr": False,           # prioritize TP/SL consistency
                 "atr_period": 14,
                 "rsi_filter": False,
                 "rsi_max": 70,
                 "min_score": 1,
-                "cooldown_sec": 300,        # 재진입 쿨다운 (5분)
+                "cooldown_sec": 300,        # reentry cooldown (5 min)
                 "min_order_usdt": 10.0,
             }
 
         elif m == "SNIPER":
             payload["strategy"]["params"] = {
-                # Entry (저격 매수)
+                # Entry (sniper buy)
                 "entry_enabled": True,
-                "entry_lookback_min": 360,    # 6시간 최저가 기준
-                "entry_threshold_pct": 0.5,   # 최저가 + 0.5% 이내
-                # Exit (저격 매도)
+                "entry_lookback_min": 360,    # based on 6-hour low
+                "entry_threshold_pct": 0.5,   # within low + 0.5%
+                # Exit (sniper sell)
                 "exit_enabled": True,
-                "exit_lookback_min": 360,     # 6시간 최고가 기준
-                "exit_threshold_pct": 0.5,    # 최고가 - 0.5% 이내
+                "exit_lookback_min": 360,     # based on 6-hour high
+                "exit_threshold_pct": 0.5,    # within high - 0.5%
                 # TP/SL
                 "tp_pct": 3.0,
                 "sl_pct": 2.0,
                 # Trail
                 "trail_tp": True,
                 "trail_dist_pct": 1.2,
-                # 필터
+                # filters
                 "ai_gate_enabled": True,
                 "ai_min_score": 0.45,
                 "rsi_entry_enabled": True,
                 "rsi_exit_enabled": True,
-                # 주문
+                # order
                 "use_limit": True,
                 "fallback_to_market": True,
                 "expiry_min": 180,
@@ -321,8 +321,8 @@ def build_strategy_controls_payload(mode: str) -> Dict[str, Any]:
             }
 
         elif m == "WHALE":
-            # [2026-05-30] WHALE elif 누락 fix — Linear 마이그 7 plugin 일괄 작업의 일환.
-            # plugin_whale.py 본문의 params.get(..., default) 와 동일값 명시 (dashboard 표시/조정 가능).
+            # [2026-05-30] fix for missing WHALE elif — part of the Linear migration 7-plugin batch work.
+            # Mirrors the params.get(..., default) values in plugin_whale.py (visible/adjustable in dashboard).
             payload["strategy"]["params"] = {
                 # Entry — Ichimoku + StochRSI + Volume spike (LONG only)
                 "rsi_period": 14,
@@ -342,9 +342,9 @@ def build_strategy_controls_payload(mode: str) -> Dict[str, Any]:
                 # TP/SL
                 "tp_pct": 2.0,
                 "sl_pct": 3.0,
-                # 캔들 단위 (3분봉)
+                # candle unit (3-minute)
                 "candle_unit": 3,
-                # 주문
+                # order
                 "min_order_usdt": 10.0,
                 "ai_influence": 0.3,
             }
@@ -376,19 +376,19 @@ def apply_engine_controls(
         logger.warning("[MarketControls] contrarian_force_longhold env parse failed", exc_info=True)
         contrarian_force_longhold = False
 
-    # [2026-02-11] Legacy fallback: 필요 시 CONTRARIAN 강한 LongHold 보호를 강제 적용.
+    # [2026-02-11] Legacy fallback: force strong CONTRARIAN LongHold protection when needed.
     if mode_upper == "CONTRARIAN" and contrarian_force_longhold:
         strat_params = controls.get("strategy", {}).get("params", {})
-        strat_params["tp"] = 15.0           # TP 15% 고정
-        strat_params["sl"] = -50.0          # SL -50% 고정 (장기 보유용)
-        strat_params["hold_sell"] = True    # Hold 모드
-        strat_params["user_sell_only"] = True  # 사용자만 매도 가능
+        strat_params["tp"] = 15.0           # TP fixed at 15%
+        strat_params["sl"] = -50.0          # SL fixed at -50% (for long-term holding)
+        strat_params["hold_sell"] = True    # Hold mode
+        strat_params["user_sell_only"] = True  # only the user can sell
         strat_params["trail_tp_enabled"] = True
         strat_params["trail_dist_pct"] = 4.0  # Trail 4%
         controls["strategy"]["params"] = strat_params
-    
-    # [2026-06-01] UI-set 전략별 튜닝 오버라이드 (PINGPONG/AUTOLOOP/WHALE 등) — recommended_params 직전 merge.
-    #   slot-fill 자동 적용. 오버라이드 없으면 no-op (additive·guarded). recommended_params(per-coin)는 이 위에 덮음.
+
+    # [2026-06-01] UI-set per-strategy tuning overrides (PINGPONG/AUTOLOOP/WHALE etc.) — merged just before recommended_params.
+    #   Auto-applied at slot-fill. No-op when no override (additive, guarded). recommended_params (per-coin) overrides on top.
     try:
         _ov = _load_plugin_params_override(system).get(mode_upper)
         if isinstance(_ov, dict) and _ov:
@@ -398,17 +398,17 @@ def apply_engine_controls(
     except Exception:
         logger.warning("[MarketControls] plugin_params_override merge failed", exc_info=True)
 
-    # 추천 파라미터가 있으면 기본값 덮어쓰기 (단, CONTRARIAN의 TP/SL은 제외)
+    # If recommended params exist, override defaults (except CONTRARIAN's TP/SL)
     if recommended_params and isinstance(recommended_params, dict):
         strat_params = controls.get("strategy", {}).get("params", {})
         if strat_params:
-            # tp_pct → tp, sl_pct → sl 매핑
-            # [2026-02-11] CONTRARIAN LongHold 강제 모드에서는 TP/SL 고정값 유지.
+            # tp_pct → tp, sl_pct → sl mapping
+            # [2026-02-11] In CONTRARIAN LongHold force mode, keep fixed TP/SL values.
             if "tp_pct" in recommended_params and not (mode_upper == "CONTRARIAN" and contrarian_force_longhold):
                 strat_params["tp"] = float(recommended_params["tp_pct"])
             if "sl_pct" in recommended_params and not (mode_upper == "CONTRARIAN" and contrarian_force_longhold):
                 strat_params["sl"] = float(recommended_params["sl_pct"])
-            # LADDER 전용 파라미터
+            # LADDER-only params
             if "step_pct" in recommended_params:
                 strat_params["step_pct"] = float(recommended_params["step_pct"])
             if "steps" in recommended_params:
@@ -441,7 +441,7 @@ def apply_engine_controls(
                 strat_params["spacing_mode"] = str(recommended_params["spacing_mode"]).upper()
             if "spacing_value" in recommended_params:
                 strat_params["spacing_value"] = float(recommended_params["spacing_value"])
-            # AUTOLOOP 전용
+            # AUTOLOOP-only
             if "rsi_buy" in recommended_params:
                 strat_params["rsi_buy"] = int(recommended_params["rsi_buy"])
             if "rsi_sell" in recommended_params:
@@ -493,7 +493,7 @@ def apply_engine_controls(
                 strat_params["confirm_momentum_min"] = float(recommended_params["confirm_momentum_min"])
             if "add_buy_cooldown_sec" in recommended_params:
                 strat_params["add_buy_cooldown_sec"] = float(recommended_params["add_buy_cooldown_sec"])
-            # SNIPER 전용 파라미터 매핑
+            # SNIPER-only param mapping
             if "entry_enabled" in recommended_params:
                 strat_params["entry_enabled"] = bool(recommended_params["entry_enabled"])
             if "entry_lookback_min" in recommended_params:
@@ -537,8 +537,8 @@ def apply_engine_controls(
     except (KeyError, AttributeError, TypeError) as exc:
         logger.warning("[MARKET_CTRL] Keep new market setup aligned with current mild relaxed entry baseline: %s", exc, exc_info=True)
 
-    # CONTRARIAN 운영 기본값 정규화
-    # - longhold 강제가 꺼져있을 때는 최소 1.2% 회수 중심으로 통일한다.
+    # Normalize CONTRARIAN operating defaults
+    # - When longhold force is off, unify around a minimum 1.2% recovery focus.
     if mode_upper == "CONTRARIAN" and not contrarian_force_longhold:
         try:
             sblock = controls.get("strategy") if isinstance(controls, dict) else None
@@ -561,7 +561,7 @@ def apply_engine_controls(
                 sl_cur = float(sp.get("sl", default_sl))
                 sp["sl"] = -abs(sl_cur) if sl_cur != 0 else float(default_sl)
 
-                # CONTRARIAN은 자동회수 전략으로 기본 설정.
+                # CONTRARIAN defaults to an auto-recovery strategy.
                 sp["hold_sell"] = False
                 sp["user_sell_only"] = False
 
@@ -577,10 +577,10 @@ def apply_engine_controls(
                 sblock["params"] = sp
                 controls["strategy"] = sblock
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[MARKET_CTRL] CONTRARIAN은 자동회수 전략으로 기본 설정: %s", exc, exc_info=True)
+            logger.warning("[MARKET_CTRL] CONTRARIAN auto-recovery default setup: %s", exc, exc_info=True)
 
-        # CONTRARIAN 진입 타이밍 우선 모드:
-        # - 필요 시 orderbook guard를 market-level로 우회 가능하게 한다.
+        # CONTRARIAN entry-timing-priority mode:
+        # - Allows bypassing the orderbook guard at market level when needed.
         try:
             bypass_ob_guard = bool(env_bool("OMA_CONTRARIAN_BYPASS_OB_GUARD", default=True))
         except (AttributeError, TypeError):
@@ -590,7 +590,7 @@ def apply_engine_controls(
             if isinstance(recommended_params, dict) and ("entry_ob_guard_enabled" in recommended_params):
                 bypass_ob_guard = not bool(recommended_params.get("entry_ob_guard_enabled"))
         except (KeyError, AttributeError, TypeError) as exc:
-            logger.warning("[MARKET_CTRL] orderbook guard 우회 판단: %s", exc, exc_info=True)
+            logger.warning("[MARKET_CTRL] orderbook guard bypass decision: %s", exc, exc_info=True)
 
         if bypass_ob_guard:
             try:
@@ -600,15 +600,15 @@ def apply_engine_controls(
                 g["entry_ob_guard_enabled"] = False
                 controls["guards"] = g
             except (KeyError, AttributeError, TypeError) as exc:
-                logger.warning("[MARKET_CTRL] orderbook guard 우회 적용: %s", exc, exc_info=True)
+                logger.warning("[MARKET_CTRL] orderbook guard bypass apply: %s", exc, exc_info=True)
 
     # Ensure context exists
     try:
         ctx = system.coordinator.ensure_market(market)
     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError):
         logger.warning("ensure_market failed for %s, falling back to get_context", market, exc_info=True)
-        # ensure_market이 실패하면 get_context 시도 (이미 존재할 수 있음)
-        # 그래도 없으면 controls 적용 불가하므로 종료
+        # If ensure_market fails, try get_context (may already exist)
+        # If still missing, controls cannot be applied, so bail out
         ctx = system.coordinator.get_context(market)
 
     try:
@@ -763,10 +763,10 @@ def apply_engine_controls(
                         cfg["lower_bound"] = round(lower, 2)
                         cfg["upper_bound"] = round(upper, 2)
 
-            # save_config() 내부에서 유령 그리드 필터링 처리
+            # ghost-grid filtering is handled inside save_config()
             mgr.save_config(cfg)
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[MARKET_CTRL] save_config() 유령 그리드 필터링: %s", exc, exc_info=True)
+            logger.warning("[MARKET_CTRL] save_config() ghost-grid filtering: %s", exc, exc_info=True)
 
     # Ledger (best-effort)
     try:

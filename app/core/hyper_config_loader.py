@@ -2,8 +2,8 @@
 # File: app/core/hyper_config_loader.py
 # ------------------------------------------------------------
 # HyperConfigLoader
-# - app/data 내부의 JSON 파일들을 읽어 ConfigStore에 공급한다.
-# - 전략 정책, 프리셋, 엔진 설정 등 다양한 JSON을 로딩하는 공통 유틸리티.
+# - Reads JSON files under app/data and feeds them into the ConfigStore.
+# - Shared utility for loading various JSON files: strategy policies, presets, engine settings, etc.
 # ============================================================
 
 from __future__ import annotations
@@ -17,19 +17,19 @@ logger = logging.getLogger(__name__)
 
 class HyperConfigLoader:
     """
-    JSON 기반 설정 로더.
-    app/data 아래 JSON을 로딩하여 dict 형태로 반환한다.
+    JSON-based config loader.
+    Loads JSON files under app/data and returns them as dicts.
     """
 
     def __init__(self, base_path: str):
         self.base_path = base_path
 
     # --------------------------------------------------------
-    # JSON 파일 로딩
+    # Load a JSON file
     # --------------------------------------------------------
     def load(self, filename: str) -> Dict[str, Any]:
         """
-        filename: "strategy.json", "autoloop_config.json" 등
+        filename: e.g. "strategy.json", "autoloop_config.json"
         """
 
         full_path = os.path.join(self.base_path, filename)
@@ -45,7 +45,7 @@ class HyperConfigLoader:
             raise ValueError(f"JSON parsing error in {filename}: {e}")
 
     # --------------------------------------------------------
-    # 여러 파일 로딩 (옵션)
+    # Load multiple files (optional)
     # --------------------------------------------------------
     def load_multiple(self, files: list[str]) -> Dict[str, Any]:
         data = {}

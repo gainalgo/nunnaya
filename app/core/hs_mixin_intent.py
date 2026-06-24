@@ -1,11 +1,11 @@
 """Phase 5H – Intent handling mixin extracted from hyper_system.py.
 
 ── ASYNC SAFETY RULES ──
-이 파일의 함수는 async context(이벤트 루프)에서 호출됨.
-- requests.get/post 직접 호출 금지 → asyncio.to_thread() 필수
-- File I/O / CPU 바운드 → run_in_executor() 필수
-- time.sleep() 금지 → asyncio.sleep() 사용
-- 데이터 조회는 price_store/orderbook_store/캐시에서만 (메모리 읽기)
+Functions in this file are called within an async context (event loop).
+- Do NOT call requests.get/post directly → asyncio.to_thread() required
+- File I/O / CPU-bound → run_in_executor() required
+- No time.sleep() → use asyncio.sleep()
+- Data lookups only from price_store/orderbook_store/cache (memory reads)
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ class IntentMixin:
 
     async def _handle_intent(self, market: str, price: float, intent: Dict[str, Any], ctx: HyperEngineContext):
         # ----------------------------------------------------
-        # RESERVE (LADDER 지정가 예약)
+        # RESERVE (LADDER limit-order reservation)
         # ----------------------------------------------------
         if intent.get("type") == "reserve":
             side = str(intent.get("side", "buy")).lower()
@@ -101,7 +101,7 @@ class IntentMixin:
         if not intent:
             return
 
-        # compat normalize (engine/recovery 일부 구현이 action/usdt/qty 스키마를 사용)
+        # compat normalize (some engine/recovery implementations use the action/usdt/qty schema)
         if isinstance(intent, dict):
             act = str(intent.get("action") or "").lower().strip()
             if act == "buy" and "buy_usdt" not in intent and intent.get("usdt") is not None:
@@ -115,13 +115,13 @@ class IntentMixin:
         meta = intent.get("meta") or {}
         expected_price = float(price) if (price is not None and float(price) > 0) else None
 
-        # SL → LongHold 전환: 매도 대신 GAZUA LongHold로 전환
-        # [FIX 2026-03-23] confidence gate 없이 ACTIVE 재진입하는 쪽문이었음
-        # 손절 맞은 코인이 무조건 GAZUA LongHold로 전환 → LongHold 무한 팽창 원인
-        # 수정: SL→LongHold 전환 비활성화, 정상 손절 처리하도록 변경
-        # 전환이 필요하면 수동으로 LongHold Deploy API 사용
+        # SL → LongHold conversion: switch to GAZUA LongHold instead of selling
+        # [FIX 2026-03-23] This was a side door that re-entered ACTIVE without a confidence gate
+        # Any stopped-out coin was unconditionally converted to GAZUA LongHold → caused unbounded LongHold growth
+        # Fix: disable SL→LongHold conversion, process normal stop-loss instead
+        # If conversion is needed, use the LongHold Deploy API manually
         if act == "convert_to_longhold":
-            # [2026-03-30] 쓰로틀: 같은 마켓 5분에 1번만 로그 (매 틱 반복 방지)
+            # [2026-03-30] throttle: log at most once per 5 min per market (avoid per-tick repeats)
             import time as _time_mod
             _lh_blk_ts = getattr(self, "_sl_longhold_block_ts", {})
             _now_lh = _time_mod.time()
@@ -145,7 +145,7 @@ class IntentMixin:
             return
 
         if False and act == "_convert_to_longhold_DISABLED":
-            # 이전 코드 보존 (참조용, 실행 안 됨)
+            # legacy code preserved (for reference only, not executed)
             try:
                 ladder_mgr = getattr(self, "ladder_manager", None)
                 if ladder_mgr:
@@ -207,12 +207,12 @@ class IntentMixin:
                 logger.warning("[SL→LongHold] failed for %s", market, exc_info=True)
             return
 
-        # [FIX 2026-02-19] force_exit/exit_kind0 사전 정의 (아래 force-exit 블록에서 사용)
+        # [FIX 2026-02-19] pre-define force_exit/exit_kind0 (used in the force-exit block below)
         force_exit = bool(intent.get("force_exit") or intent.get("force") or intent.get("force_sell"))
         exit_kind0 = str((intent.get("meta") or {}).get("exit_kind") or "").lower()
         # ----------------------------------------------------
         # Force-exit: cancel any existing pending order for this market
-        # - 목적: TP limit-exit 등으로 pending 상태일 때도, 강제 청산(손절/pp_exit)이 즉시 실행되도록 한다.
+        # - purpose: ensure a forced exit (stop-loss/pp_exit) runs immediately even when pending (e.g. TP limit-exit).
         # ----------------------------------------------------
         try:
             if act == "sell" and force_exit and self.order_fsm:
@@ -286,8 +286,8 @@ class IntentMixin:
         # BUY
         # ----------------------------------------------------
         if "buy_usdt" in intent and intent["buy_usdt"] is not None:
-            # [FIX 2026-03-23] 최소 가격 가드: 추천 시점에는 통과했지만
-            # 매수 시점에 candidate_price_min 미만으로 떨어진 코인은 매수 차단 + 슬롯 퇴출
+            # [FIX 2026-03-23] minimum price guard: a coin that passed at recommendation time but
+            # dropped below candidate_price_min by buy time is blocked from buying + evicted from its slot
             _price_min_guard = float(getattr(self, "reserved_candidate_price_min_usdt", 0.0) or 0.0)
             if _price_min_guard > 0 and price > 0 and price < _price_min_guard:
                 ctx.entry_state = "BLOCKED"
@@ -296,7 +296,7 @@ class IntentMixin:
                     reason=f"price={price:.1f} < min={_price_min_guard:.0f} → slot evict",
                     cooldown_sec=60.0,
                 )
-                # 슬롯 퇴출: DISABLED + context 정리
+                # slot eviction: DISABLED + context cleanup
                 try:
                     self.oma_set_market(market, MarketState.DISABLED, reason=["price_below_min_evict"])
                     self.coordinator.remove_market(market)
@@ -306,7 +306,7 @@ class IntentMixin:
                     logger.debug("[PriceMinGuard] evict cleanup error: %s", market, exc_info=True)
                 return
 
-            # [FIX 2026-03-24] 저유동성 코인 매수 차단: 호가 1틱 슬리피지 >= 1%
+            # [FIX 2026-03-24] block buying low-liquidity coins: one-tick quote slippage >= 1%
             if price > 0:
                 try:
                     from app.integrations.bybit_trade import get_tick_size
@@ -323,9 +323,9 @@ class IntentMixin:
                 except (AttributeError, TypeError, ValueError) as exc:
                     logger.warning("[INTENT] tick_slippage_guard: %s", exc, exc_info=True)
 
-            # [FIX 2026-03-24] 지표 데이터 부족 시 매수 차단
-            # 재시작 직후 price_history가 비어있으면 전략 지표가 전부 0/default
-            # force_ready()로 ready=True지만 실제 데이터 없이 매수하면 안 됨
+            # [FIX 2026-03-24] block buying when indicator data is insufficient
+            # Right after restart, if price_history is empty all strategy indicators are 0/default
+            # force_ready() makes ready=True, but we must not buy without real data
             _min_data_ticks = int(getattr(self.coordinator, "min_ticks", 200) or 200)
             _cur_ticks = len(getattr(ctx, "price_history", []))
             if _cur_ticks < _min_data_ticks:
@@ -339,8 +339,8 @@ class IntentMixin:
 
             usdt_amount = float(intent["buy_usdt"] or 0.0)
 
-            # [2026-03-30] BTC Leading Signal: 바이낸스 선행 데이터로 진입 게이팅
-            # 메모리 캐시 읽기만 — HTTP 호출 없음
+            # [2026-03-30] BTC Leading Signal: gate entries using Binance leading data
+            # memory cache reads only — no HTTP calls
             try:
                 from app.monitor.btc_leading_signal import get_btc_leading_detector
                 _btc_det = get_btc_leading_detector()
@@ -361,8 +361,8 @@ class IntentMixin:
             except (KeyError, IndexError, AttributeError, TypeError, ValueError) as exc:
                 logger.warning("[INTENT] btc_leading_signal: %s", exc, exc_info=True)
 
-            # [2026-03-30] 시간대별 규모 조절: 새벽 유동성 낮을 때 축소
-            # time.localtime() 기반 순수 계산 — HTTP 없음
+            # [2026-03-30] time-of-day size adjustment: shrink during low-liquidity early-morning hours
+            # pure computation based on time.localtime() — no HTTP
             try:
                 from app.monitor.time_volatility_adjuster import get_time_volatility_multiplier
                 _time_vol = get_time_volatility_multiplier()
@@ -384,9 +384,9 @@ class IntentMixin:
                     except (AttributeError, TypeError, ValueError) as exc:
                         logger.warning("[INTENT] wallet_mode_ledger: %s", exc)
 
-            # [②] 동적 매수 규모: 포트폴리오 PnL 기반 선형 감소 (-2%~-5% 구간)
-            # ①②는 상호 배타 — __init__ 및 _ui_apply_guard_settings에서 동시 ON 차단
-            # (둘 다 ON이면 0.4 × 0.8 = 0.32x까지 감소, 의도치 않은 주문 축소 발생 가능)
+            # [②] dynamic buy size: linear reduction based on portfolio PnL (in the -2% to -5% band)
+            # ① and ② are mutually exclusive — both being ON is blocked in __init__ and _ui_apply_guard_settings
+            # (if both ON, reduction stacks to 0.4 × 0.8 = 0.32x, risking unintended order shrinkage)
             if self.dynamic_size_mult_enabled and usdt_amount > 0:
                 try:
                     _size_mult = self.portfolio_risk_manager.get_size_multiplier()
@@ -395,13 +395,13 @@ class IntentMixin:
                 except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
                     logger.warning("[INTENT] dynamic_size_mult: %s", exc, exc_info=True)
 
-            # [①] 레짐별 전략 예산 스위칭: BULL/BEAR/SIDEWAYS/VOLATILE별 budget_multiplier 적용
+            # [①] regime-based strategy budget switching: apply budget_multiplier per BULL/BEAR/SIDEWAYS/VOLATILE
             if self.regime_per_strategy_enabled and getattr(self, "regime_enabled", False) and usdt_amount > 0:
                 try:
                     if self._regime_strategy_manager is None:
                         from app.manager.regime_strategy import RegimeStrategyManager
                         self._regime_strategy_manager = RegimeStrategyManager()
-                    _rm = self._regime_strategy_manager.get_strategy_mapping()  # 30초 캐시
+                    _rm = self._regime_strategy_manager.get_strategy_mapping()  # 30s cache
                     _ctrls_r = getattr(ctx, "controls", {}) or {}
                     _strat_r = (_ctrls_r.get("strategy", {}) or {}) if isinstance(_ctrls_r, dict) else {}
                     _strat_name = str(_strat_r.get("mode") or _strat_r.get("name") or getattr(ctx, "strategy", "") or "").upper()
@@ -425,9 +425,9 @@ class IntentMixin:
             except Exception:
                 pass
 
-            # [2026-02-06] BTC Guard Mode - 매입 차단 (CONTRARIAN 제외)
+            # [2026-02-06] BTC Guard Mode - block buying (except CONTRARIAN)
             if self.btc_guard_mode:
-                # [FIX 2026-03-05] ctx.strategy 속성은 신뢰 불가 → controls 딕셔너리에서 읽기
+                # [FIX 2026-03-05] ctx.strategy attribute is unreliable → read from the controls dict
                 _ctrls = getattr(ctx, "controls", {}) or {}
                 _strat_ctrl = _ctrls.get("strategy", {}) if isinstance(_ctrls, dict) else {}
                 strategy = str(
@@ -443,7 +443,7 @@ class IntentMixin:
                         reason=reason,
                         btc_guard_mode=True,
                     )
-                    return  # 매입 차단 (CONTRARIAN 제외)
+                    return  # block buying (except CONTRARIAN)
 
             if self.emergency_stop:
                 try:
@@ -483,8 +483,8 @@ class IntentMixin:
             # ----------------------------------------------------
             # RECOVERY / Dashboard per-market entry kill-switch / Global cooldown
             # ----------------------------------------------------
-            # RECOVERY는 "진입 금지 + 회수(SELL) 허용" 상태다.
-            # - engine/strategy가 실수로 BUY intent를 내더라도 System에서 최종 차단한다.
+            # RECOVERY is the "no entry + allow withdrawal (SELL)" state.
+            # - even if engine/strategy mistakenly emits a BUY intent, the System blocks it as a final gate.
             market_state = str(getattr(ctx, "market_state", "") or "").upper()
             
             if market_state == "RECOVERY" or bool(getattr(ctx, "recovery", False)):
@@ -541,7 +541,7 @@ class IntentMixin:
                 )
                 return
 
-            # 전역 쿨다운(예: drawdown guard) 동안 BUY 차단
+            # block BUY during a global cooldown (e.g. drawdown guard)
             g_until = float(getattr(self, "_global_entry_block_until_ts", 0.0) or 0.0)
             if g_until and time.time() < g_until:
                 try:
@@ -566,16 +566,16 @@ class IntentMixin:
                 return
             
             # ----------------------------------------------------
-            # [TRIAGE MODE] BUY 차단 — PRM 체크보다 앞에 배치
-            # PRM is_paused(-5%) 동시 발생해도 포커스 마켓 DCA는 통과해야 함.
-            # 전략 면제: CONTRARIAN(역발상 — 하락장이 진입 타이밍),
-            #            SNIPER/WHALE(시간민감 외부신호 — 포트와 무관한 독립 기회)
+            # [TRIAGE MODE] block BUY — placed ahead of the PRM check
+            # Even if PRM is_paused(-5%) fires at the same time, focus-market DCA must pass.
+            # Strategy exemptions: CONTRARIAN (contrarian — a down market is the entry timing),
+            #            SNIPER/WHALE (time-sensitive external signals — independent opportunities unrelated to the portfolio)
             # ----------------------------------------------------
             _triage_focus_bypass = False
             _tm_ref = getattr(self, "triage_manager", None)
             if getattr(self, "_triage_entry_blocked", False) and _tm_ref is not None:
-                # 전략 면제 체크
-                # [FIX 2026-03-23] ctx.strategy 신뢰 불가 → BTC Guard와 동일하게 controls 딕셔너리 우선
+                # strategy-exemption check
+                # [FIX 2026-03-23] ctx.strategy is unreliable → prefer the controls dict, same as BTC Guard
                 _ctrls_t = getattr(ctx, "controls", {}) or {}
                 _strat_t = _ctrls_t.get("strategy", {}) if isinstance(_ctrls_t, dict) else {}
                 _ctx_strategy = str(
@@ -590,23 +590,23 @@ class IntentMixin:
                 )
                 _is_strategy_exempt = _ctx_strategy in _triage_exempt_strategies
 
-                # 포커스 마켓 체크 (active_targets 전체 — 병렬 복구 지원)
+                # focus-market check (all active_targets — supports parallel recovery)
                 _active_markets = set()
                 for _at in getattr(_tm_ref, "active_targets", []):
                     if isinstance(_at, dict) and _at.get("market"):
                         _active_markets.add(_at["market"])
                 _is_focus = (market in _active_markets)
-                _focus_market = next(iter(_active_markets), None)  # 로그/에러메시지용
+                _focus_market = next(iter(_active_markets), None)  # for log/error messages
                 _focus_dca_allow = _tm_ref.settings.get("focus_dca_allow", True)
 
                 if _is_strategy_exempt:
-                    # 면제 전략: 트리아지 차단 없이 통과 (PRM 체크는 정상 진행)
-                    # 단, DCA 예약 자본이 있으면 가용 현금 부족 시 차단
+                    # exempt strategy: pass without triage block (PRM check proceeds normally)
+                    # but if DCA-reserved capital exists, block when available cash is insufficient
                     _reserved = float(getattr(self, "_triage_reserved_usdt", 0.0) or 0.0)
                     if _reserved > 0:
                         _cash = float(getattr(self, "_last_cash_usdt", 0.0) or 0.0)
-                        # [FIX 2026-03-23] intent["buy_usdt"]는 이미 usdt_amount에 추출됨
-                        # intent.get("usdt_amount") 키는 표준 BUY 키가 아니라 항상 0이었음
+                        # [FIX 2026-03-23] intent["buy_usdt"] was already extracted into usdt_amount
+                        # the intent.get("usdt_amount") key is not a standard BUY key, so it was always 0
                         _buy_usdt = usdt_amount
                         if _buy_usdt > 0 and (_cash - _buy_usdt) < _reserved:
                             ctx.entry_state = "BLOCKED"
@@ -616,13 +616,13 @@ class IntentMixin:
                             )
                             return
                 elif _is_focus and _focus_dca_allow:
-                    # 포커스 마켓 DCA: PRM 차단도 건너뜀
+                    # focus-market DCA: also skip the PRM block
                     _triage_focus_bypass = True
                 else:
-                    # 비포커스 마켓: buy_mode에 따라 처리
+                    # non-focus market: handle according to buy_mode
                     _buy_mode = _tm_ref.settings.get("buy_mode", "block_all")
-                    # [FIX 2026-03-23] initial_snapshot 기준 → 현재 손실 코인으로 갱신
-                    # 트리아지 진행 중 새로 손실 발생한 코인이 스냅샷에 없어 allow_non_loss 우회 가능했음
+                    # [FIX 2026-03-23] based on initial_snapshot → updated to current loss coins
+                    # a coin that newly turned to a loss during triage was absent from the snapshot, allowing allow_non_loss to be bypassed
                     try:
                         _cur_loss_list = _tm_ref._gather_loss_coins(self)
                         _loss_coins = {c["market"] for c in _cur_loss_list} if _cur_loss_list else set(_tm_ref.initial_snapshot.get("loss_coins", []))
@@ -632,11 +632,11 @@ class IntentMixin:
                     _is_loss_coin = market in _loss_coins
                     _reserved = float(getattr(self, "_triage_reserved_usdt", 0.0) or 0.0)
                     _cash = float(getattr(self, "_last_cash_usdt", 0.0) or 0.0)
-                    # [FIX 2026-03-23] intent["buy_usdt"]는 이미 usdt_amount에 추출됨
+                    # [FIX 2026-03-23] intent["buy_usdt"] was already extracted into usdt_amount
                     _buy_usdt = usdt_amount
 
                     if _buy_mode == "allow_non_loss" and not _is_loss_coin:
-                        # Mode 2: 비손실 코인 — 현금 버퍼 확보 후 허용 (PRM 체크는 정상 진행)
+                        # Mode 2: non-loss coin — allowed after securing a cash buffer (PRM check proceeds normally)
                         if _buy_usdt > 0 and (_cash - _buy_usdt) < _reserved:
                             try:
                                 ctx.entry_block_reason = "triage_capital_reserve"
@@ -648,9 +648,9 @@ class IntentMixin:
                                 reason=f"non_loss_buy: cash={_cash:.0f}-buy={_buy_usdt:.0f} < reserved={_reserved:.0f}",
                             )
                             return
-                        # 통과 — PRM 체크 계속
+                        # pass — continue PRM check
                     elif _is_loss_coin and _tm_ref.settings.get("opportunistic_dca", False):
-                        # Mode 3: 손실 코인 조건부 즉시 DCA — 전략이 이미 좋은 조건으로 판단
+                        # Mode 3: conditional immediate DCA on a loss coin — strategy already judged conditions favorable
                         if _buy_usdt > 0 and (_cash - _buy_usdt) < _reserved:
                             try:
                                 ctx.entry_block_reason = "triage_capital_reserve"
@@ -662,10 +662,10 @@ class IntentMixin:
                                 reason=f"opportunistic_dca: cash={_cash:.0f}-buy={_buy_usdt:.0f} < reserved={_reserved:.0f}",
                             )
                             return
-                        # PRM 우회 허용 (포커스 DCA와 동일)
+                        # allow PRM bypass (same as focus DCA)
                         _triage_focus_bypass = True
                     else:
-                        # Mode 1 (block_all) 또는 allow_non_loss에서 손실 코인: BUY 차단
+                        # Mode 1 (block_all), or a loss coin under allow_non_loss: block BUY
                         try:
                             ctx.entry_block_reason = "triage_mode"
                         except (AttributeError, TypeError, ValueError) as exc:
@@ -680,8 +680,8 @@ class IntentMixin:
                         return
 
             # ----------------------------------------------------
-            # Portfolio Risk Manager Check (일일 손실 한도 / Circuit Breaker)
-            # triage 포커스 마켓은 PRM 블록을 건너뜀 (복구 DCA 허용)
+            # Portfolio Risk Manager Check (daily loss limit / Circuit Breaker)
+            # triage focus markets skip the PRM block (allow recovery DCA)
             # ----------------------------------------------------
             if not _triage_focus_bypass:
                 try:
@@ -689,7 +689,7 @@ class IntentMixin:
                     if not can_enter:
                         try:
                             ctx.entry_block_reason = "portfolio_risk_guard"
-                            ctx.entry_block_until_ts = time.time() + 60.0  # 1분 쿨다운
+                            ctx.entry_block_until_ts = time.time() + 60.0  # 1-min cooldown
                         except (AttributeError, TypeError, ValueError) as exc:
                             try:
                                 self.ledger.append("LONGHOLD_SCHEDULE_ERROR", error=str(exc))
@@ -719,14 +719,14 @@ class IntentMixin:
                     )
                     return
 
-            # [③] 단일 코인 집중도 한도
+            # [③] single-coin concentration limit
             if self.concentration_limit_enabled and not _triage_focus_bypass:
                 try:
                     equity = float(self._last_equity_usdt or 0.0)
                     _conc_price = float(price or 0.0)
-                    # [FIX 2026-03-23] price=None 시 entry 폴백 제거
-                    # entry(매수가) 폴백 시 하락 코인은 실제보다 과대평가 → 집중도 한도 조기 차단
-                    # 상승 코인은 과소평가 → 집중도 한도 우회 가능. 방향이 반대이므로 가격 없으면 스킵.
+                    # [FIX 2026-03-23] removed entry fallback when price=None
+                    # with an entry(buy-price) fallback, a falling coin is overvalued → concentration limit blocks early
+                    # a rising coin is undervalued → concentration limit can be bypassed. Directions oppose, so skip if no price.
                     if equity > 0 and _conc_price > 0:
                         pos = getattr(ctx, "position", None) or {}
                         pos_val = float(pos.get("qty", 0.0) or 0.0) * _conc_price
@@ -832,12 +832,12 @@ class IntentMixin:
                 or reason.startswith("sniper:confirm")
                 or reason.startswith("sniper:dca")
                 or reason.startswith("lightning:confirm")
-                or reason.startswith("autoloop:")  # [FIX 2026-03-05] AUTOLOOP add-buy 허용
+                or reason.startswith("autoloop:")  # [FIX 2026-03-05] allow AUTOLOOP add-buy
             )
 
-            # 이미 포지션이면 재진입 금지(기본 정책)
+            # if already in a position, forbid re-entry (default policy)
             if ctx.position and float(ctx.position.get("qty", 0.0) or 0.0) > 0.0:
-                # 예외: 엔진이 명시한 추가매수(add-buy)만 제한적으로 허용
+                # exception: only an engine-specified add-buy is allowed, with restrictions
                 if allow_add_buy_intent and add_buy_reason_allowed:
                     pass
                 else:
@@ -858,7 +858,7 @@ class IntentMixin:
                     )
                     return
 
-            # ★ Cross-strategy guard: FOCUS가 이미 이 마켓을 보유 중이면 진입 차단
+            # ★ Cross-strategy guard: block entry if FOCUS already holds this market
             try:
                 from app.core.cross_strategy_guard import is_market_owned_by_other
                 _cross_owner = is_market_owned_by_other(self, market, "NUNNAYA")
@@ -879,13 +879,13 @@ class IntentMixin:
                 logger.debug("[INTENT] cross_strategy_guard: %s", exc)
 
             # ----------------------------------------------------
-            # ENTRY CEILING GUARD: 하락장/비상승장 재진입 단가 상한
+            # ENTRY CEILING GUARD: re-entry price ceiling in down/non-bull markets
             # ----------------------------------------------------
-            # 직전 FULL EXIT 평균가(last_exit_price)보다 충분히 싸지 않은 가격에서는
-            # 재진입(BUY)을 차단하여 "비싸게 다시 사는" 역마진 루프를 방지한다.
+            # At any price not sufficiently cheaper than the previous FULL EXIT average (last_exit_price),
+            # block re-entry (BUY) to prevent the "buy back at a higher price" negative-margin loop.
             #
-            # - 시장 레짐이 BULL이면 완화(기본: 차단하지 않음)
-            # - 레짐이 BEAR 또는 NEUTRAL이면 ceiling_price 초과 BUY를 차단(기본: NON_BULL)
+            # - if the market regime is BULL, relax (default: do not block)
+            # - if the regime is BEAR or NEUTRAL, block BUYs above ceiling_price (default: NON_BULL)
             ce_on = _g_bool("entry_ceiling_guard", bool(getattr(self, "entry_ceiling_guard", False)))
             if ce_on and expected_price is not None:
                 try:
@@ -996,7 +996,7 @@ class IntentMixin:
                                 ceiling_price = ceiling_base
 
                         if ceiling_price is not None and float(expected_price) > float(ceiling_price):
-                            # 작은 쿨다운(스팸/무한루프 완화)
+                            # small cooldown (mitigate spam / infinite loop)
                             try:
                                 cd = float(_g_float("entry_ceiling_cooldown_sec", float(getattr(self, "entry_ceiling_cooldown_sec", 2.0) or 2.0)))
                             except (TypeError, ValueError):
@@ -1057,19 +1057,19 @@ class IntentMixin:
                                 ceiling_would_be=float(c_test),
                                 age_sec=float(age_sec) if age_sec is not None else None
                             )
-                # lep_f <= 0 → first entry / unknown → guard skip
+                # lep_f <= 0 → first entry / unknown → skip guard
             # ----------------------------------------------------
 
 
             # ----------------------------------------------------
-            # ENTRY RECENT-HIGH GUARD: 최근 N시간 고점 부근 추격매수 차단
+            # ENTRY RECENT-HIGH GUARD: block chase-buying near the last N-hour high
             # ----------------------------------------------------
             # - apply mode:
             #   ALWAYS / NON_BULL / BEAR
             # - near threshold:
             #   expected_price >= recent_high * (1 - near_pct/100)
             # - breakout escape:
-            #   진짜 돌파(마진/레짐/스프레드 조건)면 차단 해제
+            #   if it's a genuine breakout (margin/regime/spread conditions), lift the block
             rh_on = _g_bool("entry_recent_high_guard", bool(getattr(self, "entry_recent_high_guard", False)))
             if rh_on and expected_price is not None and float(expected_price) > 0.0:
                 regime, change_pct = self._infer_market_regime(ctx=ctx, price=float(expected_price))
@@ -1260,10 +1260,10 @@ class IntentMixin:
 
 
             # ----------------------------------------------------
-            # ENTRY QTY GUARD (저단가 × 고원금 역마진 방지)
+            # ENTRY QTY GUARD (prevent low-price × high-principal negative margin)
             # ----------------------------------------------------
             # - qty_est = buy_usdt / expected_price
-            # - qty_est가 과도하면 orderbook을 깊게 긁어 슬리피지/부분체결 위험이 커진다.
+            # - if qty_est is excessive, it scrapes deep into the orderbook, raising slippage/partial-fill risk.
             qty_on = _g_bool("entry_qty_guard", bool(getattr(self, "entry_qty_guard", False)))
             if qty_on and expected_price is not None and float(expected_price) > 0.0:
                 try:
@@ -1276,7 +1276,7 @@ class IntentMixin:
                     qty_est = float(usdt_amount) / float(expected_price)
 
                     if qty_est > max_qty:
-                        # 쿨다운 부여 (연속 시그널 스팸 방지)
+                        # apply cooldown (prevent consecutive-signal spam)
                         try:
                             cd = float(_g_float("entry_qty_cooldown_sec", float(getattr(self, "entry_qty_cooldown_sec", 2.0) or 0.0)))
                         except (TypeError, ValueError):
@@ -1468,17 +1468,17 @@ class IntentMixin:
             # record global BUY submission time (used by OMA_ENTRY_GLOBAL_GAP_SEC)
             self._last_entry_submit_ts = time.time()
 
-            # PATCH 2026-01-31: SNIPER use_limit 진입 지원
+            # PATCH 2026-01-31: support SNIPER use_limit entry
             sniper_use_limit_entry = bool((meta or {}).get("use_limit", False))
             sniper_fallback_entry = bool((meta or {}).get("fallback_to_market", True))
             is_sniper_buy = reason and "sniper:" in reason.lower()
 
-            # PATCH 2026-01: 지정가 진입 옵션
+            # PATCH 2026-01: limit-order entry option
             entry_limit_enabled = _g_bool("entry_limit_buy_enabled", bool(getattr(self, "entry_limit_buy_enabled", False)))
             
-            # sniper:probe / sniper:dca — 지정가 우선(best_bid), timeout 후 시장가 fallback
-            # fill rate 12.6% → 슬리피지 축소 목적; best_bid를 써서 슬리피지를 낮추되
-            # 미체결 시 시장가로 fallback해 기회 손실 방지
+            # sniper:probe / sniper:dca — prefer limit (best_bid), fallback to market after timeout
+            # fill rate 12.6% → goal is to reduce slippage; use best_bid to lower slippage,
+            # but fall back to market if unfilled to avoid missed opportunity
             _is_probe_or_dca = is_sniper_buy and reason and (
                 reason.startswith("sniper:probe")
                 or reason.startswith("sniper:dca")
@@ -1509,7 +1509,7 @@ class IntentMixin:
                         reason=(reason or "sniper:probe") + ":market_no_bid",
                     )
             elif is_sniper_buy and sniper_use_limit_entry:
-                # SNIPER 지정가 진입: best_ask 기반
+                # SNIPER limit entry: based on best_ask
                 ob = orderbook_store.get(market)
                 if not ob or not isinstance(ob, dict):
                     ok, msg = self.order_fsm.submit_market_buy(
@@ -1530,7 +1530,7 @@ class IntentMixin:
                             reason=reason or "sniper:market_buy:no_ask",
                         )
                     else:
-                        # 지정가 진입 시도 (timeout 후 fallback)
+                        # attempt limit entry (fallback after timeout)
                         timeout_sec = float(getattr(self, "sniper_limit_timeout_sec", 3.0) or 3.0)
                         ok, msg = self.order_fsm.submit_limit_buy(
                             ctx=ctx,
@@ -1543,10 +1543,10 @@ class IntentMixin:
                             timeout_sec=timeout_sec,
                         )
             elif entry_limit_enabled:
-                # 지정가 진입: best_bid/best_ask 기반 limit price 결정
+                # limit entry: determine limit price from best_bid/best_ask
                 ob = orderbook_store.get(market)
                 if not ob or not isinstance(ob, dict):
-                    # orderbook 없으면 시장가로 fallback
+                    # no orderbook → fallback to market
                     ok, msg = self.order_fsm.submit_market_buy(
                         ctx=ctx,
                         market=market,
@@ -1562,7 +1562,7 @@ class IntentMixin:
                         limit_price = float(ob.get("best_bid") or 0)
                     
                     if limit_price <= 0:
-                        # 가격 없으면 시장가로 fallback
+                        # no price → fallback to market
                         ok, msg = self.order_fsm.submit_market_buy(
                             ctx=ctx,
                             market=market,
@@ -1571,7 +1571,7 @@ class IntentMixin:
                             reason=reason or "engine_buy:limit_fallback_no_price",
                         )
                     else:
-                        # 지정가 진입
+                        # limit entry
                         timeout_sec = float(getattr(self, "entry_limit_timeout_sec", 5.0) or 5.0)
                         ok, msg = self.order_fsm.submit_limit_buy(
                             ctx=ctx,
@@ -1580,11 +1580,11 @@ class IntentMixin:
                             limit_price=float(limit_price),
                             reason=reason or "engine_buy:limit",
                             attempts=1,
-                            max_retries=0,  # 미체결 시 재시도 안함
+                            max_retries=0,  # no retry if unfilled
                             timeout_sec=timeout_sec,
                         )
             else:
-                # 기존 시장가 진입
+                # existing market entry
                 ok, msg = self.order_fsm.submit_market_buy(
                     ctx=ctx,
                     market=market,
@@ -1634,8 +1634,8 @@ class IntentMixin:
                 self._notify_soft_once(market=market, intent="BUY", msg=warn)
 
             # --------------------------------------------------------
-            # DCA 주문 성공 직후 즉시 context_state.json 플러시
-            # — 10초 주기 저장 갭 사이에 크래시 시 dca_count 유실 방지
+            # flush context_state.json immediately right after a successful DCA order
+            # — prevents dca_count loss if a crash happens within the 10s periodic-save gap
             # --------------------------------------------------------
             _is_dca_buy = (
                 reason.startswith("sniper:dca")
@@ -1687,19 +1687,19 @@ class IntentMixin:
                 return
 
             # ============================================================
-            # [PROTECTED] LONGHOLD 절대 보호 (2026-02-01)
-            # - LongHold 마켓은 SL 포함 모든 자동 매도 차단
-            # - 오직 사용자 수동 매도만 허용
-            # DO NOT MODIFY: 이 로직은 사용자 지시로 보호됨
+            # [PROTECTED] LONGHOLD absolute protection (2026-02-01)
+            # - LongHold markets block all automatic sells, including SL
+            # - only manual user sells are allowed
+            # DO NOT MODIFY: this logic is protected by owner instruction
             # ============================================================
             is_manual_exit = reason and ("manual" in str(reason).lower() or "user" in str(reason).lower() or "api_manual" in str(reason).lower())
-            # [FIX 2026-03-23 P1] profit_lock 시스템 부분매도는 LongHold 보호에서 면제
-            # profit_lock은 수익 구간에서만 발동 — 보유 유지 정책과 충돌하지 않음
-            # 단, 쿨다운 타임스탬프 소모 방지 위해 별도 처리
+            # [FIX 2026-03-23 P1] profit_lock system partial sells are exempt from LongHold protection
+            # profit_lock only fires in profit territory — it doesn't conflict with the hold policy
+            # but handle separately to avoid consuming the cooldown timestamp
             _pl_exit_kind = str((intent.get("meta") or {}).get("exit_kind", "") or "")
             is_manual_exit = is_manual_exit or _pl_exit_kind == "profit_lock"
             
-            # LongHold 설정 확인 (longhold_config.json)
+            # check LongHold settings (longhold_config.json)
             is_longhold_market = False
             try:
                 ladder_mgr = getattr(self, "ladder_manager", None)
@@ -1710,7 +1710,7 @@ class IntentMixin:
             except (AttributeError, TypeError) as exc:
                 logger.warning("[INTENT] longhold_config: %s", exc, exc_info=True)
 
-            # user_sell_only 설정 확인 (context.controls.strategy.params)
+            # check user_sell_only setting (context.controls.strategy.params)
             user_sell_only = False
             try:
                 controls = ctx.controls or {}
@@ -1742,8 +1742,8 @@ class IntentMixin:
 
             # ============================================================
             # WARMUP SELL PROTECTION (2026-01-30)
-            # - 서버 재시작 후 warmup 완료 전까지 엔진 매도 시그널 차단
-            # - 수동 매도/API 매도/강제 청산/SL은 허용
+            # - block engine sell signals after server restart until warmup completes
+            # - allow manual sells / API sells / forced exits / SL
             # ============================================================
             is_force_exit = bool(intent.get("force_exit") or intent.get("force") or intent.get("force_sell"))
             is_manual_sell = reason and ("manual" in reason.lower() or "api" in reason.lower() or "user" in reason.lower())
@@ -1765,9 +1765,9 @@ class IntentMixin:
                 )
                 return
 
-            # [2026-03-10] Night Mode SL Guard: 야간 SL을 넓혀서 일시 하락 조기 손절 방지
-            # - SL 매도 시그널이지만, 넓힌 SL 범위 내이면 차단
-            # - TP, signal, manual, force 매도는 영향 없음
+            # [2026-03-10] Night Mode SL Guard: widen the night SL to avoid early stop-loss on transient dips
+            # - it's an SL sell signal, but block it if within the widened SL range
+            # - TP, signal, manual, and force sells are unaffected
             if is_sl_exit and not is_force_exit and not is_manual_sell and self.is_night_mode_active():
                 try:
                     _nm_mult = float(getattr(self, 'night_mode_sl_multiplier', 1.5) or 1.5)
@@ -1780,8 +1780,8 @@ class IntentMixin:
                             _entry = float(getattr(ctx, "avg_buy_price", 0.0) or 0.0)
                         if _entry > 0 and expected_price and expected_price > 0:
                             _profit_pct = (float(expected_price) - _entry) / _entry * 100.0
-                            # 전략의 원래 SL 읽기
-                            _orig_sl = -2.5  # 기본값
+                            # read the strategy's original SL
+                            _orig_sl = -2.5  # default
                             try:
                                 _ss = getattr(ctx, "strategy_state", {}) or {}
                                 _orig_sl = float(_ss.get("sl_pct") or _ss.get("sl") or -2.5)
@@ -1789,8 +1789,8 @@ class IntentMixin:
                                     _orig_sl = -abs(_orig_sl)
                             except (AttributeError, TypeError, ValueError) as exc:
                                 logger.warning("[INTENT] night_mode_sl_read: %s", exc, exc_info=True)
-                            _night_sl = _orig_sl * _nm_mult  # 예: -2.5 * 1.5 = -3.75
-                            # 원래 SL에 걸렸지만 넓힌 SL에는 안 걸림 → 차단
+                            _night_sl = _orig_sl * _nm_mult  # e.g. -2.5 * 1.5 = -3.75
+                            # hit the original SL but not the widened SL → block
                             if _profit_pct > _night_sl:
                                 self._log_blocked_throttled(
                                     "EXIT_BLOCKED",
@@ -1841,7 +1841,7 @@ class IntentMixin:
                 )
                 return
 
-            # [FIX] Dust block check: 최소 주문금액 미만으로 차단된 경우 쿨다운 적용
+            # [FIX] Dust block check: apply a cooldown when blocked for being below minimum order size
             dust_block_ts = getattr(ctx, "dust_block_until_ts", 0.0) or 0.0
             if dust_block_ts > 0.0 and time.time() < float(dust_block_ts):
                 ctx.exit_state = "DUST_BLOCKED"
@@ -1854,7 +1854,7 @@ class IntentMixin:
                 )
                 return
 
-            # 포지션이 없으면 매도 불가
+            # cannot sell without a position
             if not ctx.position or float(ctx.position.get("qty", 0.0) or 0.0) <= 0.0:
                 try:
                     ctx.exit_block_reason = "no_position"
@@ -1873,27 +1873,27 @@ class IntentMixin:
                 return
 
             # [PATCH] Dust Prevention: If remaining balance is dust, sell all.
-            # "처리하기전에 소량이 남을것 같으면 그 소량만큼 다 처리하자. 전량."
+            # "If a tiny remainder would be left before handling it, just process that whole tiny amount. Everything."
             pos_qty = float(ctx.position.get("qty", 0.0) or 0.0)
             if pos_qty > qty:
                 remain_qty = pos_qty - qty
                 est_px = expected_price if (expected_price and expected_price > 0) else float(price_store.get_price(market) or 0.0)
                 if est_px > 0:
                     remain_val = remain_qty * est_px
-                    # 남은 가치가 최소주문금액 미만이면 전량 매도로 변경
+                    # if the remaining value is below minimum order size, switch to selling everything
                     if remain_val < self.min_order_usdt:
                         self.ledger.append("SELL_UPGRADED_TO_FULL", market=market, reason="dust_prevention", original_qty=qty, full_qty=pos_qty, remain_val=remain_val)
                         qty = pos_qty
 
             # ----------------------------------------------------
-            # PROFIT GUARD (HARD FIX): 역마진/미세 스캘핑 차단
+            # PROFIT GUARD (HARD FIX): block negative-margin / micro-scalping
             # ----------------------------------------------------
             # NOTE:
-            # - 엔진이 'sell'을 내더라도, 예상 NET 이익이 최소 임계값에 못 미치면
-            #   System에서 주문 자체를 차단한다. (전략 불문 최종 안전장치)
+            # - even if the engine emits 'sell', if the expected NET profit is below the minimum threshold,
+            #   the System blocks the order itself. (final safety net regardless of strategy)
             #
-            # - SL(손절) 같은 강제 EXIT는 막으면 안 되므로, intent.force_exit=True는 예외 처리.
-            # - RECOVERY 상태 또한 회수 로직이 우선이므로 기본적으로 예외 처리.
+            # - forced EXITs like SL (stop-loss) must not be blocked, so intent.force_exit=True is exempted.
+            # - the RECOVERY state also prioritizes withdrawal logic, so it is exempted by default.
             force_exit = bool(intent.get("force_exit") or intent.get("force") or intent.get("force_sell"))
             # PingPong peak-proximal exits should bypass profit-guard (engine already flags force_exit, but keep as safety)
             exit_kind0 = str((intent.get("meta") or {}).get("exit_kind") or "").lower()
@@ -1966,9 +1966,9 @@ class IntentMixin:
 
                         net_profit_pct = (net_profit / principal_part * 100.0) if principal_part > 0 else None
 
-                        # ── HARD GUARD: 매수원금+수수료 이하 매도 절대 차단 ──
-                        # force_exit(SL 등)이더라도 net_profit < 0이면 차단
-                        # (수동 매도, RECOVERY는 위에서 이미 제외됨)
+                        # ── HARD GUARD: absolutely block selling at or below buy-principal + fees ──
+                        # even on force_exit (SL etc.), block if net_profit < 0
+                        # (manual sells and RECOVERY were already excluded above)
                         if net_profit < 0 and force_exit:
                             now = time.time()
                             try:
@@ -2001,10 +2001,10 @@ class IntentMixin:
 
                         if fail_pct or fail_usdt:
                             # ----------------------------------------------------
-                            # profit_guard 연속 차단(streak) 가드
+                            # profit_guard consecutive-block (streak) guard
                             # ----------------------------------------------------
-                            # - 기본: 2초 쿨다운(로그/주문 루프 완화)
-                            # - N회 연속 차단 시: 더 긴 쿨다운 + (선택) RECOVERY 승격
+                            # - default: 2s cooldown (eases log/order loop)
+                            # - on N consecutive blocks: longer cooldown + (optional) RECOVERY promotion
                             now = time.time()
                             streak = 0
                             cooldown = 2.0
@@ -2026,14 +2026,14 @@ class IntentMixin:
                                     logger.warning("[%s] profit_guard streak read failed", market, exc_info=True)
                                     streak = 0
 
-                            # streak-trigger 판단
+                            # streak-trigger decision
                             try:
                                 n = int(getattr(self, "exit_profit_guard_streak_n", 0) or 0)
                                 cd = float(getattr(self, "exit_profit_guard_streak_cooldown_sec", 0.0) or 0.0)
                                 if n > 0 and cd > 0.0 and streak >= n:
                                     cooldown = float(cd)
 
-                                    # (선택) 시장을 RECOVERY로 승격
+                                    # (optional) promote the market to RECOVERY
                                     if bool(getattr(self, "exit_profit_guard_streak_to_recovery", False)):
                                         try:
                                             self.oma_registry.set_state(
@@ -2049,7 +2049,7 @@ class IntentMixin:
                                         except (KeyError, AttributeError, TypeError, ValueError) as exc:
                                             logger.warning("[INTENT] recovery_promotion: %s", exc, exc_info=True)
 
-                                    # (선택) 1회 알림
+                                    # (optional) one-time notification
                                     if bool(getattr(self, "exit_profit_guard_streak_notify", False)):
                                         try:
                                             self._send_telegram_safe(
@@ -2058,13 +2058,13 @@ class IntentMixin:
                                         except (AttributeError, TypeError, ValueError) as exc:
                                             logger.warning("[INTENT] streak_notify_telegram: %s", exc)
 
-                                    # streak reset (반복 발화 방지)
+                                    # streak reset (prevent repeated firing)
                                     try:
                                         setattr(ctx, "profit_guard_block_streak", 0)
                                     except (AttributeError, TypeError, ValueError) as exc:
                                         logger.warning("[INTENT] streak_reset: %s", exc)
 
-                                    # streak 이벤트는 별도 로그로 남긴다
+                                    # log the streak event separately
                                     try:
                                         self.ledger.append(
                                             "EXIT_PROFIT_GUARD_STREAK",
@@ -2081,7 +2081,7 @@ class IntentMixin:
                             except (KeyError, AttributeError, TypeError, ValueError) as exc:
                                 logger.warning("[INTENT] streak_trigger: %s", exc)
 
-                            # 쿨다운 적용(기본 2초, streak-trigger면 더 길 수 있음)
+                            # apply cooldown (default 2s, may be longer on streak-trigger)
                             try:
                                 cur = float(getattr(ctx, "exit_block_until_ts", 0.0) or 0.0)
                                 ctx.exit_block_until_ts = max(cur, float(now) + float(cooldown))
@@ -2122,13 +2122,13 @@ class IntentMixin:
                     return
 
             # PATCH 2025-12-26: TP => LIMIT EXIT, SL/force_exit => MARKET
-            # PATCH 2026-01-31: SNIPER use_limit + fallback_to_market 지원
+            # PATCH 2026-01-31: support SNIPER use_limit + fallback_to_market
             sniper_use_limit = bool((meta or {}).get("use_limit", False))
             sniper_fallback = bool((meta or {}).get("fallback_to_market", True))
             is_sniper_sell = reason and "sniper:" in reason.lower()
             
             if is_sniper_sell and sniper_use_limit and not force_exit:
-                # SNIPER 지정가 매도: quick_sell (IOC) + fallback
+                # SNIPER limit sell: quick_sell (IOC) + fallback
                 ob = orderbook_store.get(market) or {}
                 try:
                     sniper_limit_price = float(ob.get("best_bid") or 0.0)
@@ -2146,7 +2146,7 @@ class IntentMixin:
                         fallback_to_market=sniper_fallback,
                     )
                 else:
-                    # best_bid 없으면 시장가로 fallback
+                    # no best_bid → fallback to market
                     ok, msg = self.order_fsm.submit_market_sell(
                         ctx=ctx,
                         market=market,
@@ -2176,7 +2176,7 @@ class IntentMixin:
                 )
 
             # [FIX] Auto Dust Cleanup: If blocked due to small value, try to clear it
-            # User requested to disable "Buy->Sell" cleanup logic. ("매수루 매도ㅓ가 아니라")
+            # User requested to disable "Buy->Sell" cleanup logic. ("not a buy-then-sell")
             # if not ok and "min_value_blocked" in str(msg):
             #      await self._run_dust_cleanup(ctx, market, float(expected_price or 0))
             #      return
@@ -2192,10 +2192,10 @@ class IntentMixin:
                     self._notify_soft_once(market=market, intent="SELL", msg=msg)
                     return
 
-                # [FIX] Dust prevention: 최소 주문금액 미만일 때 5분간 재시도 방지
+                # [FIX] Dust prevention: prevent retries for 5 minutes when below minimum order size
                 if isinstance(msg, str) and "min_value_blocked" in msg:
                     ctx.exit_state = "DUST_BLOCKED"
-                    ctx.dust_block_until_ts = time.time() + 300.0  # 5분 쿨다운
+                    ctx.dust_block_until_ts = time.time() + 300.0  # 5-min cooldown
                     self._log_blocked_throttled(
                         "EXIT_DUST_BLOCKED",
                         market=market,
@@ -2221,14 +2221,14 @@ class IntentMixin:
                 ctx.exit_block_reason = None
             except (AttributeError, TypeError, ValueError) as exc:
                 logger.error("[INTENT] sell_order_placed_clear: %s", exc, exc_info=True)
-            # profit_guard streak reset: 실제 SELL 주문이 나가면 연속 차단 카운터를 초기화
+            # profit_guard streak reset: reset the consecutive-block counter once a real SELL order goes out
             try:
                 setattr(ctx, "profit_guard_block_streak", 0)
                 setattr(ctx, "profit_guard_block_last_ts", 0.0)
             except (AttributeError, TypeError, ValueError) as exc:
                 logger.warning("[INTENT] profit_guard_streak_reset: %s", exc)
-            # [FIX H7] SNIPER 매도 주문 제출 시 sniper_last_exit_ts 즉시 저장
-            # (_release_scope_sold_slots가 재부팅 후에도 유령 포지션을 감지하도록)
+            # [FIX H7] save sniper_last_exit_ts immediately when a SNIPER sell order is submitted
+            # (so _release_scope_sold_slots can detect ghost positions even after a reboot)
             if is_sniper_sell:
                 try:
                     ctx.set_var("sniper_last_exit_ts", time.time())

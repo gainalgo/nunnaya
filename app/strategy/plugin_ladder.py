@@ -28,7 +28,7 @@ class LadderPlugin(StrategyPlugin):
             if isinstance(ctrls, dict):
                 params = dict((ctrls.get("strategy") or {}).get("params") or {})
         except (KeyError, AttributeError, TypeError):
-            logger.warning("[%s] params 추출 실패 → 기본값 사용: %s", self.name if hasattr(self, 'name') else '?', getattr(ctx, 'market', '?'), exc_info=True)
+            logger.warning("[%s] params extraction failed → using defaults: %s", self.name if hasattr(self, 'name') else '?', getattr(ctx, 'market', '?'), exc_info=True)
             params = {}
 
         grid_auto_sync = bool(params.get("grid_auto_sync", False))
@@ -49,7 +49,7 @@ class LadderPlugin(StrategyPlugin):
                 meta["realized_pnl"] = round(icag_state.realized_pnl, 2)
                 meta["trade_count"] = icag_state.trade_count
         except (KeyError, AttributeError, TypeError, ValueError):
-            logger.warning("[LADDER] ICAG state 조회 실패: %s", getattr(ctx, "market", "?"), exc_info=True)
+            logger.warning("[LADDER] ICAG state lookup failed: %s", getattr(ctx, "market", "?"), exc_info=True)
             meta["engine"] = "icag_v3"
 
         if grid_auto_sync:

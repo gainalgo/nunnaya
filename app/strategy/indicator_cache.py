@@ -1,59 +1,62 @@
 # ============================================================
 # File: app/strategy/indicator_cache.py
 # ------------------------------------------------------------
-# [PERF] Per-Tick 인디케이터 캐시 (2026-03-21)
-# [PERF] Cross-tick TTL 캐시로 확장 (2026-03-22)
+# [PERF] Per-tick indicator cache (2026-03-21)
+# [PERF] Extended to a cross-tick TTL cache (2026-03-22)
 #
-# 목적: 한 틱 사이클 내에서 동일한 인디케이터가 여러 컴포넌트
-# (brain, plugin, selector, exit policy)에서 중복 계산되는 것을 방지.
+# Purpose: avoid recomputing the same indicator multiple times within a single
+# tick cycle across several components (brain, plugin, selector, exit policy).
 #
 # [2026-03-22] Cross-tick TTL:
-#   - 기존: 매 틱 시작 시 전체 clear → 히트율 1.5% (틱 내 중복 호출만 재사용)
-#   - 변경: TTL(10초) 기반 → 데이터가 바뀌지 않으면 틱 경계를 넘어 재사용
-#   - 정확성 보장: 캐시 키가 content-based(first/mid/last + len + params)
-#     → 가격 데이터가 바뀌면 키도 바뀌므로 stale 반환 불가능
-#   - clear()는 TTL 초과 항목만 제거(GC), 전체 클리어 안 함
+#   - Before: full clear at the start of each tick → 1.5% hit rate (only
+#     duplicate calls within a tick are reused)
+#   - After: TTL-based (10s) → reused across tick boundaries when the data
+#     has not changed
+#   - Correctness guarantee: the cache key is content-based (first/mid/last +
+#     len + params) → when price data changes the key changes too, so a stale
+#     value can never be returned
+#   - clear() only removes entries past the TTL (GC); it does not clear everything
 #
-# 안전성:
-#   - 캐시 키에 len(data) + data[first/mid/last] 사용
-#     → 동일 내용의 리스트는 서로 다른 객체라도 캐시 히트
-#   - 데이터가 바뀌면 키가 달라져 자동으로 재계산
+# Safety:
+#   - The cache key uses len(data) + data[first/mid/last]
+#     → lists with identical content hit the cache even if they are distinct objects
+#   - When the data changes the key differs, triggering an automatic recompute
 # ============================================================
 
 from __future__ import annotations
 import time
 from typing import Any, Callable, Dict, Tuple
 
-# (value, monotonic_timestamp) 형태로 저장
+# Stored as (value, monotonic_timestamp)
 _cache: Dict[Tuple, Tuple[Any, float]] = {}
 _hits: int = 0
 _misses: int = 0
 
-# 캐시 TTL: 이 시간(초) 이상 된 항목은 GC 대상
+# Cache TTL: entries older than this (seconds) are eligible for GC
 _TTL_SEC: float = 10.0
 
 
 def clear() -> None:
-    """틱 사이클 시작 전에 호출. TTL 초과 항목만 제거(GC). 전체 클리어 안 함.
+    """Call before the start of a tick cycle. Only removes entries past the TTL (GC); does not clear everything.
 
-    기존 clear()와 시그니처 동일 → 호출부 수정 없음.
-    TTL 내 항목은 틱 경계를 넘어 재사용 → cross-tick 캐시 효과.
+    Same signature as the original clear() → no changes needed at call sites.
+    Entries within the TTL are reused across tick boundaries → cross-tick cache effect.
     """
     global _hits, _misses
     now = time.monotonic()
     stale_keys = [k for k, (_, ts) in _cache.items() if now - ts > _TTL_SEC]
     for k in stale_keys:
         del _cache[k]
-    # 틱별 통계 리셋 (누적 아닌 per-tick 조회용)
+    # Reset per-tick stats (per-tick lookup, not cumulative)
     _hits = 0
     _misses = 0
 
 
 def get_or_compute(key: Tuple, fn: Callable[[], Any]) -> Any:
-    """캐시에 결과가 있으면 반환, 없으면 fn()을 실행하고 저장.
+    """Return the cached result if present; otherwise run fn() and store it.
 
-    TTL 내 항목은 틱 경계를 넘어도 반환됨.
-    content-based 키 덕분에 데이터가 바뀌면 자동으로 재계산.
+    Entries within the TTL are returned even across tick boundaries.
+    Thanks to the content-based key, a data change triggers an automatic recompute.
     """
     global _hits, _misses
     entry = _cache.get(key)
@@ -67,5 +70,5 @@ def get_or_compute(key: Tuple, fn: Callable[[], Any]) -> Any:
 
 
 def get_stats() -> Dict[str, int]:
-    """현재 틱의 캐시 적중/미적중 통계."""
+    """Cache hit/miss stats for the current tick."""
     return {"hits": _hits, "misses": _misses, "size": len(_cache)}

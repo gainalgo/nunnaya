@@ -19,10 +19,10 @@ def _extract_ai_features_from_candles(candles: List[Dict[str, Any]]) -> Dict[str
     """Extract AI features from candle data for strategy classification.
 
     Returns:
-        trend: 추세 방향 (-1 ~ +1, 음수=하락, 양수=상승)
-        momentum: 단기 모멘텀 (%)
-        volatility: 변동성 (%)
-        volume_surge: 거래량 급증 비율
+        trend: trend direction (-1 ~ +1, negative=down, positive=up)
+        momentum: short-term momentum (%)
+        volatility: volatility (%)
+        volume_surge: volume surge ratio
     """
     _FEATURES_INVALID = {"trend": 0.0, "momentum": 0.0, "volatility": 0.0, "volume_surge": 0.0, "data_valid": False}
     if not candles or len(candles) < 5:
@@ -77,7 +77,7 @@ def _extract_ai_features_from_candles(candles: List[Dict[str, Any]]) -> Dict[str
 
 
 def _calc_ema_simple(prices: List[float], period: int) -> float | None:
-    """단순 EMA 계산 (최근 period*2 데이터 사용)"""
+    """Simple EMA calculation (uses the most recent period*2 data points)"""
     if not prices or len(prices) < period:
         return None
 
@@ -90,11 +90,11 @@ def _calc_ema_simple(prices: List[float], period: int) -> float | None:
 
 
 def _check_ema_cross(candles: List[Dict[str, Any]], fast: int = 12, slow: int = 26) -> tuple[bool, float, float]:
-    """EMA 크로스 확인.
+    """Check EMA cross.
 
     Returns:
         (is_golden_cross, ema_fast, ema_slow)
-        - is_golden_cross: ema_fast > ema_slow (상승 추세)
+        - is_golden_cross: ema_fast > ema_slow (uptrend)
     """
     if not candles or len(candles) < slow:
         return False, 0.0, 0.0
@@ -121,12 +121,12 @@ def _calc_rsi_macd_from_candles(candles: List[Dict[str, Any]]) -> Dict[str, Any]
     """Calculate RSI and MACD from candle data.
 
     Returns:
-        rsi: RSI(14) 값 (0~100)
-        macd_line: MACD 라인 값
-        macd_signal: MACD 시그널 값
-        macd_histogram: MACD 히스토그램
+        rsi: RSI(14) value (0~100)
+        macd_line: MACD line value
+        macd_signal: MACD signal value
+        macd_histogram: MACD histogram
         macd_trend: "bullish" | "bearish" | "neutral"
-        change_24h: 24시간 변동률 (%)
+        change_24h: 24-hour change rate (%)
     """
     result = {
         "rsi": 50.0,
@@ -142,17 +142,17 @@ def _calc_rsi_macd_from_candles(candles: List[Dict[str, Any]]) -> Dict[str, Any]
         return result
 
     try:
-        # 캔들은 최신순이므로 역순 정렬
+        # candles are newest-first, so reverse them
         closes = [float(c.get("trade_price") or 0) for c in reversed(candles)]
 
         if len(closes) < 26:
             return result
 
-        # 24시간 변동률 (15분 캔들 기준 96개 = 24시간, 하지만 30개만 있으면 약 7.5시간)
+        # 24-hour change rate (96 of 15-min candles = 24h, but with only 30 candles ≈ 7.5h)
         if closes[0] > 0:
             result["change_24h"] = round((closes[-1] - closes[0]) / closes[0] * 100, 2)
 
-        # RSI(14) 계산
+        # RSI(14) calculation
         gains, losses = [], []
         for i in range(1, len(closes)):
             diff = closes[i] - closes[i-1]
@@ -168,7 +168,7 @@ def _calc_rsi_macd_from_candles(candles: List[Dict[str, Any]]) -> Dict[str, Any]
             else:
                 result["rsi"] = 100.0
 
-        # MACD (12, 26, 9) 계산
+        # MACD (12, 26, 9) calculation
         def calc_ema(data: List[float], period: int) -> float:
             if len(data) < period:
                 return sum(data) / len(data) if data else 0.0
@@ -182,22 +182,22 @@ def _calc_rsi_macd_from_candles(candles: List[Dict[str, Any]]) -> Dict[str, Any]
         ema26 = calc_ema(closes, 26)
         macd_line = ema12 - ema26
 
-        # MACD Signal (9-period EMA of MACD line) - 단순화
-        # 실제로는 MACD 라인의 히스토리가 필요하지만, 여기서는 근사값 사용
+        # MACD Signal (9-period EMA of MACD line) - simplified
+        # Properly this needs the MACD line history, but here we use an approximation
         result["macd_line"] = round(macd_line, 4)
 
-        # 이전 MACD 계산 (시그널 근사)
+        # previous MACD calculation (signal approximation)
         if len(closes) >= 27:
             prev_closes = closes[:-1]
             prev_ema12 = calc_ema(prev_closes, 12)
             prev_ema26 = calc_ema(prev_closes, 26)
             prev_macd = prev_ema12 - prev_ema26
 
-            # 단순 시그널 근사: 현재와 이전 MACD의 평균
+            # simple signal approximation: average of current and previous MACD
             result["macd_signal"] = round((macd_line + prev_macd) / 2, 4)
             result["macd_histogram"] = round(macd_line - result["macd_signal"], 4)
 
-            # 트렌드 판단
+            # trend determination
             if macd_line > 0 and macd_line > prev_macd:
                 result["macd_trend"] = "bullish"
             elif macd_line < 0 and macd_line < prev_macd:

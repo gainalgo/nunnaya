@@ -1,23 +1,24 @@
 # ============================================================
-# Upbit Trade Client — 현물(Spot) / Long-only
+# Upbit Trade Client — Spot / Long-only
 # ------------------------------------------------------------
-# Bybit `BybitTradeClient` 인터페이스를 미러한 Upbit REST 클라이언트.
-# FOCUS 엔진이 거래소를 모르고 같은 메서드(market_buy/market_sell/
-# get_kline/accounts...)로 대화할 수 있게 한다.
+# Upbit REST client mirroring the Bybit `BybitTradeClient` interface.
+# Lets the FOCUS engine talk to the exchange through the same methods
+# (market_buy/market_sell/get_kline/accounts...) without knowing which
+# exchange it is.
 #
-# 의존성 0 원칙(오픈소스 배포·run.ps1 비침습 철학):
-#   - JWT(HS256)는 표준 라이브러리(hmac/hashlib/base64)로 직접 구현.
-#     PyJWT 등 외부 패키지 설치 강요하지 않음.
-#   - HTTP는 requests(이미 프로젝트 의존성)만 사용.
+# Zero-dependency principle (open-source distribution / non-invasive run.ps1 philosophy):
+#   - JWT (HS256) implemented directly with the standard library (hmac/hashlib/base64).
+#     Does not force installing external packages such as PyJWT.
+#   - HTTP uses only requests (already a project dependency).
 #
-# 거래소 차이(가이드 §10 / DESIGN §4):
-#   - 방향: 매수(bid)/매도(ask)만. SHORT 없음(현물 long_only).
-#   - 시장가 매수 = 금액(KRW) 기준 (ord_type="price")
-#   - 시장가 매도 = 수량 기준     (ord_type="market")
-#   - 심볼: "BTCUSDT"/"BTC" → "KRW-BTC"
-#   - 캔들: Upbit는 최신 먼저 → ★ reversed()로 oldest-first 반환
-#           (Bybit get_kline 과 동일 포맷 = selector 재사용 가능)
-#   - 최소주문: 5000 KRW
+# Exchange differences (guide §10 / DESIGN §4):
+#   - Direction: bid (buy) / ask (sell) only. No SHORT (spot long_only).
+#   - Market buy  = amount (KRW) based (ord_type="price")
+#   - Market sell = quantity based     (ord_type="market")
+#   - Symbol: "BTCUSDT"/"BTC" → "KRW-BTC"
+#   - Candles: Upbit returns newest-first → ★ reversed() to return oldest-first
+#              (same format as Bybit get_kline = selector can be reused)
+#   - Min order: 5000 KRW
 # ============================================================
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 UPBIT_API_BASE = "https://api.upbit.com"
 
-# Upbit 분봉 지원 단위 (그 외는 가장 가까운 것으로 fallback)
+# Upbit supported minute-candle units (others fall back to the nearest)
 _UPBIT_MIN_UNITS = (1, 3, 5, 10, 15, 30, 60, 240)
 
 MIN_ORDER_KRW = 5000.0
@@ -54,11 +55,11 @@ class UpbitAPIError(Exception):
 
 
 def to_upbit_market(symbol: str) -> str:
-    """내부 심볼 → Upbit market 코드. "BTCUSDT"/"BTC"/"KRW-BTC" → "KRW-BTC"."""
+    """Internal symbol → Upbit market code. "BTCUSDT"/"BTC"/"KRW-BTC" → "KRW-BTC"."""
     s = str(symbol).upper().replace("/", "").strip()
     if s.startswith("KRW-"):
         return s
-    if "-" in s:  # 이미 "QUOTE-BASE" 형태(다른 quote)면 그대로
+    if "-" in s:  # already "QUOTE-BASE" form (different quote) → keep as is
         return s
     for q in ("USDT", "USDC", "BUSD", "KRW", "BTC"):
         if s.endswith(q) and len(s) > len(q):
@@ -67,13 +68,13 @@ def to_upbit_market(symbol: str) -> str:
 
 
 def base_currency(symbol: str) -> str:
-    """Upbit market("KRW-BTC") 또는 내부 심볼에서 base("BTC") 추출."""
+    """Extract base ("BTC") from an Upbit market ("KRW-BTC") or internal symbol."""
     mk = to_upbit_market(symbol)
     return mk.split("-", 1)[1] if "-" in mk else mk
 
 
 def krw_tick_size(price: float) -> float:
-    """Upbit KRW 마켓 호가단위 (공식표 docs/krw-market-info). 지정가 주문 가격은 이 단위 배수여야 함."""
+    """Upbit KRW market tick size (official table docs/krw-market-info). Limit order prices must be a multiple of this unit."""
     p = float(price)
     if p >= 1_000_000:
         return 1000.0
@@ -109,8 +110,8 @@ def krw_tick_size(price: float) -> float:
 
 
 def adjust_price_to_tick_krw(price: float, side: str = "ask") -> float:
-    """지정가를 Upbit 호가단위에 맞춤 (안 맞으면 주문 거부됨).
-    매도(ask)=내림(체결 유리), 매수(bid)=올림."""
+    """Snap a limit price to the Upbit tick size (orders are rejected if it doesn't match).
+    Sell (ask) = round down (favorable fill), buy (bid) = round up."""
     import math
     p = float(price)
     tick = krw_tick_size(p)
@@ -124,7 +125,7 @@ def adjust_price_to_tick_krw(price: float, side: str = "ask") -> float:
 
 
 def _kline_endpoint(interval: str):
-    """Bybit interval 문자열 → Upbit candle (kind, unit)."""
+    """Bybit interval string → Upbit candle (kind, unit)."""
     iv = str(interval).upper()
     if iv in ("D", "1D", "DAY", "DAYS"):
         return "days", None
@@ -139,7 +140,7 @@ def _kline_endpoint(interval: str):
     if n in _UPBIT_MIN_UNITS:
         return "minutes", n
     nearest = min(_UPBIT_MIN_UNITS, key=lambda u: abs(u - n))
-    logger.debug("[UpbitTrade] interval %s 미지원 → 가까운 %dm 사용", interval, nearest)
+    logger.debug("[UpbitTrade] interval %s unsupported → using nearest %dm", interval, nearest)
     return "minutes", nearest
 
 
@@ -148,7 +149,7 @@ def _b64url(data: bytes) -> str:
 
 
 class UpbitTradeClient:
-    """Upbit 현물 거래 클라이언트. BybitTradeClient 인터페이스 미러."""
+    """Upbit spot trading client. Mirrors the BybitTradeClient interface."""
 
     API_BASE = UPBIT_API_BASE
     MIN_ORDER_KRW = MIN_ORDER_KRW
@@ -159,9 +160,9 @@ class UpbitTradeClient:
         self.timeout = timeout
         self._session = requests.Session()
         self._kline_cache: Dict[tuple, tuple] = {}
-        self._warn_cache: tuple = (0.0, {})   # (ts, {market: {warning,caution,kinds}}) — 경고 TTL 캐시
+        self._warn_cache: tuple = (0.0, {})   # (ts, {market: {warning,caution,kinds}}) — warning TTL cache
 
-    # ── 인증 ────────────────────────────────────────────────
+    # ── Auth ────────────────────────────────────────────────
     def _make_jwt(self, query: Optional[Dict[str, Any]] = None) -> str:
         if not self.access_key or not self.secret_key:
             raise UpbitAPIError("Upbit API key/secret not configured")
@@ -197,8 +198,8 @@ class UpbitTradeClient:
                 if method == "GET":
                     resp = self._session.get(url, params=query, headers=headers, timeout=self.timeout)
                 elif method == "POST":
-                    # ★ Upbit=form(data=) / Bithumb 2.0=JSON 본문(json=). query_hash 는 둘 다 urlencode 기준.
-                    #   Bithumb 은 form 본문이면 서버가 파싱 실패→query_hash 불일치→401 invalid_query_payload.
+                    # ★ Upbit=form (data=) / Bithumb 2.0=JSON body (json=). query_hash is urlencode-based for both.
+                    #   For Bithumb, a form body makes the server fail to parse → query_hash mismatch → 401 invalid_query_payload.
                     if getattr(self, "_post_as_json", False):
                         resp = self._session.post(url, json=query, headers=headers, timeout=self.timeout)
                     else:
@@ -230,39 +231,39 @@ class UpbitTradeClient:
     def _normalize_symbol(self, symbol: str) -> str:
         return to_upbit_market(symbol)
 
-    # ── 시장 데이터 (인증 불필요) ────────────────────────────
+    # ── Market data (no auth required) ───────────────────────
     def get_all_markets(self) -> List[Dict[str, Any]]:
-        """KRW 마켓 전체 목록. isDetails=true → market_event(warning/caution) 포함."""
+        """Full list of KRW markets. isDetails=true → includes market_event (warning/caution)."""
         data = self._request("GET", "/v1/market/all", query={"isDetails": "true"})
         return [m for m in data if str(m.get("market", "")).startswith("KRW-")]
 
-    # 주의환기(caution) 종류 한글 라벨
+    # Display labels for caution kinds
     _CAUTION_LABELS = {
-        "PRICE_FLUCTUATIONS": "가격급등락",
-        "TRADING_VOLUME_SOARING": "거래량급증",
-        "DEPOSIT_AMOUNT_SOARING": "입금량급증",
-        "GLOBAL_PRICE_DIFFERENCES": "가격차이",
-        "CONCENTRATION_OF_SMALL_ACCOUNTS": "소수계좌집중",
+        "PRICE_FLUCTUATIONS": "price swing",
+        "TRADING_VOLUME_SOARING": "volume surge",
+        "DEPOSIT_AMOUNT_SOARING": "deposit surge",
+        "GLOBAL_PRICE_DIFFERENCES": "price gap",
+        "CONCENTRATION_OF_SMALL_ACCOUNTS": "small-account concentration",
     }
 
     @staticmethod
     def _parse_market_flags(m: Dict[str, Any]) -> Dict[str, Any]:
-        """1개 마켓 dict → {warning, caution, kinds}. market_event(신) + market_warning(구) 둘 다 방어.
-        warning=투자유의(상폐위험) / caution=주의환기. legacy CAUTION 은 보수적으로 warning 취급."""
+        """Single market dict → {warning, caution, kinds}. Defends against both market_event (new) and market_warning (old).
+        warning=investment caution (delisting risk) / caution=caution alert. Legacy CAUTION is conservatively treated as warning."""
         ev = m.get("market_event") or {}
         warning = bool(ev.get("warning"))
         caution_obj = ev.get("caution") or {}
         kinds = [UpbitTradeClient._CAUTION_LABELS.get(k, k)
                  for k, v in caution_obj.items() if v]
         caution = bool(kinds)
-        # 구 필드 fallback: market_warning == "CAUTION" → 투자유의(보수적 차단)
+        # Legacy field fallback: market_warning == "CAUTION" → investment caution (conservative block)
         if str(m.get("market_warning", "")).upper() == "CAUTION":
             warning = True
         return {"warning": warning, "caution": caution, "kinds": kinds}
 
     def get_market_warnings(self, *, ttl: float = 300.0) -> Dict[str, Dict[str, Any]]:
-        """{market: {warning, caution, kinds}} — 거래소 투자유의/주의환기 플래그. TTL 캐시(기본 5분).
-        실패 시 빈 dict(경고정보 없음=차단 안 함, 안전측 fail-open: 거래 자체는 막지 않음)."""
+        """{market: {warning, caution, kinds}} — exchange investment-caution / caution-alert flags. TTL cache (default 5 min).
+        On failure returns an empty dict (no warning info = no block; fail-open on the safe side: trading itself is not blocked)."""
         ts0, cached = self._warn_cache
         if cached and (time.time() - ts0) < ttl:
             return cached
@@ -276,7 +277,7 @@ class UpbitTradeClient:
             return dict(cached) if cached else {}
 
     def get_tickers(self, markets: List[str]) -> List[Dict[str, Any]]:
-        """현재가 스냅샷. markets: ["KRW-BTC", ...] 또는 내부 심볼."""
+        """Current-price snapshot. markets: ["KRW-BTC", ...] or internal symbols."""
         codes = ",".join(self._normalize_symbol(m) for m in markets)
         return self._request("GET", "/v1/ticker", query={"markets": codes})
 
@@ -289,8 +290,8 @@ class UpbitTradeClient:
             return 0.0
 
     def get_orderbook(self, market: str, *, depth: int = 15) -> Dict[str, Any]:
-        """공개 호가창 (인증 불필요). bids(매수)/asks(매도) price+size 정규화.
-        Upbit /v1/orderbook 은 units 가 [{ask_price,bid_price,ask_size,bid_size}, ...]."""
+        """Public order book (no auth required). Normalizes bids (buy) / asks (sell) into price+size.
+        Upbit /v1/orderbook returns units as [{ask_price,bid_price,ask_size,bid_size}, ...]."""
         mk = self._normalize_symbol(market)
         data = self._request("GET", "/v1/orderbook", query={"markets": mk})
         ob = data[0] if isinstance(data, list) and data else (data or {})
@@ -304,16 +305,16 @@ class UpbitTradeClient:
                 continue
         return {
             "market": mk,
-            "bids": bids,                 # 매수 (가격 내림차순: 최우선 매수가가 [0])
-            "asks": asks,                 # 매도 (가격 오름차순: 최우선 매도가가 [0])
+            "bids": bids,                 # buy side (price descending: best bid at [0])
+            "asks": asks,                 # sell side (price ascending: best ask at [0])
             "ts": ob.get("timestamp", 0),
         }
 
     def get_kline(self, symbol: str, interval: str = "240", limit: int = 50) -> List[list]:
-        """캔들 조회. ★ Bybit get_kline 과 동일 포맷으로 반환:
+        """Fetch candles. ★ Returns the same format as Bybit get_kline:
         [[ts_ms, open, high, low, close, volume, turnover], ...] (oldest first)
 
-        Upbit candle API는 최신 먼저 오므로 reversed() 로 뒤집는다(가이드 §10.3).
+        The Upbit candle API returns newest-first, so we reverse() it (guide §10.3).
         """
         mk = self._normalize_symbol(symbol)
         kind, unit = _kline_endpoint(interval)
@@ -325,7 +326,7 @@ class UpbitTradeClient:
         path = f"/v1/candles/{kind}" + (f"/{unit}" if unit else "")
         raw = self._request("GET", path, query={"market": mk, "count": lim})
         out: List[list] = []
-        for c in reversed(raw):  # ★ 최신 먼저 → oldest first
+        for c in reversed(raw):  # ★ newest-first → oldest first
             try:
                 out.append([
                     int(c.get("timestamp", 0)),
@@ -342,7 +343,7 @@ class UpbitTradeClient:
             self._kline_cache[ck] = (time.time(), out)
         return out
 
-    # ── 잔고 (인증) ─────────────────────────────────────────
+    # ── Balances (auth) ─────────────────────────────────────
     def accounts(self, *, skip_currencies: Optional[List[str]] = None, **kw) -> List[Dict[str, Any]]:
         data = self._request("GET", "/v1/accounts", auth=True)
         skip = set(skip_currencies or [])
@@ -376,7 +377,7 @@ class UpbitTradeClient:
             logger.error("[UpbitTrade] get_balance %s error: %s", currency, e)
             return 0.0
 
-    # ── 주문 (인증) ─────────────────────────────────────────
+    # ── Orders (auth) ───────────────────────────────────────
     def place_order(self, *, market: str, side: str, ord_type: str,
                     volume: Optional[float] = None, price: Optional[float] = None, **kw) -> Dict[str, Any]:
         mk = self._normalize_symbol(market)
@@ -390,7 +391,7 @@ class UpbitTradeClient:
         return self._convert_order(self._request("POST", "/v1/orders", query=query, auth=True))
 
     def market_buy(self, market: str, quote_amount: float, **kw) -> Dict[str, Any]:
-        """시장가 매수 — KRW 금액 기준 (ord_type='price')."""
+        """Market buy — KRW amount based (ord_type='price')."""
         amt = float(quote_amount)
         if amt < self.MIN_ORDER_KRW:
             raise UpbitAPIError(f"Amount {amt} < min {self.MIN_ORDER_KRW} KRW for {market}")
@@ -402,7 +403,7 @@ class UpbitTradeClient:
         return self._convert_order(self._request("POST", "/v1/orders", query=query, auth=True))
 
     def market_sell(self, market: str, qty: float, **kw) -> Dict[str, Any]:
-        """시장가 매도 — 수량 기준 (ord_type='market')."""
+        """Market sell — quantity based (ord_type='market')."""
         q = float(qty)
         if q <= 0:
             raise UpbitAPIError(f"Sell qty must be > 0: {q}")
@@ -411,7 +412,7 @@ class UpbitTradeClient:
         query = {"market": mk, "side": "ask", "ord_type": "market", "volume": str(q)}
         return self._convert_order(self._request("POST", "/v1/orders", query=query, auth=True))
 
-    # 별칭 (Bybit 호환)
+    # Aliases (Bybit compatibility)
     def market_buy_usdt(self, market, amount, **kw):
         return self.market_buy(market, amount, **kw)
 
@@ -433,7 +434,7 @@ class UpbitTradeClient:
         return self._convert_order(self._request("DELETE", "/v1/order", query={"uuid": uuid}, auth=True))
 
     def open_orders(self, market: str, *, side: Optional[str] = None) -> List[Dict[str, Any]]:
-        """미체결 주문 목록 (GET /v1/orders/open). side='ask'/'bid' 필터 옵션."""
+        """List of open orders (GET /v1/orders/open). Optional side='ask'/'bid' filter."""
         mk = self._normalize_symbol(market)
         raw = self._request("GET", "/v1/orders/open", query={"market": mk}, auth=True)
         out = []
@@ -465,11 +466,11 @@ class UpbitTradeClient:
         return last
 
     def _convert_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
-        """Upbit 주문 응답 → 내부 공통 dict. Upbit가 bid/ask·wait/done/cancel 원조라 거의 1:1."""
+        """Upbit order response → internal common dict. Almost 1:1 since Upbit is the origin of bid/ask · wait/done/cancel."""
         if not isinstance(order, dict):
             return {}
-        # ★ 실제 체결 평단 — Upbit 시장가는 avg_price 필드가 없어 trades 에서 가중평균 계산.
-        #   (체결가가 정확해야 entry_price·TP·SL 이 실제 진입가 기준으로 맞음)
+        # ★ Actual fill average price — Upbit market orders have no avg_price field, so compute a weighted average from trades.
+        #   (an accurate fill price is needed so entry_price · TP · SL line up with the real entry)
         avg_price = float(order.get("avg_price") or 0)
         if avg_price <= 0:
             tot_v = tot_f = 0.0

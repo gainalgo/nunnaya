@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _bybit_session: Optional[requests.Session] = None
 
 def _get_bybit_session() -> requests.Session:
-    """TCP/SSL 연결 재사용 + ConnectionError 자동 재시도 세션."""
+    """Session reusing TCP/SSL connections with automatic ConnectionError retries."""
     global _bybit_session
     if _bybit_session is None:
         _bybit_session = requests.Session()

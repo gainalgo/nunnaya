@@ -1,13 +1,13 @@
 """
-News Sentiment Module — CryptoPanic API 연동
+News Sentiment Module — CryptoPanic API integration
 
-뉴스 감성을 거래 판단에 반영 (ON/OFF 토글로 비교 가능).
-fear_greed.py 패턴을 그대로 복제한 독립 모듈.
+Feeds news sentiment into trading decisions (comparable via ON/OFF toggle).
+Standalone module that mirrors the fear_greed.py pattern.
 
 - FOCUS: conviction bonus (±2)
 - Nunnaya: budget multiplier (0.70~1.30)
-- 실패 시 항상 neutral 반환 (1.0x, bonus 0)
-- config 파일 없으면 기본값 (둘 다 OFF)
+- Always returns neutral on failure (1.0x, bonus 0)
+- Defaults if config file missing (both OFF)
 """
 
 from __future__ import annotations
@@ -35,8 +35,8 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "focus_enabled": False,
     "nunnaya_enabled": False,
     "api_key": "",
-    "cache_sec": 1800,       # 30분
-    "max_stale_sec": 7200,   # 2시간
+    "cache_sec": 1800,       # 30 min
+    "max_stale_sec": 7200,   # 2 hours
 }
 
 
@@ -67,7 +67,7 @@ class NewsSentimentResult:
     score: float                        # -1.0 ~ +1.0
     label: str                          # "Very Bearish" ~ "Very Bullish"
     budget_multiplier: float            # 0.70 ~ 1.30
-    conviction_bonus: float             # [2026-05-17 100점 ×10] -20.0 ~ +20.0
+    conviction_bonus: float             # [2026-05-17 100-pt ×10] -20.0 ~ +20.0
     headlines: List[Dict[str, Any]] = field(default_factory=list)
     timestamp: float = 0.0
     source: str = "fallback"            # "api", "cache", "cache_stale", "fallback"
@@ -85,7 +85,7 @@ class NewsSentimentResult:
         }
 
 
-# ── Score → Label / Multiplier / Bonus 변환 ─────────────────────────
+# ── Score → Label / Multiplier / Bonus conversion ───────────────────
 
 def _score_to_label(score: float) -> str:
     if score <= -0.6:
@@ -110,7 +110,7 @@ def _score_to_multiplier(score: float) -> float:
 
 
 def _score_to_conviction_bonus(score: float) -> float:
-    """[2026-05-17 100점 ×10] score -1.0~+1.0 → conviction bonus -20.0~+20.0.
+    """[2026-05-17 100-pt ×10] score -1.0~+1.0 → conviction bonus -20.0~+20.0.
 
     Thresholds: |score| >= 0.6 → ±20, |score| >= 0.3 → ±10, else 0
     """
@@ -208,9 +208,9 @@ def _parse_cryptopanic_response(data: Dict[str, Any], coin: str) -> NewsSentimen
 
 
 def _analyze_sentiment_keywords(title: str) -> str:
-    """간단한 키워드 매칭 sentiment 분석 (2026-05-18 RSS 도입).
+    """Simple keyword-matching sentiment analysis (RSS introduced 2026-05-18).
 
-    1차 단순 모델 — 향후 AI 분석/카테고리 모델로 진화 가능.
+    First-pass simple model — can evolve into AI analysis / category models later.
     Returns: "bullish" / "bearish" / "neutral"
     """
     if not title:
@@ -257,9 +257,9 @@ def _neutral_result(coin: str = "ALL") -> NewsSentimentResult:
 class NewsSentiment:
     """News Sentiment Engine.
 
-    - CryptoPanic API로 뉴스 감성 수집
-    - 코인별/전체 감성 점수 + 예산 배율 + conviction 보너스
-    - 30분 캐시, 실패 시 neutral fallback
+    - Collects news sentiment via the CryptoPanic API
+    - Per-coin / overall sentiment score + budget multiplier + conviction bonus
+    - 30-min cache, neutral fallback on failure
     """
 
     def __init__(self):
@@ -323,7 +323,7 @@ class NewsSentiment:
         # Fetch from API
         try:
             result = self._fetch_from_api(coin)
-            # ★ [2026-05-18] "rss" 도 valid source (CryptoPanic 죽은 후 RSS 추가)
+            # ★ [2026-05-18] "rss" is also a valid source (added after CryptoPanic died)
             if result.source in ("api", "rss"):
                 self._cache[coin] = result
                 return result
@@ -359,24 +359,24 @@ class NewsSentiment:
     # ── API Fetch ────────────────────────────────────────────────
 
     def _fetch_from_api(self, coin: str) -> NewsSentimentResult:
-        """Fetch news from RSS feeds (primary, 2026-05-18 / 2026-05-19 정리).
+        """Fetch news from RSS feeds (primary, cleaned up 2026-05-18 / 2026-05-19).
 
-        ★ [2026-05-19 부모님 정정] CryptoPanic 죽은 endpoint 호출 자체 skip.
-        로그 noise (404) 발생 + 호출 시간 낭비 = 가치 X.
-        옛 CryptoPanic 코드 = config flag `cryptopanic_fallback_enabled` (default False) 로 보존.
-        새 endpoint 부활 시 flag ON 으로 재활성 가능.
+        ★ [2026-05-19 owner correction] Skip calling the dead CryptoPanic endpoint entirely.
+        It produces log noise (404) and wastes call time = no value.
+        Old CryptoPanic code is preserved behind config flag `cryptopanic_fallback_enabled` (default False).
+        Can be reactivated by turning the flag ON if a new endpoint appears.
         """
         if httpx is None:
             return _neutral_result(coin)
 
-        # 1. RSS 우선 (무료 + 작동 보장) — 사실상 유일한 소스
+        # 1. RSS first (free + guaranteed to work) — effectively the only source
         rss_result = self._fetch_rss(coin)
         if rss_result.source == "rss":
             return rss_result
 
-        # 2. CryptoPanic 폴백 — 2026-05-19 default OFF (죽은 endpoint, 404 noise)
+        # 2. CryptoPanic fallback — default OFF since 2026-05-19 (dead endpoint, 404 noise)
         if not self.config.get("cryptopanic_fallback_enabled", False):
-            return rss_result  # neutral 이라도 RSS 결과 그대로
+            return rss_result  # return the RSS result as-is, even if neutral
 
         api_key = self.config.get("api_key", "")
         if api_key:
@@ -405,16 +405,16 @@ class NewsSentiment:
     def _fetch_public(self, coin: str) -> NewsSentimentResult:
         """Fetch from CryptoPanic public endpoint (no API key).
 
-        ★ [2026-05-18 부모님 정정] CryptoPanic 옛 v1 endpoint 죽음 (404). RSS 로 대체.
-        본 함수는 호환성 유지용 — 실제로는 _fetch_rss() 호출.
+        ★ [2026-05-18 owner correction] CryptoPanic's old v1 endpoint is dead (404). Replaced by RSS.
+        This function is kept for compatibility — actually calls _fetch_rss().
         """
         return self._fetch_rss(coin)
 
     def _fetch_rss(self, coin: str) -> NewsSentimentResult:
-        """RSS feed 기반 뉴스 sentiment (2026-05-18 부모님 결정 — CryptoPanic 죽은 후 대체).
+        """RSS-feed-based news sentiment (owner decision 2026-05-18 — replacement after CryptoPanic died).
 
-        무료 + key X + 다중 소스 (CoinDesk + Cointelegraph + Decrypt).
-        Sentiment 분석 = 키워드 매칭 (1차 단순). 향후 AI 분석으로 진화 가능.
+        Free + no key + multiple sources (CoinDesk + Cointelegraph + Decrypt).
+        Sentiment analysis = keyword matching (first-pass simple). Can evolve into AI analysis later.
         """
         if httpx is None:
             return _neutral_result(coin)
@@ -443,7 +443,7 @@ class NewsSentiment:
                         title = (title_el.text or "").strip() if title_el is not None else ""
                         if not title:
                             continue
-                        # Coin filter (ALL 이면 모두, 그 외엔 제목에 코인 심볼 포함된 것만)
+                        # Coin filter (ALL = all; otherwise only titles containing the coin symbol)
                         title_upper = title.upper()
                         if coin_upper not in ("ALL", "GOLD", "SILVER"):
                             if coin_upper not in title_upper:
@@ -451,7 +451,7 @@ class NewsSentiment:
                         elif coin_upper == "GOLD":
                             if "GOLD" not in title_upper and "XAU" not in title_upper:
                                 continue
-                        # Sentiment 분석
+                        # Sentiment analysis
                         sentiment = _analyze_sentiment_keywords(title)
                         if sentiment == "bullish":
                             bullish_count += 1
@@ -475,7 +475,7 @@ class NewsSentiment:
         if total == 0:
             return _neutral_result(coin)
 
-        # Score: bullish/bearish 비율 (-1.0 ~ +1.0)
+        # Score: bullish/bearish ratio (-1.0 ~ +1.0)
         score = (bullish_count - bearish_count) / total
         score = max(-1.0, min(1.0, score))
 
@@ -499,7 +499,7 @@ class NewsSentiment:
         # Overall sentiment (ALL or average of cached)
         overall = all_cached.get("ALL", _neutral_result("ALL").to_dict())
 
-        # [2026-04-09 보안] api_key 마스킹 후 반환
+        # [2026-04-09 security] mask api_key before returning
         safe_config = dict(self.config)
         _ak = safe_config.get("api_key", "")
         safe_config["api_key"] = (_ak[:4] + "****") if len(_ak) > 4 else ("****" if _ak else "")

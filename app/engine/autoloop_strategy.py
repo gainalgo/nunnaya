@@ -39,11 +39,11 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-# 마켓별 백그라운드 HTTP 작업 중복 방지
+# Prevent duplicate background HTTP work per market
 _bootstrap_inflight: set = set()
 _autotune_inflight: set = set()
 _inflight_lock = threading.Lock()
-# 동시 HTTP 작업 수 제한 — GIL 경합 및 Bybit 429 방지 (1개씩 순차 처리)
+# Limit concurrent HTTP work — avoid GIL contention and Bybit 429 (one at a time)
 _http_semaphore = threading.Semaphore(1)
 
 
@@ -375,16 +375,16 @@ def _maybe_bootstrap(st: _AutoloopState, market: str, *, bar_sec: int, bootstrap
     if unit_min not in {1, 3, 5, 10, 15, 30, 60, 240}:
         return {"boot": "unsupported_unit", "unit_min": unit_min}
 
-    # [PERF] 백그라운드 스레드에서 HTTP 호출 — tick 이벤트 루프 블로킹 방지
+    # [PERF] Run HTTP call in a background thread — avoid blocking the tick event loop
     with _inflight_lock:
         if market in _bootstrap_inflight:
             return {"boot": "pending"}
         _bootstrap_inflight.add(market)
 
-    st.last_bootstrap_ts = now  # 쿨다운 시작
+    st.last_bootstrap_ts = now  # start cooldown
 
     def _bg(_st=st, _m=market, _u=unit_min, _cnt=bootstrap_count, _min=bootstrap_min_bars, _to=timeout):
-        with _http_semaphore:  # 동시 HTTP 2개 제한
+        with _http_semaphore:  # limit concurrent HTTP
             try:
                 closes = _fetch_candle_closes(_m, unit_min=_u, count=int(_cnt), timeout=float(_to))
                 if closes:
@@ -494,7 +494,8 @@ def _maybe_autotune(
     """One-shot per-market auto-tuning.
 
     Updates st.tuned_params / st.tuned_summary in-place.
-    context가 있으면 튠 결과를 ctx.set_var()로 저장하여 재기동 시 즉시 복원.
+    If context is provided, the tune result is saved via ctx.set_var() so it is
+    restored immediately on restart.
     """
     if not bool(tune_on_boot):
         return
@@ -505,7 +506,7 @@ def _maybe_autotune(
     if st.tuned:
         return
 
-    # 재기동 복원: ctx에 저장된 튠 결과가 있으면 즉시 적용 (API 호출 불필요)
+    # Restart restore: if a tune result is saved in ctx, apply it immediately (no API call needed)
     if context is not None and not st.tuned:
         try:
             saved = context.get_var("al_tuned_params")
@@ -526,19 +527,19 @@ def _maybe_autotune(
                     st.tune_emit_once = True
                     return
         except (TypeError, ValueError) as exc:
-            logger.warning("[AUTOLOOP] 재기동 복원: ctx에 저장된 튠 결과가 있으면 즉시 적용 (API 호출 불필요): %s", exc, exc_info=True)
+            logger.warning("[AUTOLOOP] restart restore: apply saved tune result from ctx: %s", exc, exc_info=True)
 
     # Avoid spamming public endpoints on repeated ticks.
     if st.tuned_ts and (now - float(st.tuned_ts)) < float(attempt_cooldown_sec):
         return
 
-    # [PERF] 백그라운드 스레드에서 HTTP 호출 — tick 이벤트 루프 블로킹 방지
+    # [PERF] Run HTTP call in a background thread — avoid blocking the tick event loop
     with _inflight_lock:
         if market in _autotune_inflight:
             return
         _autotune_inflight.add(market)
 
-    st.tuned_ts = now  # record attempt time (cooldown 시작)
+    st.tuned_ts = now  # record attempt time (cooldown start)
 
     def _bg_tune(
         _st=st, _m=market, _now=now,
@@ -547,7 +548,7 @@ def _maybe_autotune(
         _alpha=tune_alpha, _strength=tune_strength, _min_gap=tune_min_gap,
         _base_buy=base_rsi_buy, _base_sell=base_rsi_sell, _context=context,
     ):
-        with _http_semaphore:  # 동시 HTTP 2개 제한 — GIL 경합 방지
+        with _http_semaphore:  # limit concurrent HTTP — avoid GIL contention
             try:
                 res = _autotune_from_timeframes(
                     _m,
@@ -682,7 +683,7 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
     if iv > 0:
         last_ok = float(getattr(st, "tuned_applied_ts", 0.0) or 0.0)
         if last_ok > 0 and (now - last_ok) >= iv:
-            # 재튜닝 만료 처리
+            # Retune-expiry handling
             st.tuned = False
             st.tune_emit_once = False
             st.tuned_ts = 0.0
@@ -692,11 +693,11 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
                 "reason": "periodic_retune_due",
                 "interval_sec": iv,
             }
-            # ✅ 다음 튜닝 결과가 나오면 controls에 다시 반영되도록 리셋
+            # ✅ Reset so the next tune result is re-applied to controls
             try:
                 st.applied_for_tuned_ts = 0.0
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-                logger.warning("[AUTOLOOP] 다음 튜닝 결과가 나오면 controls에 다시 반영되도록 리셋: %s", exc, exc_info=True)
+                logger.warning("[AUTOLOOP] reset so next tune result re-applies to controls: %s", exc, exc_info=True)
 
 
     # ---- Config (safe defaults) ----
@@ -706,7 +707,7 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
     bootstrap_timeout = float(params.get("bootstrap_timeout_sec", 3.0))
 
     rsi_len = int(params.get("rsi_len", 14))
-    # [2026-05-30] 부모님 결단 5️⃣ A 보수화 — RSI buy 28 → 26 (더 깊은 oversold만 진입)
+    # [2026-05-30] Owner decision 5️⃣ A tightening — RSI buy 28 → 26 (enter only on deeper oversold)
     rsi_buy_base = float(params.get("rsi_buy", 26.0))
     rsi_sell_base = float(params.get("rsi_sell", 58.0))
 
@@ -813,11 +814,11 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
     has_pos = bool(pos) and float(pos.get("qty", 0) or 0) > 0
     # ------------------------------------------------------------
     # APPLY TUNED PARAMS INTO CONTROLS (persist + staged entry params)
-    # - st.tuned_params(rsi_buy_base/rsi_sell_base) -> controls.strategy.params 저장
-    # - 분할 매수(2~3단) 파라미터도 함께 저장:
-    #   * buy_splits: [1차, 2차, 3차] 비중 (합 1.0)
-    #   * add_buy_drop_pcts: [2차 트리거, 3차 트리거] (%; 음수)
-    # - 주기 재튜닝 시각을 next_retune_ts로 기록 → 대시보드에서 변동 확인
+    # - st.tuned_params(rsi_buy_base/rsi_sell_base) -> saved to controls.strategy.params
+    # - Staged buy (2-3 stages) params are also saved:
+    #   * buy_splits: [stage1, stage2, stage3] weights (sum 1.0)
+    #   * add_buy_drop_pcts: [stage2 trigger, stage3 trigger] (%; negative)
+    # - Record periodic retune time as next_retune_ts -> visible on the dashboard
     # ------------------------------------------------------------
     try:
         apply_to_controls = bool(params.get("apply_tuned_to_controls", True))
@@ -826,17 +827,17 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
             tuned_ts = float(getattr(st, "tuned_ts", 0.0) or 0.0)
             applied_for = float(getattr(st, "applied_for_tuned_ts", 0.0) or 0.0)
 
-            # 새로 튜닝된 경우에만 반영
+            # Apply only when newly tuned
             if tuned_ts > 0.0 and tuned_ts != applied_for:
 
                 buy_tuned = float(st.tuned_params.get("rsi_buy_base", rsi_buy_base))
                 sell_tuned = float(st.tuned_params.get("rsi_sell_base", rsi_sell_base))
 
-                # 안전 클램프
+                # Safety clamp
                 buy_tuned = max(15.0, min(55.0, buy_tuned))
                 sell_tuned = max(max(buy_tuned + 6.0, 45.0), min(90.0, sell_tuned))
 
-                # 변동성 proxy: 튜닝 요약의 macd_span_abs_pct 사용(추가 계산 없음)
+                # Volatility proxy: use macd_span_abs_pct from the tune summary (no extra calc)
                 vol_proxy = None
                 try:
                     vol_proxy = float((st.tuned_summary or {}).get("macd_span_abs_pct"))
@@ -874,7 +875,7 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
                         buy_splits = [0.30, 0.30, 0.40]
                         add_buy_drop_pcts = [-1.2, -3.0]
 
-                # 과매매 방지: RSI gap이 좁으면 1차 더 줄이고 트리거 더 깊게
+                # Overtrading guard: if the RSI gap is narrow, shrink stage1 more and deepen triggers
                 gap = float(sell_tuned - buy_tuned)
                 if gap < 10.0:
                     buy_splits = [max(0.12, buy_splits[0] * 0.90), buy_splits[1], buy_splits[2]]
@@ -882,7 +883,7 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
                     buy_splits = [x / s for x in buy_splits]
                     add_buy_drop_pcts = [add_buy_drop_pcts[0] - 0.2, add_buy_drop_pcts[1] - 0.4]
 
-                # 주기 재튜닝 정보 기록(대시보드 표시용)
+                # Record periodic retune info (for dashboard display)
                 try:
                     env_iv = float(os.getenv("AUTOLOOP_RETUNE_INTERVAL_SEC", "3600") or 3600)
                 except (TypeError, ValueError):
@@ -895,7 +896,7 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
                     iv = env_iv
                 next_retune_ts = (time.time() + iv) if iv > 0 else None
 
-                # controls 저장
+                # Save controls
                 context.update_controls({
                     "strategy": {
                         "params": {
@@ -913,12 +914,12 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
                     }
                 })
 
-                # 적용 마킹
+                # Mark as applied
                 st.applied_for_tuned_ts = tuned_ts
                 st.tuned_applied_ts = float(time.time())
 
     except (OSError, KeyError, IndexError, AttributeError, TypeError, ValueError, OverflowError) as exc:
-        logger.warning("[AUTOLOOP] 적용 마킹: %s", exc, exc_info=True)
+        logger.warning("[AUTOLOOP] mark-as-applied: %s", exc, exc_info=True)
 
 
 
@@ -1091,7 +1092,7 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
         dev_buy_pct = dev_buy_pct_base + 0.15
 
     # ---- Filters ----
-    # [2026-05-30] 부모님 결단 5️⃣ C ATR 동적 — 변동성 큰 코인 = 가드 강화 / 작은 코인 = 관용
+    # [2026-05-30] Owner decision 5️⃣ C dynamic ATR — high-volatility coin = stronger guard / low-volatility coin = lenient
     _atr_val = None
     _atr_pct = 0.0
     try:
@@ -1101,14 +1102,14 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
     except (KeyError, AttributeError, TypeError, ValueError, ZeroDivisionError):
         _atr_pct = 0.0
 
-    # Volatility max: max(default 1.8%, ATR%×1.5) — 변동성 큰 코인은 더 관용
+    # Volatility max: max(default 1.8%, ATR%×1.5) — more lenient for high-volatility coins
     effective_max_vol = max(max_vol_pct, _atr_pct * 1.5) if _atr_pct > 0 else max_vol_pct
     vol_ok = vol_pct <= effective_max_vol
 
     knife_drop = 0.0
     if len(closes) >= knife_lookback + 1 and closes[-(knife_lookback + 1)] > 0:
         knife_drop = (closes[-1] / closes[-(knife_lookback + 1)] - 1.0) * 100.0
-    # Knife guard: max(보수화 1.5%, ATR%×1.0) — 변동성 큰 코인 = 더 강한 컷 보호
+    # Knife guard: max(conservative 1.5%, ATR%×1.0) — high-volatility coin = stronger cut protection
     effective_knife_pct = max(1.5, max(knife_drop_pct, _atr_pct * 1.0)) if _atr_pct > 0 else max(1.5, knife_drop_pct)
     knife_ok = knife_drop >= -abs(effective_knife_pct)
 
@@ -1125,8 +1126,8 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
     reason = "hold"
 
     # Mean-reversion entry (baseline)
-    # [2026-05-30] 부모님 결단 5️⃣ A 보수화 — BEAR regime mean-reversion 진입 차단
-    # BEAR 에서는 bear_rebound 만 허용 (line 1165~ br_enabled). 일반 MR 진입 X
+    # [2026-05-30] Owner decision 5️⃣ A tightening — block mean-reversion entry in BEAR regime
+    # In BEAR, only bear_rebound is allowed (line 1165~ br_enabled). No plain MR entry.
     mr_entry_ok = (
         (regime != "BEAR")
         and (rsi_now <= rsi_buy)
@@ -1204,14 +1205,14 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
         }
 
 
-    # ---- Trailing Stop (시간대별 배율 적용) ----
-    trailing_base = float(params.get("trailing_pct", 0.8))  # 기본값 0.8%
+    # ---- Trailing Stop (time-of-day multiplier applied) ----
+    trailing_base = float(params.get("trailing_pct", 0.8))  # default 0.8%
     time_mult = get_time_volatility_multiplier()
     trailing_pct = trailing_base * time_mult
 
     exit_trailing_hit = False
     if has_pos:
-        # 최고가 대비 하락률 계산
+        # Compute drawdown from the high price
         try:
             entry_price = float(pos.get("entry_price", 0))
             high_price = float(pos.get("high_price", 0))
@@ -1220,7 +1221,7 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
                 drawdown = (high_price - cur_price) / high_price * 100.0
                 exit_trailing_hit = drawdown >= trailing_pct
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[AUTOLOOP] 최고가 대비 하락률 계산: %s", exc, exc_info=True)
+            logger.warning("[AUTOLOOP] drawdown-from-high computation: %s", exc, exc_info=True)
 
     exit_ok = (
         ((rsi_now >= rsi_sell) and macd_turning_down and (z >= 0.0) and vol_ok)
@@ -1250,7 +1251,7 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
 
     if signal == "buy":
         # --------------------------------------------------------
-        # PATCH: 잔고 부족 시 매수 신호 억제 (로그 스팸 방지)
+        # PATCH: suppress buy signal when balance is insufficient (avoid log spam)
         # --------------------------------------------------------
         capital = 0.0
         try:
@@ -1267,7 +1268,7 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
             try:
                 min_order = float(params.get("min_order_usdt") or Q.min_order)
             except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[AUTOLOOP] min_order_usdt 파싱 실패: %s", exc, exc_info=True)
+                logger.warning("[AUTOLOOP] min_order_usdt parse failed: %s", exc, exc_info=True)
 
         if capital < min_order:
             signal = "hold"
@@ -1307,7 +1308,7 @@ def decide_detail(context: Any, price: float, params: Optional[Dict[str, Any]] =
             "dev_buy_pct": dev_buy_pct,
             "max_vol_pct": max_vol_pct,
             "knife_drop_pct": knife_drop_pct,
-            # [2026-05-30] ATR 동적 적용 후 실효 임계 (부모님 검증용)
+            # [2026-05-30] Effective thresholds after dynamic ATR (for owner verification)
             "atr_pct": round(_atr_pct, 3),
             "effective_max_vol_pct": round(effective_max_vol, 3),
             "effective_knife_pct": round(effective_knife_pct, 3),

@@ -2,9 +2,9 @@
 # File: app/ui/i18n/translator.py
 # ------------------------------------------------------------
 # Translator
-# - 다국어 지원을 위한 중앙 번역기 모듈
-# - i18n 디렉터리의 .json 파일들을 로드하여 번역 제공
-# - FastAPI, UI 등 프로젝트 전반에서 사용될 수 있음
+# - Central translation module for multi-language support
+# - Loads .json files from the i18n directory to provide translations
+# - Can be used across the project (FastAPI, UI, etc.)
 # ============================================================
 
 import json
@@ -17,16 +17,16 @@ logger = logging.getLogger(__name__)
 
 class Translator:
     """
-    JSON 기반의 다국어 번역을 처리하는 클래스.
+    A class that handles JSON-based multi-language translation.
     """
 
     def __init__(self, lang_dir: str, default_lang: str = "en"):
         """
-        지정된 디렉터리에서 언어 파일(.json)을 로드합니다.
+        Loads language files (.json) from the specified directory.
 
         Args:
-            lang_dir (str): 'ko.json', 'en.json' 등이 위치한 디렉터리 경로.
-            default_lang (str): 번역을 찾지 못했을 때 사용할 기본 언어.
+            lang_dir (str): Path to the directory containing 'ko.json', 'en.json', etc.
+            default_lang (str): Default language used when a translation is not found.
         """
         self.lang_dir = lang_dir
         self.default_lang = default_lang
@@ -34,7 +34,7 @@ class Translator:
         self._load_languages()
 
     def _load_languages(self):
-        """디렉터리 내의 모든 .json 파일을 로드하여 메모리에 저장합니다."""
+        """Loads all .json files in the directory and stores them in memory."""
         if not os.path.isdir(self.lang_dir):
             logger.warning("Language directory not found at '%s'", self.lang_dir)
             return
@@ -51,20 +51,20 @@ class Translator:
 
     def get(self, key: str, lang: str, fallback: Optional[str] = None) -> str:
         """
-        주어진 키와 언어에 대한 번역된 문자열을 반환합니다.
+        Returns the translated string for the given key and language.
 
-        - 1순위: 요청된 언어(lang)에서 키를 찾습니다.
-        - 2순위: 기본 언어(default_lang)에서 키를 찾습니다.
-        - 3순위: fallback이 제공되면 그것을 반환합니다.
-        - 4순위: 키 자체를 반환합니다.
+        - Priority 1: Look up the key in the requested language (lang).
+        - Priority 2: Look up the key in the default language (default_lang).
+        - Priority 3: Return the fallback if one is provided.
+        - Priority 4: Return the key itself.
 
         Args:
-            key (str): 번역 키 (예: "action.add").
-            lang (str): 언어 코드 (예: "ko", "en").
-            fallback (Optional[str]): 모든 경우에 실패했을 때 반환할 기본 문자열.
+            key (str): Translation key (e.g., "action.add").
+            lang (str): Language code (e.g., "ko", "en").
+            fallback (Optional[str]): Default string to return when all lookups fail.
 
         Returns:
-            str: 번역된 문자열.
+            str: The translated string.
         """
         return self.translations.get(lang, {}).get(
             key,
@@ -73,10 +73,10 @@ class Translator:
             ),
         )
 
-# --- 전역 인스턴스 생성 ---
-# 애플리케이션 전체에서 쉽게 접근할 수 있도록 싱글턴처럼 사용
+# --- Create global instance ---
+# Used like a singleton for easy access throughout the application
 
-# 이 파일의 위치를 기준으로 i18n 디렉터리 경로를 설정
+# Set the i18n directory path relative to this file's location
 I18N_DIR = os.path.dirname(os.path.abspath(__file__))
 
 translator = Translator(lang_dir=I18N_DIR, default_lang="en")

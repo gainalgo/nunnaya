@@ -124,14 +124,14 @@ def build_reserved_candidates(
     sn_n = max(0, int(sniper_n))
 
     # Scan universe constraints
-    # 0 = full-universe (default): 전체 USDT 마켓을 후보군으로 사용
+    # 0 = full-universe (default): use all USDT markets as the candidate pool
     pp_scan = int(scan_top_pingpong) if scan_top_pingpong is not None else _si(os.getenv("OMA_SELECTOR_PINGPONG_SCAN_TOP", "0"), 0)
     al_scan = int(scan_top_autoloop) if scan_top_autoloop is not None else _si(os.getenv("OMA_SELECTOR_AUTOLOOP_SCAN_TOP", "0"), 0)
     pp_scan = max(0, min(pp_scan, 500))
     al_scan = max(0, min(al_scan, 500))
 
-    # Reserved Settings: 공통 후보 금액대 필터 (USDT)
-    # [2026-03-03] candidate_price_min_usdt 기본값을 $0.001로 설정 (저가 코인 제외)
+    # Reserved Settings: shared candidate price-band filter (USDT)
+    # [2026-03-03] candidate_price_min_usdt default set to $0.001 (exclude low-price coins)
     _price_min_default = "0.001" if Q.is_usdt else "100"
     candidate_price_min_usdt = _sf(getattr(system, "reserved_candidate_price_min_usdt", 0.0) or 0.0, 0.0)
     if candidate_price_min_usdt <= 0:
@@ -173,7 +173,7 @@ def build_reserved_candidates(
     ct_max = _sf(os.getenv("OMA_SELECTOR_CONTRARIAN_MAX_USDT", "100"), 100.0)
 
     # -------------------------
-    # [2026-02-01] 과거 성과 기반 스코어 조정을 위한 PnL 캐시 로드
+    # [2026-02-01] Load PnL cache for historical-performance-based score adjustment
     # -------------------------
     pnl_cache: Dict[str, Dict[str, Any]] = {}
     use_pnl_history = os.getenv("OMA_SELECTOR_USE_PNL_HISTORY", "1").strip() != "0"
@@ -181,7 +181,7 @@ def build_reserved_candidates(
         pnl_cache = _load_market_pnl_cache(system)
 
     # -------------------------
-    # 동적 예산 배분: 총 자본 조회
+    # Dynamic budget allocation: look up total capital
     # -------------------------
     total_capital_usdt = 0.0
     existing_markets_count = 0
@@ -193,7 +193,7 @@ def build_reserved_candidates(
             equity = _sf(getattr(system, "_last_equity_usdt", 0.0), 0.0)
             if equity <= 0:
                 equity = _sf(getattr(system, "equity", 0.0), 0.0)
-            # fallback: cash 사용
+            # fallback: use cash
             if equity <= 0:
                 equity = _sf(getattr(system, "_last_cash_usdt", 0.0), 0.0)
             deploy_ratio = _sf(getattr(system, "deploy_ratio", 1.0), 1.0)
@@ -203,7 +203,7 @@ def build_reserved_candidates(
                 f"[reserved_selector] equity={equity:.0f}, deploy_ratio={deploy_ratio:.2f}, total_capital_usdt={total_capital_usdt:.0f}"
             )
 
-            # 기존 활성 마켓 수
+            # Count of existing active markets
             try:
                 oma = getattr(system, "oma_registry", None)
                 if oma and hasattr(oma, "snapshot"):
@@ -224,9 +224,9 @@ def build_reserved_candidates(
     entry_ob_depth_bps = _sf(getattr(system, "entry_ob_depth_bps", 0.0) or 0.0, 0.0)
     entry_ob_depth_factor = _sf(getattr(system, "entry_ob_depth_factor", 0.0) or 0.0, 0.0)
 
-    # [2026-03-08] 추천 선별용 스프레드 기준 분리
-    # 매수 진입 가드(entry_ob_max_spread_bps)는 실제 주문 시 적용되므로 여기서는
-    # 추천 후보 풀을 넓게 잡아야 한다. 기본값 80bps (진입가드 25bps와 별도)
+    # [2026-03-08] Separate spread threshold for recommendation selection.
+    # The buy-entry guard (entry_ob_max_spread_bps) is applied at actual order time, so here
+    # the recommendation candidate pool should be kept wide. Default 80bps (separate from the 25bps entry guard)
     _selector_spread_bps = _sf(
         os.getenv("OMA_SELECTOR_MAX_SPREAD_BPS", "0"), 0.0
     )
@@ -253,21 +253,21 @@ def build_reserved_candidates(
     if global_exclude_bases:
         skip_currencies = sorted(set(skip_currencies) | set(global_exclude_bases))
 
-    # SNIPER 기본 제외 베이스 코인 (기본: BTC)
+    # SNIPER default excluded base coins (default: BTC)
     sniper_exclude_bases_raw = os.getenv("OMA_SNIPER_EXCLUDE_BASES", "BTC")
     sniper_exclude_bases = {x.strip().upper() for x in sniper_exclude_bases_raw.split(",") if x.strip()}
 
-    # Existing tracked markets → 제외(중복 제안 방지)
+    # Existing tracked markets → exclude (prevent duplicate suggestions)
     #
     # IMPORTANT:
-    # - OMA는 가격구독/기본 관리 목적으로, 부팅/주기 루프에서 "전체 USDT 마켓"을 WATCH로 채울 수 있다.
-    #   (즉, WATCH 목록이 = 전체 시장일 수 있음)
-    # - Reserved 후보 스캐너가 WATCH까지 전부 제외해버리면 universe_filtered=0 이 되어
-    #   후보가 영원히 나오지 않는 문제가 발생한다.
+    # - For price-subscription/basic-management purposes, OMA may fill WATCH with "all USDT markets"
+    #   during the boot/periodic loop. (i.e., the WATCH list may equal the entire market)
+    # - If the Reserved candidate scanner excludes even WATCH entirely, universe_filtered=0 and
+    #   candidates would never be produced.
     #
-    # 기본 정책:
-    # - ACTIVE / RECOVERY 만 제외 (중복 제안 방지)
-    # - WATCH 제외는 옵션(OMA_SELECTOR_EXCLUDE_WATCH=1)에서만 수행
+    # Default policy:
+    # - Exclude only ACTIVE / RECOVERY (prevent duplicate suggestions)
+    # - WATCH exclusion is performed only when the option (OMA_SELECTOR_EXCLUDE_WATCH=1) is set
     exclude_watch = os.getenv("OMA_SELECTOR_EXCLUDE_WATCH", "0").strip().lower() in ("1", "true", "yes", "y", "on")
 
     existing_active: set[str] = set()
@@ -302,8 +302,8 @@ def build_reserved_candidates(
 
     # -------------------------
     # Autopilot cooldown exclusion
-    # - 목적: 방금 퇴출된(강등된) 코인이 즉시 다시 후보로 잡히는 루프 방지
-    # - HyperSystem이 제공하면 사용하고, 없으면(구버전) 무시한다.
+    # - Purpose: prevent a loop where a just-evicted (demoted) coin is immediately re-picked as a candidate
+    # - Use it if HyperSystem provides it; otherwise (older version) ignore.
     cooldown_markets: set[str] = set()
     try:
         fn = getattr(system, 'get_autopilot_cooldown_markets', None)
@@ -414,9 +414,9 @@ def build_reserved_candidates(
         pp_final_pool = list(pp_trade_checked)
 
     # ---------------------------------------------------------
-    # [2026-03-08] 공유 데이터 풀: PP/AL scoring 전에 초기화
-    # scan_union 전체 코인에 대해 캔들/지표를 한 번만 수집하고
-    # 모든 전략이 동일한 데이터를 참조한다.
+    # [2026-03-08] Shared data pool: initialized before PP/AL scoring
+    # Collect candles/indicators once for all coins in scan_union, and
+    # all strategies reference the same data.
     # =========================================================
     _FALLBACK_AI = {"trend": 0.0, "momentum": 0.0, "volatility": 0.0, "volume_surge": 0.0, "data_valid": False}
     _FALLBACK_RSI = {
@@ -424,11 +424,11 @@ def build_reserved_candidates(
         "macd_histogram": 0.0, "macd_trend": "neutral", "change_24h": 0.0, "data_valid": False
     }
 
-    # 공유 캐시: 모든 전략이 참조
+    # Shared cache: referenced by all strategies
     ai_features_cache: Dict[str, Dict[str, float]] = {}
     ld_lt_gz_rsi_macd_cache: Dict[str, Dict[str, Any]] = {}
 
-    # scan_union 전체를 거래대금 순으로 캔들 조회 (캐시 TTL 120초로 API 부담 최소)
+    # Fetch candles for all of scan_union ordered by trade value (cache TTL 120s to minimize API load)
     from app.core.technical_indicators import compute_indicators as _compute_ti
     _pool_targets = sorted(
         [m for m in scan_union if smap.get(m)],
@@ -461,20 +461,20 @@ def build_reserved_candidates(
 
     _fetchers_mod._last_prefetch_markets = list(_pool_targets)
 
-    # score + rank (과거 성과 반영 + 다단계 신뢰도)
+    # score + rank (apply historical performance + multi-stage confidence)
     pp_scored: List[Tuple[float, MarketSnapshot]] = []
     for s in pp_final_pool:
         base_score = _score_pingpong(s)
         perf_adj = _get_market_performance_score(s.market, "PINGPONG", pnl_cache)
         final_score = base_score + (perf_adj * 5.0)
-        # [2026-03-08] 다단계 confidence 계산 및 저장
+        # [2026-03-08] Compute and store multi-stage confidence
         _pp_ai = ai_features_cache.get(s.market, dict(_FALLBACK_AI))
         _pp_rsi = ld_lt_gz_rsi_macd_cache.get(s.market, dict(_FALLBACK_RSI))
         _pp_conf = _confidence_pingpong(s, _pp_ai, _pp_rsi)
         setattr(s, "_confidence", _pp_conf)
-        # data_valid 우선: 유효 데이터 코인이 상위에 오도록
+        # Prioritize data_valid: keep coins with valid data ranked higher
         if not _pp_ai.get("data_valid", False):
-            final_score -= 50.0  # invalid 코인 후순위
+            final_score -= 50.0  # rank invalid coins lower
         pp_scored.append((final_score, s))
     pp_scored.sort(key=lambda x: x[0], reverse=True)
 
@@ -499,12 +499,12 @@ def build_reserved_candidates(
                 depth_factor=float(entry_ob_depth_factor),
                 depth_ask_usdt=float(s.depth_ask_usdt),
                 depth_bid_usdt=float(s.depth_bid_usdt),
-                # 동적 예산 배분
+                # dynamic budget allocation
                 total_capital_usdt=float(total_capital_usdt),
                 existing_markets_count=int(existing_markets_count + len(used_markets)),
                 spread_bps=float(s.spread_bps),
                 range_ratio_24h=float(s.range_ratio_24h),
-                trend_score=0.0,  # [2026-02-03] PINGPONG은 추세 무관 (회귀 전략)
+                trend_score=0.0,  # [2026-02-03] PINGPONG is trend-agnostic (mean-reversion strategy)
             )
             if b is None:
                 pp_drop["budget"] = pp_drop.get("budget", 0) + 1
@@ -542,7 +542,7 @@ def build_reserved_candidates(
                 continue
         al_pre.append(s)
 
-    # [2026-02-01] AUTOLOOP도 과거 성과 반영
+    # [2026-02-01] AUTOLOOP also applies historical performance
     al_scored: List[Tuple[float, MarketSnapshot]] = []
     for s in al_pre:
         _al_ai = ai_features_cache.get(s.market, dict(_FALLBACK_AI))
@@ -550,7 +550,7 @@ def build_reserved_candidates(
         base_score = _score_autoloop(s, rsi_macd=_al_rsi)
         perf_adj = _get_market_performance_score(s.market, "AUTOLOOP", pnl_cache)
         final_score = base_score + (perf_adj * 5.0)
-        # [2026-03-08] 다단계 confidence 계산 및 저장
+        # [2026-03-08] Compute and store multi-stage confidence
         _al_conf = _confidence_autoloop(s, _al_ai, _al_rsi)
         setattr(s, "_confidence", _al_conf)
         if not _al_ai.get("data_valid", False):
@@ -572,28 +572,28 @@ def build_reserved_candidates(
                 min_order_usdt=float(min_order_usdt),
                 max_budget_usdt=float(al_max),
                 price=float(s.price),
-                entry_qty_guard_on=False,  # AUTOLOOP: qty_guard 완화
+                entry_qty_guard_on=False,  # AUTOLOOP: relaxed qty_guard
                 entry_max_qty=float(entry_max_qty),
                 depth_factor=float(al_depth_factor),
                 depth_ask_usdt=float(s.depth_ask_usdt),
                 depth_bid_usdt=float(s.depth_bid_usdt),
-                # 동적 예산 배분
+                # dynamic budget allocation
                 total_capital_usdt=float(total_capital_usdt),
                 existing_markets_count=int(existing_markets_count + len(used_markets) + len(picked_pp)),
                 spread_bps=float(s.spread_bps),
                 range_ratio_24h=float(s.range_ratio_24h),
-                trend_score=0.0,  # AUTOLOOP는 추세 무관 (분할 매수/매도)
+                trend_score=0.0,  # AUTOLOOP is trend-agnostic (scaled buy/sell)
             )
             if b is None:
                 al_drop["budget"] = al_drop.get("budget", 0) + 1
                 continue
             setattr(s, "_suggested_budget", float(b))
             picked_al.append(s)
-            used_markets.add(s.market)  # AUTOLOOP도 used_markets에 추가
+            used_markets.add(s.market)  # add AUTOLOOP to used_markets too
             if len(picked_al) >= al_n:
                 break
 
-    # PP/AL 선택 코인에도 공유 풀 데이터 연결
+    # Attach shared pool data to the picked PP/AL coins as well
     for s in picked_pp + picked_al:
         setattr(s, "_rsi_macd", ld_lt_gz_rsi_macd_cache.get(s.market, dict(_FALLBACK_RSI)))
         setattr(s, "_ai_features", ai_features_cache.get(s.market, dict(_FALLBACK_AI)))
@@ -615,7 +615,7 @@ def build_reserved_candidates(
         depth_factor: float,
         score_fn_ai
     ):
-        """AI 피처 기반 전략별 후보 선별."""
+        """Select per-strategy candidates based on AI features."""
         pool: List[MarketSnapshot] = []
         drops: Dict[str, int] = {}
         for m in remaining:
@@ -635,7 +635,7 @@ def build_reserved_candidates(
                     continue
             pool.append(s)
 
-        # AI 피처 기반 스코어링 — data_valid 우선 정렬
+        # AI-feature-based scoring — sort with data_valid first
         scored: List[Tuple[float, MarketSnapshot, Dict[str, float]]] = []
         scored_invalid: List[Tuple[float, MarketSnapshot, Dict[str, float]]] = []
         for s in pool:
@@ -662,14 +662,14 @@ def build_reserved_candidates(
                 sc = float(score_fn_ai(s))
                 _conf = {"confidence": 0.0, "stages": {}, "stages_passed": 0}
 
-            # [2026-03-08] confidence 저장
+            # [2026-03-08] Store confidence
             setattr(s, "_confidence", _conf)
 
-            # [2026-02-01] 과거 성과 보너스/감점 반영
+            # [2026-02-01] Apply historical-performance bonus/penalty
             perf_adj = _get_market_performance_score(s.market, strategy, pnl_cache)
             sc = sc + (perf_adj * 5.0)
 
-            # [2026-02-04] Market Regime 국면 기반 전략 우선순위 반영
+            # [2026-02-04] Apply strategy priority based on Market Regime phase
             try:
                 from app.manager.regime_strategy import RegimeStrategyManager
                 regime_mgr = RegimeStrategyManager()
@@ -685,7 +685,7 @@ def build_reserved_candidates(
             except (AttributeError, TypeError, ValueError) as e:
                 _logger.warning(f"Regime strategy scoring failed for {s.market}: {e}", exc_info=True)
 
-            # [2026-02-04] Cross Exchange 시그널 반영 (GAZUA/SNIPER/AUTOLOOP 전략만)
+            # [2026-02-04] Apply Cross Exchange signal (GAZUA/SNIPER/AUTOLOOP strategies only)
             if strategy in ["GAZUA", "SNIPER", "AUTOLOOP"]:
                 try:
                     from app.manager.cross_exchange_signal import get_cross_exchange_signal_provider
@@ -696,7 +696,7 @@ def build_reserved_candidates(
                     cross_signal = signal_provider.get_signal(coin)
 
                     if cross_signal:
-                        # 조정된 점수 받기 (0~1 범위)
+                        # Get adjusted score (0~1 range)
                         result = adjust_score_for_cross_exchange(sc / 100.0, strategy, coin, cross_signal)
                         adjusted_score = result["adjusted_score"] * 100.0
 
@@ -709,9 +709,9 @@ def build_reserved_candidates(
                 except (OSError, KeyError, IndexError, AttributeError, TypeError, ValueError) as e:
                     _logger.warning(f"Cross Exchange scoring failed for {s.market}: {e}", exc_info=True)
 
-            # [2026-02-04] Volume Spike 거래량 급등 감지
-            # LADDER는 급등 추종보다 분할매수/평균단가 관리가 우선이므로
-            # 거래량 급등 가점에서 제외해 펌핑 코인 편향을 줄인다.
+            # [2026-02-04] Volume Spike detection
+            # For LADDER, scaled buying / average-cost management takes priority over chasing spikes,
+            # so it is excluded from the volume-spike bonus to reduce pump-coin bias.
             if strategy != "LADDER":
                 try:
                     volume_detector = get_volume_spike_detector()
@@ -725,8 +725,9 @@ def build_reserved_candidates(
                 except (TypeError, ValueError) as e:
                     _logger.warning(f"Volume Spike scoring failed for {s.market}: {e}", exc_info=True)
 
-            # [2026-02-04] Time Volatility 시간대별 변동성 반영
-            # LADDER는 시간대 급변동 추종보다 가격대 분할 진입의 일관성이 중요하므로 제외.
+            # [2026-02-04] Apply Time Volatility (per-hour volatility)
+            # For LADDER, consistency of price-band scaled entry matters more than chasing
+            # time-of-day swings, so it is excluded.
             if strategy != "LADDER":
                 try:
                     time_adjuster = get_time_volatility_adjuster()
@@ -742,8 +743,8 @@ def build_reserved_candidates(
                 except (KeyError, AttributeError, TypeError, ValueError) as e:
                     _logger.warning(f"Time Volatility scoring failed for {s.market}: {e}", exc_info=True)
 
-            # [2026-02-04] BTC Leading Signal BTC 선행 신호 반영
-            # LADDER는 BTC 급등 추종 편향을 줄이기 위해 이 가점에서 제외.
+            # [2026-02-04] Apply BTC Leading Signal
+            # LADDER is excluded from this bonus to reduce bias toward chasing BTC spikes.
             if strategy != "LADDER":
                 try:
                     btc_detector = get_btc_leading_detector()
@@ -760,15 +761,15 @@ def build_reserved_candidates(
                 except (TypeError, ValueError) as e:
                     _logger.warning(f"BTC Leading scoring failed for {s.market}: {e}", exc_info=True)
 
-            # [2026-03-08] Data Quality Gate: data_valid 여부로 분리
+            # [2026-03-08] Data Quality Gate: split by data_valid
             if ai_feat.get("data_valid", False):
                 scored.append((sc, s, ai_feat))
             else:
                 drops["no_ai_data"] = drops.get("no_ai_data", 0) + 1
                 scored_invalid.append((sc, s, ai_feat))
 
-        # PINGPONG: 거래량 상위 3개 코인 0.8배 감점 (BTC/ETH/단일 코인 독점 방지)
-        # liq cap으로 점수를 억제하지만, pool 내 상대적 순위에서도 추가 패널티 적용
+        # PINGPONG: 0.8x penalty on the top-3 volume coins (prevent BTC/ETH/single-coin dominance)
+        # The liq cap suppresses the score, but an extra penalty is also applied to relative rank within the pool
         if strategy == "PINGPONG" and scored:
             top3_markets = {
                 s.market
@@ -779,10 +780,10 @@ def build_reserved_candidates(
                 for sc, s, ai_feat in scored
             ]
 
-        # data_valid 코인 우선 정렬, 부족 시 invalid 코인으로 보충
+        # Sort data_valid coins first, supplement with invalid coins if short
         scored.sort(key=lambda x: x[0], reverse=True)
         scored_invalid.sort(key=lambda x: x[0], reverse=True)
-        scored.extend(scored_invalid)  # valid 뒤에 invalid 이어 붙임
+        scored.extend(scored_invalid)  # append invalid after valid
 
         vols = sorted([x[1].vol24_usdt for x in scored if x[1].vol24_usdt > 0])
         vol_med = vols[len(vols)//2] if vols else 0.0
@@ -885,8 +886,8 @@ def build_reserved_candidates(
         )
         ladder_highcheck_calls = 0
 
-        # BULL 국면이면 LADDER 필터 일부 완화 (건전한 상승 코인 차단 방지)
-        # tmap(항상 유효) 기반 1차 + ai_features_cache 기반 2차 이중 판단
+        # In a BULL phase, relax some LADDER filters (avoid blocking healthy uptrending coins)
+        # Dual check: primary based on tmap (always valid) + secondary based on ai_features_cache
         if ladder_anti_pump_enabled:
             _btc_tmap = tmap.get("BTCUSDT") or {}
             _btc_chg_24h = float(_btc_tmap.get("signed_change_rate") or 0.0) * 100.0
@@ -908,7 +909,7 @@ def build_reserved_candidates(
                 volume_surge_now = float(ai_feat.get("volume_surge", 0.0))
                 range24_pct = float(s.range_ratio_24h) * 100.0
 
-                # 24h 전봇대 + 24h 고점 근접 구간은 LADDER에서 즉시 제외
+                # Immediately exclude from LADDER zones that are a 24h vertical spike + near the 24h high
                 if (
                     chg24_pct >= float(ladder_hot_24h_pct)
                     and dist24_from_high_pct >= -float(ladder_near_24h_high_pct)
@@ -916,14 +917,14 @@ def build_reserved_candidates(
                     drops["ladder_hot_near_24h_high"] = drops.get("ladder_hot_near_24h_high", 0) + 1
                     continue
 
-                # 상승 추세/모멘텀이 너무 강하면 LADDER 진입 제외
+                # Exclude from LADDER entry if uptrend/momentum is too strong
                 if trend_now > float(ladder_trend_entry_max) and momentum_now > float(ladder_momentum_entry_max):
                     drops["ladder_uptrend_momentum"] = drops.get("ladder_uptrend_momentum", 0) + 1
                     continue
 
-                # 안정성 우선 모드:
-                # - 급격한 변동/추세/거래량 폭증 코인을 LADDER에서 제거
-                # - 한 방향 전진(전봇대형) 코인을 제거
+                # Stability-first mode:
+                # - Remove coins with sharp swings / trend / volume explosion from LADDER
+                # - Remove one-directional (vertical-spike) coins
                 if ladder_stable_only:
                     if abs(chg24_pct) > float(ladder_max_abs_change_24h_pct):
                         drops["ladder_abs_change_24h"] = drops.get("ladder_abs_change_24h", 0) + 1
@@ -940,12 +941,12 @@ def build_reserved_candidates(
                     if abs(volume_surge_now) > float(ladder_max_volume_surge):
                         drops["ladder_volume_surge"] = drops.get("ladder_volume_surge", 0) + 1
                         continue
-                    # 상승 중이라도 파동(왕복) 없는 일방상승은 제거
+                    # Even when rising, remove one-way ascents without oscillation (round trips)
                     if chg24_pct > 0 and range24_pct < max(0.8, abs(chg24_pct) * 0.55):
                         drops["ladder_oneway_up"] = drops.get("ladder_oneway_up", 0) + 1
                         continue
 
-                # 급등 + 상승추세 강화 구간은 LADDER에서 즉시 제외
+                # Immediately exclude from LADDER zones that are a surge + strengthening uptrend
                 if (
                     chg24_pct >= float(ladder_pump_24h_pct)
                     and (trend_now >= float(ladder_trend_max) or momentum_now >= float(ladder_momentum_max))
@@ -953,7 +954,7 @@ def build_reserved_candidates(
                     drops["ladder_pump_24h"] = drops.get("ladder_pump_24h", 0) + 1
                     continue
 
-                # 고점 근접 구간은 20일(기본) 고점 기준으로 추가 차단
+                # Additionally block near-high zones based on the 20-day (default) high
                 needs_high_check = (
                     (ladder_stable_only and ladder_min_history_hours > 0)
                     or
@@ -969,7 +970,7 @@ def build_reserved_candidates(
                         cnt = _sf(highlow.get("candle_count"), 0.0)
                         unit_min = _sf(highlow.get("unit_min"), 0.0)
                         hist_hours = (cnt * unit_min / 60.0) if (cnt > 0 and unit_min > 0) else 0.0
-                        # 신생/초단기 펌프 코인 배제: 최소 이력 미달 시 제외
+                        # Exclude newly-listed/ultra-short-term pump coins: drop if below minimum history
                         if hist_hours > 0 and hist_hours < float(ladder_min_history_hours):
                             drops["ladder_short_history"] = drops.get("ladder_short_history", 0) + 1
                             continue
@@ -993,12 +994,12 @@ def build_reserved_candidates(
                 depth_factor=float(depth_factor),
                 depth_ask_usdt=float(s.depth_ask_usdt),
                 depth_bid_usdt=float(s.depth_bid_usdt),
-                # 동적 예산 배분
+                # dynamic budget allocation
                 total_capital_usdt=float(total_capital_usdt),
                 existing_markets_count=int(existing_markets_count + len(used_markets)),
                 spread_bps=float(s.spread_bps),
                 range_ratio_24h=float(s.range_ratio_24h),
-                trend_score=float(ai_feat.get("trend", 0.0)),  # [2026-02-03] AI 추세 전달
+                trend_score=float(ai_feat.get("trend", 0.0)),  # [2026-02-03] pass AI trend
             )
             if b is None:
                 drops["budget"] = drops.get("budget", 0) + 1
@@ -1006,7 +1007,7 @@ def build_reserved_candidates(
             setattr(s, "_suggested_budget", float(b))
             setattr(s, "_score_override", float(sc))
             setattr(s, "_ai_features", ai_feat)
-            # RSI/MACD 지표 추가 (핑퐁/오토루프와 동일한 정보 제공)
+            # Add RSI/MACD indicators (same info as PINGPONG/AUTOLOOP)
             setattr(s, "_rsi_macd", ld_lt_gz_rsi_macd_cache.get(s.market, dict(_FALLBACK_RSI)))
             picked.append(s)
             used_markets.add(s.market)
@@ -1014,7 +1015,7 @@ def build_reserved_candidates(
                 break
         return picked, drops
 
-    # LADDER: ICAG v3 — 적정 변동폭 + 횡보/약 하락 (그리드 평균회귀)
+    # LADDER: ICAG v3 — moderate volatility + sideways/mild decline (grid mean-reversion)
     picked_ld: List[MarketSnapshot] = []
     ld_drop: Dict[str, int] = {}
     if ld_n > 0:
@@ -1022,7 +1023,7 @@ def build_reserved_candidates(
         picked_ld, ld_drop = _pick_ai_enhanced("LADDER", ld_n, ld_base, ld_max, max_sp, float(entry_ob_depth_factor), _score_ladder)
         picked_ld = list(picked_ld)
 
-    # LIGHTNING: 강한 모멘텀 돌파 (버스트 트레이딩)
+    # LIGHTNING: strong momentum breakout (burst trading)
     picked_lt: List[MarketSnapshot] = []
     lt_drop: Dict[str, int] = {}
     if lt_n > 0:
@@ -1030,7 +1031,7 @@ def build_reserved_candidates(
         picked_lt, lt_drop = _pick_ai_enhanced("LIGHTNING", lt_n, lt_base, lt_max, max_sp, float(entry_ob_depth_factor), _score_lightning)
         picked_lt = list(picked_lt)
 
-    # GAZUA: AI 상승 예측 + 장기 잠재력 (스윙/홀드)
+    # GAZUA: AI upside prediction + long-term potential (swing/hold)
     picked_gz: List[MarketSnapshot] = []
     gz_drop: Dict[str, int] = {}
     if gz_n > 0:
@@ -1038,7 +1039,7 @@ def build_reserved_candidates(
         picked_gz, gz_drop = _pick_ai_enhanced("GAZUA", gz_n, gz_base, gz_max, max_sp, float(entry_ob_depth_factor), _score_gazua)
         picked_gz = list(picked_gz)
 
-    # CONTRARIAN: 시장 역행 코인 (실시간 스캐너 연동)
+    # CONTRARIAN: market-contrarian coins (linked to real-time scanner)
     picked_ct: List[MarketSnapshot] = []
     ct_drop: Dict[str, Any] = {}
     ct_strict_unified = str(os.getenv("OMA_SELECTOR_CONTRARIAN_STRICT_UNIFIED", "true")).strip().lower() == "true"
@@ -1057,7 +1058,7 @@ def build_reserved_candidates(
     if not ct_benchmark_order:
         ct_benchmark_order = list(ct_benchmark_valid)
     if ct_strict_unified:
-        # 실행 경로/알림 경로와 동일한 기준으로 고정해 신호 일관성을 유지한다.
+        # Fix to the same criteria as the execution/notification paths to keep signal consistency.
         ct_relaxed_on_sideways = False
         ct_benchmark_order = ["BTC"]
 
@@ -1066,7 +1067,7 @@ def build_reserved_candidates(
             from app.core.contrarian_scanner import get_contrarian_scanner
             scanner = get_contrarian_scanner()
 
-            # universe는 List[str] (마켓 코드 리스트)
+            # universe is List[str] (list of market codes)
             scanner.set_markets(universe)
             ct_attempts: List[Dict[str, Any]] = []
 
@@ -1085,7 +1086,7 @@ def build_reserved_candidates(
                     return []
 
                 relaxed_mode = bool(allow_relaxed) and (not bool(scan_result.market_down)) and ct_relaxed_on_sideways
-                # [2026-02-23] 조기 감지 후보가 있으면 market_down 불필요
+                # [2026-02-23] If early-detection candidates exist, market_down is not required
                 has_early = any(getattr(c, "early_signal", False) for c in scan_result.candidates)
                 if (not bool(scan_result.market_down)) and (not relaxed_mode) and (not has_early):
                     ct_drop[f"{phase}:{benchmark}"] = "market_not_down"
@@ -1112,7 +1113,7 @@ def build_reserved_candidates(
                         "acceleration": float(getattr(candidate, "acceleration", 0.0)),
                     }
 
-                # Budget suggestion에서 사용할 CONTRARIAN 후보군 중앙 거래대금.
+                # Median trade value of the CONTRARIAN candidate pool, used by budget suggestion.
                 vols_ct: List[float] = []
                 for mk in candidate_map.keys():
                     snap = smap.get(mk)
@@ -1129,7 +1130,7 @@ def build_reserved_candidates(
                     if market in used_markets:
                         local_drop["already_used"] = local_drop.get("already_used", 0) + 1
                         continue
-                    # CONTRARIAN의 기준축(BTC)은 운용 대상에서 항상 제외
+                    # The CONTRARIAN benchmark axis (BTC) is always excluded from trading targets
                     if market == Q.market("BTC"):
                         local_drop["btc_benchmark_excluded"] = local_drop.get("btc_benchmark_excluded", 0) + 1
                         continue
@@ -1144,14 +1145,14 @@ def build_reserved_candidates(
 
                     ct_score_val = int(ct_data.get("score", 0) or 0)
                     is_early = bool(ct_data.get("early_signal", False))
-                    # [2026-02-23] 조기 감지 코인은 score 1점으로도 통과
+                    # [2026-02-23] Early-detection coins pass even with a score of 1
                     effective_required = 1 if is_early else required_score
                     if ct_score_val < effective_required:
                         local_drop["low_score"] = local_drop.get("low_score", 0) + 1
                         continue
 
                     if relaxed_mode:
-                        # 시장이 명확한 하락장이 아닐 때는 보조 신호 1개 이상을 요구한다.
+                        # When the market is not a clear downtrend, require at least one secondary signal.
                         tf_score_val = int(ct_data.get("tf_score", 0) or 0)
                         ai_score_val = float(ct_data.get("ai_score") or 0.0)
                         rs_diff_val = float(ct_data.get("rs_diff") or 0.0)
@@ -1170,21 +1171,21 @@ def build_reserved_candidates(
                     _ct_coin_ret = float(_ct_coin_t.get("signed_change_rate") or 0.0) * 100.0
                     _ct_rsi_macd = ld_lt_gz_rsi_macd_cache.get(s.market, dict(_FALLBACK_RSI))
                     final_score = _score_contrarian_live(s, ct_score_val, ct_data, coin_ret_24h=_ct_coin_ret, btc_ret_24h=_ct_btc_ret, rsi_macd=_ct_rsi_macd)
-                    # [2026-02-01] 과거 성과 반영
+                    # [2026-02-01] Apply historical performance
                     perf_adj = _get_market_performance_score(s.market, "CONTRARIAN", pnl_cache)
                     final_score = final_score + (perf_adj * 5.0)
                     s._score_override = final_score
                     s._contrarian_data = ct_data
-                    # RSI/MACD 정보 추가 (다른 전략과 동일)
+                    # Add RSI/MACD info (same as other strategies)
                     setattr(s, "_rsi_macd", ld_lt_gz_rsi_macd_cache.get(s.market, dict(_FALLBACK_RSI)))
                     # [2026-03-08] CONTRARIAN confidence
                     _ct_ai = ai_features_cache.get(s.market, dict(_FALLBACK_AI))
                     _ct_rsi = ld_lt_gz_rsi_macd_cache.get(s.market, dict(_FALLBACK_RSI))
                     setattr(s, "_confidence", _confidence_contrarian(s, _ct_ai, _ct_rsi, contrarian_score=ct_score_val))
 
-                    # [2026-02-03] CONTRARIAN 추세 기반 예산 조정
+                    # [2026-02-03] CONTRARIAN trend-based budget adjustment
                     benchmark_ret = float(ct_data.get("benchmark_ret_pct", 0.0) or 0.0)
-                    trend_score_ct = benchmark_ret / 3.0  # -15% → -5.0, -3% → -1.0 스케일 변환
+                    trend_score_ct = benchmark_ret / 3.0  # scale conversion: -15% → -5.0, -3% → -1.0
 
                     budget = _suggest_budget(
                         strategy="CONTRARIAN",
@@ -1203,7 +1204,7 @@ def build_reserved_candidates(
                         existing_markets_count=int(existing_markets_count + len(used_markets) + len(picked_ct)),
                         spread_bps=float(s.spread_bps),
                         range_ratio_24h=float(s.range_ratio_24h),
-                        trend_score=trend_score_ct,  # [2026-02-03] 벤치마크 수익률 기반 추세 전달
+                        trend_score=trend_score_ct,  # [2026-02-03] pass trend based on benchmark return
                     )
                     if budget is None:
                         local_drop["budget"] = local_drop.get("budget", 0) + 1
@@ -1264,7 +1265,7 @@ def build_reserved_candidates(
             ct_drop["_error"] = str(e)
 
     # -------------------------
-    # SNIPER: 과매도 + N시간 최저가 근접 (저격 매수/매도)
+    # SNIPER: oversold + near the N-hour low (sniper buy/sell)
     # -------------------------
     picked_sn: List[MarketSnapshot] = []
     sn_drop: Dict[str, int] = {}
@@ -1272,28 +1273,28 @@ def build_reserved_candidates(
 
     sn_scan_multiplier = max(1, _si(os.getenv("OMA_SELECTOR_SNIPER_SCAN_MULTIPLIER", "4"), 4))
     sn_scan_cap = _si(os.getenv("OMA_SELECTOR_SNIPER_SCAN_CAP", "24"), 24)
-    # [FIX 2026-03-05] sn_scan_cap을 목표치로 우선 사용
-    # 과거: max(sn_n, sn_n*mult)=8개만 스캔 → EMA 캐시 없는 나머지 전부 no_ema_data로 탈락
-    # 수정: cap=24를 목표로 스캔, cap 미설정 시 multiplier 기반 계산
+    # [FIX 2026-03-05] Prefer sn_scan_cap as the target
+    # Before: max(sn_n, sn_n*mult)=only 8 scanned → all others without EMA cache dropped as no_ema_data
+    # Fix: scan toward cap=24; if cap is unset, compute based on multiplier
     sn_scan_limit = sn_scan_cap if sn_scan_cap > 0 else max(sn_n, sn_n * sn_scan_multiplier)
 
     if sn_n > 0:
         sn_pool: List[MarketSnapshot] = []
 
-        # SNIPER는 과매도 + 최저가 근접 코인을 찾음
+        # SNIPER looks for oversold coins near their low
         remaining_for_sn = [m for m in scan_union if m not in used_markets and _currency(m) not in sniper_exclude_bases]
         if sniper_exclude_bases:
             excluded_base_n = sum(1 for m in scan_union if m not in used_markets and _currency(m) in sniper_exclude_bases)
             if excluded_base_n > 0:
                 sn_drop["excluded_base"] = sn_drop.get("excluded_base", 0) + excluded_base_n
 
-        # SNIPER용 RSI 캐시 구축 (기존 캐시에 없는 마켓만 조회)
-        # [FIX 2026-03-05] 외부에서 이미 sn_scan_cap 기반으로 계산됨. 재계산 금지.
-        # sn_scan_limit = sn_scan_cap (=24) → FIX M4/M5 이후 캐시 없으면 즉시 탈락이므로
-        # 충분히 넓게 스캔해야 SNIPER 후보가 생존 가능.
+        # Build RSI cache for SNIPER (fetch only markets not already cached)
+        # [FIX 2026-03-05] Already computed externally based on sn_scan_cap. Do not recompute.
+        # sn_scan_limit = sn_scan_cap (=24) → after FIX M4/M5, missing cache drops immediately, so
+        # we must scan wide enough for SNIPER candidates to survive.
         remaining_by_vol_sn = sorted(remaining_for_sn, key=lambda m: smap.get(m).vol24_usdt if smap.get(m) else 0.0, reverse=True)
 
-        # [2026-02-03] EMA 크로스 사전 필터 (옵션)
+        # [2026-02-03] EMA cross pre-filter (optional)
         ema_cross_filter = bool(os.getenv("OMA_SNIPER_EMA_FILTER", "true").lower() == "true")
         ema_cache: Dict[str, tuple[bool, float, float]] = {}
 
@@ -1304,7 +1305,7 @@ def build_reserved_candidates(
                     ld_lt_gz_rsi_macd_cache[m] = _calc_rsi_macd_from_candles(candles)
                     ai_features_cache[m] = _extract_ai_features_from_candles(candles)
 
-                    # [2026-02-23] SNIPER 전용 ATR/BB enrichment (ld_lt_gz 루프에서 빠진 마켓)
+                    # [2026-02-23] SNIPER-only ATR/BB enrichment (markets missed by the ld_lt_gz loop)
                     if candles and m in smap:
                         ti = _compute_ti(m, candles)
                         smap[m].atr_pct = ti.get("atr_pct", 0.0)
@@ -1313,7 +1314,7 @@ def build_reserved_candidates(
                         smap[m].bb_middle = ti.get("bb_middle", 0.0)
                         smap[m].bb_lower = ti.get("bb_lower", 0.0)
 
-                    # [2026-02-03] EMA 크로스 확인 (골든 크로스 우선 선택)
+                    # [2026-02-03] Check EMA cross (prefer golden cross)
                     if ema_cross_filter and len(candles) >= 26:
                         is_golden, ema_fast, ema_slow = _check_ema_cross(candles, fast=12, slow=26)
                         ema_cache[m] = (is_golden, ema_fast, ema_slow)
@@ -1329,14 +1330,14 @@ def build_reserved_candidates(
                 sn_drop["no_snapshot"] = sn_drop.get("no_snapshot", 0) + 1
                 continue
 
-            # 스프레드 체크 (추천 선별용 기준 사용)
+            # Spread check (use the recommendation-selection threshold)
             max_sp = float(_selector_spread_bps)
             if max_sp > 0 and s.spread_bps > max_sp:
                 sn_drop["spread"] = sn_drop.get("spread", 0) + 1
                 continue
 
-            # RSI/AI 피처 조회
-            # [FIX M5] 캐시 없으면 None 처리 (RSI=50 기본값이 필터 통과하는 문제 방지)
+            # Look up RSI/AI features
+            # [FIX M5] Treat missing cache as None (prevent the RSI=50 default from passing the filter)
             if m not in ld_lt_gz_rsi_macd_cache:
                 sn_drop["no_rsi_data"] = sn_drop.get("no_rsi_data", 0) + 1
                 continue
@@ -1344,24 +1345,24 @@ def build_reserved_candidates(
             ai_feat = ai_features_cache.get(m, {"trend": 0.0, "momentum": 0.0, "volatility": 2.0, "data_valid": False})
             rsi = float(rsi_macd.get("rsi", 50.0))
 
-            # SNIPER 필터: RSI < 55 (과매도 근처) 또는 24h 낙폭 > 1%
-            # [2026-02-02] 필터 완화: RSI 50→55, 낙폭 -3%→-1%로 조정하여 더 많은 후보 확보
+            # SNIPER filter: RSI < 55 (near oversold) or 24h drop > 1%
+            # [2026-02-02] Relaxed filter: RSI 50→55, drop -3%→-1% to secure more candidates
             change_24h = float(rsi_macd.get("change_24h", 0.0))
             if rsi >= 55 and change_24h > -1.0:
                 sn_drop["not_oversold"] = sn_drop.get("not_oversold", 0) + 1
                 continue
 
-            # [FIX 2026-03-05] 셀렉터 레벨에서는 데드크로스를 차단하지 않는다.
-            # compute_scope_score(최저점 진입 방식)는 데드크로스 + 바닥 근처 코인에 높은 점수를 부여.
-            # 셀렉터에서 골든크로스만 허용하면 compute_scope_score가 선호하는 후보가 모두 탈락 → 후보 0개.
-            # 실제 매수 진입 시 EMA 체크는 strategy_plugins.py(execution level)에서 수행한다.
-            # ema_cache 데이터는 compute_scope_score 내부 스코어링에 활용되므로 수집은 유지.
+            # [FIX 2026-03-05] At the selector level, do not block dead crosses.
+            # compute_scope_score (lowest-point entry method) assigns high scores to dead-cross + near-bottom coins.
+            # If the selector allows only golden crosses, all compute_scope_score-preferred candidates drop → 0 candidates.
+            # The actual EMA check at buy entry is performed in strategy_plugins.py (execution level).
+            # ema_cache data is still collected because it is used in compute_scope_score's internal scoring.
 
             sn_pool.append(s)
 
-        # 스코어링 — [2026-03-03] compute_scope_score 통일
-        # longshort_multi_scan과 동일한 6-stage confidence/rank_score 사용
-        # → 추천코인과 활성코인 점수 불일치 문제 해결
+        # Scoring — [2026-03-03] unified via compute_scope_score
+        # Use the same 6-stage confidence/rank_score as longshort_multi_scan
+        # → resolves score mismatch between recommended coins and active coins
         sn_scored: List[Tuple[float, MarketSnapshot, Dict[str, float], float, Optional[Dict[str, Any]]]] = []
         try:
             from app.api.strategy_router import compute_scope_score
@@ -1369,7 +1370,7 @@ def build_reserved_candidates(
             logger.warning("[Selector] compute_scope_score import failed", exc_info=True)
             compute_scope_score = None  # type: ignore
 
-        # BTC regime 한 번만 조회
+        # Look up BTC regime only once
         _btc_regime = "TREND"
         try:
             _btc_det = get_btc_leading_detector()
@@ -1383,7 +1384,7 @@ def build_reserved_candidates(
             rsi_macd = ld_lt_gz_rsi_macd_cache.get(s.market, {"rsi": 50.0})
             rsi = float(rsi_macd.get("rsi", 50.0))
 
-            # 1차: scope score (캔들 최저점 근접도 기반, 0-100 통일 스케일)
+            # Stage 1: scope score (based on proximity to the candle low, unified 0-100 scale)
             scope_data: Optional[Dict[str, Any]] = None
             score: float = 0.0
             if compute_scope_score is not None:
@@ -1396,17 +1397,17 @@ def build_reserved_candidates(
             if scope_data and float(scope_data.get("rank_score") or 0) > 0:
                 score = float(scope_data["rank_score"])
             else:
-                # fallback: 기존 _score_sniper → 0-100 스케일로 정규화
-                # [FIX #8] raw*2.0은 상위권 클러스터링 유발 → 선형 정규화로 변경
+                # fallback: legacy _score_sniper → normalized to a 0-100 scale
+                # [FIX #8] raw*2.0 causes top-end clustering → changed to linear normalization
                 raw = _score_sniper(s, ai_feat, rsi)
-                score = max(0.0, min(100.0, (raw + 10.0) / 50.0 * 100.0))  # -10~40 → 0~100 균등분포
+                score = max(0.0, min(100.0, (raw + 10.0) / 50.0 * 100.0))  # -10~40 → 0~100 even distribution
 
-            # [2026-02-01] 과거 성과 반영 (0-100 스케일 내에서 보정)
+            # [2026-02-01] Apply historical performance (adjusted within the 0-100 scale)
             perf_adj = _get_market_performance_score(s.market, "SNIPER", pnl_cache)
-            score = max(0.0, min(100.0, score + (perf_adj * 15.0)))  # [FIX 2026-03-05] 3.0 → 15.0 (0-100 스케일에 유효한 영향)
+            score = max(0.0, min(100.0, score + (perf_adj * 15.0)))  # [FIX 2026-03-05] 3.0 → 15.0 (meaningful effect on the 0-100 scale)
 
-            # [2026-03-05] SNIPER: 4개 추가 시그널 반영 (_pick_ai_enhanced와 동일)
-            # Cross Exchange 시그널 반영
+            # [2026-03-05] SNIPER: apply 4 extra signals (same as _pick_ai_enhanced)
+            # Apply Cross Exchange signal
             try:
                 from app.manager.cross_exchange_signal import get_cross_exchange_signal_provider
                 from app.manager.cross_exchange_scoring import adjust_score_for_cross_exchange
@@ -1419,7 +1420,7 @@ def build_reserved_candidates(
             except (OSError, KeyError, AttributeError, TypeError, ValueError) as exc:
                 logger.warning("[SELECTOR] cross exchange signal: %s", exc, exc_info=True)
 
-            # Volume Spike 거래량 급등 반영
+            # Apply Volume Spike
             try:
                 _sn_vol_detector = get_volume_spike_detector()
                 if _sn_vol_detector:
@@ -1427,7 +1428,7 @@ def build_reserved_candidates(
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
                 logger.warning("[SELECTOR] volume spike adjust: %s", exc, exc_info=True)
 
-            # Time Volatility 시간대별 변동성 반영
+            # Apply Time Volatility (per-hour volatility)
             try:
                 _sn_time_adj = get_time_volatility_adjuster()
                 if _sn_time_adj:
@@ -1435,7 +1436,7 @@ def build_reserved_candidates(
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
                 logger.warning("[SELECTOR] time volatility adjust: %s", exc, exc_info=True)
 
-            # BTC Leading Signal 반영
+            # Apply BTC Leading Signal
             try:
                 _sn_btc_det = get_btc_leading_detector()
                 if _sn_btc_det:
@@ -1447,7 +1448,7 @@ def build_reserved_candidates(
 
         sn_scored.sort(key=lambda x: x[0], reverse=True)
 
-        # 예산 및 파라미터 계산
+        # Compute budget and parameters
         vols_sn = sorted([x[1].vol24_usdt for x in sn_scored if x[1].vol24_usdt > 0])
         vol_med_sn = vols_sn[len(vols_sn) // 2] if vols_sn else 0.0
 
@@ -1472,14 +1473,14 @@ def build_reserved_candidates(
                 existing_markets_count=int(existing_markets_count + len(used_markets)),
                 spread_bps=float(s.spread_bps),
                 range_ratio_24h=float(s.range_ratio_24h),
-                trend_score=float(ai_feat.get("trend", 0.0)),  # [2026-02-03] 추세 전달
+                trend_score=float(ai_feat.get("trend", 0.0)),  # [2026-02-03] pass trend
             )
 
             if budget is None:
                 sn_drop["budget"] = sn_drop.get("budget", 0) + 1
                 continue
 
-            # SNIPER 파라미터 자동 계산 (실제 고가/저가 조회 포함)
+            # Auto-compute SNIPER parameters (includes fetching actual high/low)
             sniper_params = _calc_sniper_params(s, ai_feat, rsi, session=sess)
             sniper_params_map[s.market] = sniper_params
 
@@ -1488,7 +1489,7 @@ def build_reserved_candidates(
             setattr(s, "_ai_features", ai_feat)
             setattr(s, "_rsi_macd", ld_lt_gz_rsi_macd_cache.get(s.market, {"rsi": 50.0}))
             setattr(s, "_sniper_params", sniper_params)
-            # [2026-03-03] scope score 데이터 첨부 (rank_score/confidence 통일)
+            # [2026-03-03] Attach scope score data (unified rank_score/confidence)
             if scope_data:
                 setattr(s, "_scope_data", scope_data)
 
@@ -1509,9 +1510,9 @@ def build_reserved_candidates(
         in ("1", "true", "yes", "on")
     )
 
-    # [FIX 2026-03-05] strict_fit_rel 임계값 하향 조정
-    # 기존 0.60~0.75 → 0.30~0.50: 점수가 고루 분포된 전략에서 top 25~70%만 남겨
-    # 전략당 1개밖에 안 남는 문제 해결 (슬롯 수만큼 후보가 생존하도록 완화)
+    # [FIX 2026-03-05] Lower the strict_fit_rel threshold
+    # From 0.60~0.75 → 0.30~0.50: for strategies with evenly distributed scores, keep only top 25~70%
+    # Fixes the issue of only 1 surviving per strategy (relaxed so as many candidates survive as there are slots)
     strict_fit_rel_default = _clamp(
         _sf(os.getenv("OMA_SELECTOR_STRICT_FIT_REL_DEFAULT", "0.35"), 0.35),
         0.0,
@@ -1603,19 +1604,19 @@ def build_reserved_candidates(
     picked_ct = _apply_strict_fit("CONTRARIAN", picked_ct, ct_drop)
     picked_sn = _apply_strict_fit("SNIPER", picked_sn, sn_drop)
 
-    # strict fit 이후 used_markets 재구성 (필터링으로 dropped 된 마켓 제거 반영)
+    # Rebuild used_markets after strict fit (reflect markets dropped by filtering)
     used_markets = {s.market for s in (picked_pp + picked_al + picked_ld + picked_lt + picked_gz + picked_ct + picked_sn)}
 
     # -------------------------
-    # [2026-02-01] force_fill 모드: 부족한 슬롯을 볼륨 상위에서 강제 채우기
+    # [2026-02-01] force_fill mode: force-fill missing slots from the top of the volume ranking
     # -------------------------
     force_fill_skipped_by_strict = bool(force_fill and strict_fit_enabled and strict_fit_disable_force_fill)
     if force_fill and strict_fit_enabled and strict_fit_disable_force_fill:
         _logger.info("[reserved_selector] strict_fit enabled: force_fill skipped to preserve strategy fitness")
     elif force_fill:
-        _logger.info("[reserved_selector] force_fill=True: 부족한 슬롯 강제 채우기 시작")
+        _logger.info("[reserved_selector] force_fill=True: starting force-fill of missing slots")
 
-        # 각 전략별 부족한 수량 계산 (PINGPONG, AUTOLOOP 포함)
+        # Compute the shortage per strategy (including PINGPONG, AUTOLOOP)
         shortages = {
             "PINGPONG": (pp_n - len(picked_pp), pp_base, pp_max, picked_pp),
             "AUTOLOOP": (al_n - len(picked_al), al_base, al_max, picked_al),
@@ -1626,23 +1627,23 @@ def build_reserved_candidates(
             "SNIPER": (sn_n - len(picked_sn), sn_base, sn_max, picked_sn),
         }
 
-        # 사용 가능한 마켓 풀 - force_fill은 전체 볼륨 랭킹(ranked_by_vol)에서 후보 탐색
-        # scan_union은 PP/AL 풀이라 너무 작음, 전체 universe 기반으로 확장
+        # Available market pool - force_fill searches candidates from the full volume ranking (ranked_by_vol)
+        # scan_union is the PP/AL pool and too small, so expand based on the full universe
         remaining_for_force = [m for m in ranked_by_vol if m not in used_markets]
 
-        # smap에 없는 마켓도 ticker 기반으로 스냅샷 생성
+        # Build a snapshot from ticker even for markets not in smap
         def _get_or_make_snapshot(m: str) -> Optional[MarketSnapshot]:
             s = smap.get(m)
             if s is not None:
                 return s
-            # ticker만으로 스냅샷 생성 (orderbook 없이 force_fill 가능)
+            # Build snapshot from ticker only (force_fill possible without orderbook)
             tk = tmap.get(m)
             if tk is None:
                 return None
             return _snapshot_from_ticker_and_ob(
                 m,
                 tk,
-                None,  # orderbook 없음
+                None,  # no orderbook
                 depth_bps=0.0,
                 caution=bool(caution_map.get(m, False)),
                 delisting=bool(delisting_map.get(m, False)),
@@ -1663,10 +1664,10 @@ def build_reserved_candidates(
             if shortage <= 0:
                 continue
             if strategy == "LADDER" and not ladder_force_fill_enabled:
-                _logger.info("[reserved_selector] force_fill: LADDER는 비활성(OMA_SELECTOR_LADDER_FORCE_FILL=false)로 건너뜀")
+                _logger.info("[reserved_selector] force_fill: LADDER disabled (OMA_SELECTOR_LADDER_FORCE_FILL=false), skipped")
                 continue
 
-            _logger.info("[reserved_selector] force_fill: %s 부족 %s개", strategy, shortage)
+            _logger.info("[reserved_selector] force_fill: %s short by %s", strategy, shortage)
 
             filled = 0
             for m in remaining_by_vol:
@@ -1674,7 +1675,7 @@ def build_reserved_candidates(
                     break
                 if m in used_markets:
                     continue
-                # CONTRARIAN의 기준축(BTC)은 force_fill에서도 절대 제외
+                # The CONTRARIAN benchmark axis (BTC) is never included, even in force_fill
                 if strategy == "CONTRARIAN" and _currency(m) == "BTC":
                     continue
                 if strategy == "SNIPER" and _currency(m) in sniper_exclude_bases:
@@ -1683,13 +1684,13 @@ def build_reserved_candidates(
                 s = _get_or_make_snapshot(m)
                 if s is None:
                     continue
-                # smap에 추가해서 이후 로직에서도 사용 가능하게
+                # Add to smap so later logic can use it too
                 smap[m] = s
 
-                # force_fill 모드에서는 전역 vol_median 사용 (각 전략 로컬 변수 접근 불가)
+                # In force_fill mode use the global vol_median (per-strategy local vars are not accessible)
                 vol_med_for_strategy = vol_med_pp or vol_med_al or vol_med_sn or 0.0
 
-                # 기본 예산 설정
+                # Set default budget
                 budget = _suggest_budget(
                     strategy=strategy,
                     base_usdt=float(base_usdt),
@@ -1700,25 +1701,25 @@ def build_reserved_candidates(
                     price=float(s.price),
                     entry_qty_guard_on=bool(entry_qty_guard_on),
                     entry_max_qty=float(entry_max_qty),
-                    depth_factor=0.0,  # 강제 모드에서는 depth 무시
+                    depth_factor=0.0,  # ignore depth in forced mode
                     depth_ask_usdt=float(s.depth_ask_usdt),
                     depth_bid_usdt=float(s.depth_bid_usdt),
                     total_capital_usdt=float(total_capital_usdt),
                     existing_markets_count=int(existing_markets_count + len(used_markets)),
-                    trend_score=0.0,  # force_fill 모드: 추세 정보 없음
+                    trend_score=0.0,  # force_fill mode: no trend info
                 )
 
                 s._suggested_budget = budget or base_usdt
-                s._score_override = float(s.vol24_usdt) / 1e9  # 볼륨 기반 스코어
-                s._forced = True  # 강제 선택 플래그
+                s._score_override = float(s.vol24_usdt) / 1e9  # volume-based score
+                s._forced = True  # forced-selection flag
                 setattr(s, "_rsi_macd", ld_lt_gz_rsi_macd_cache.get(s.market, {"rsi": 50.0}))
                 setattr(s, "_ai_features", ai_features_cache.get(s.market, {}))
 
-                # CONTRARIAN/SNIPER 특수 속성
+                # CONTRARIAN/SNIPER special attributes
                 if strategy == "CONTRARIAN":
                     s._contrarian_data = {"score": 0, "forced": True}
                 elif strategy == "SNIPER":
-                    # [FIX #13] 캐시된 ai_features/rsi 사용 (하드코딩 제거)
+                    # [FIX #13] Use cached ai_features/rsi (remove hardcoding)
                     _ff_ai = ai_features_cache.get(s.market, {})
                     _ff_rsi_data = ld_lt_gz_rsi_macd_cache.get(s.market, {"rsi": 50.0})
                     _ff_rsi = float(_ff_rsi_data.get("rsi", 50.0))
@@ -1771,7 +1772,7 @@ def build_reserved_candidates(
             },
         }
 
-        # [2026-03-03] SNIPER: scope score 기반 rank_score/confidence 추가
+        # [2026-03-03] SNIPER: add rank_score/confidence based on scope score
         _scope = getattr(s, "_scope_data", None)
         if _scope and str(strategy).upper() == "SNIPER":
             item["rank_score"] = float(_scope.get("rank_score") or 0.0)
@@ -1779,23 +1780,23 @@ def build_reserved_candidates(
             item["fire_level"] = str(_scope.get("fire_level") or "HOLD")
             item["stages_passed"] = int(_scope.get("stages_passed") or 0)
 
-        # [2026-03-08] 전 전략 다단계 confidence (SNIPER 제외 — 자체 scope_data 사용)
+        # [2026-03-08] Multi-stage confidence for all strategies (except SNIPER — uses its own scope_data)
         _multi_conf = getattr(s, "_confidence", None)
         if _multi_conf and str(strategy).upper() != "SNIPER":
             item["confidence"] = float(_multi_conf.get("confidence", 0.0))
             item["stages_passed"] = int(_multi_conf.get("stages_passed", 0))
             item["confidence_stages"] = _multi_conf.get("stages", {})
 
-        # RSI/MACD 지표 추가 (모든 전략)
+        # Add RSI/MACD indicators (all strategies)
         rsi_macd = getattr(s, "_rsi_macd", None) or {}
-        # 항상 기본값이라도 추가 (프론트엔드에서 사용)
+        # Always add, even defaults (used by the frontend)
         item["metrics"]["rsi"] = float(rsi_macd.get("rsi", 50.0))
         item["metrics"]["macd_trend"] = str(rsi_macd.get("macd_trend", "neutral"))
         item["metrics"]["macd_histogram"] = float(rsi_macd.get("macd_histogram", 0.0))
         item["metrics"]["change_24h"] = float(rsi_macd.get("change_24h", 0.0))
         item["metrics"]["rsi_data_valid"] = bool(rsi_macd.get("data_valid", False))
 
-        # AI 피처 정보 추가 (전 전략)
+        # Add AI feature info (all strategies)
         _pool_ai = ai_features_cache.get(s.market, ai_features) if ai_features_cache else ai_features
         if _pool_ai or ai_features:
             _src = _pool_ai or ai_features
@@ -1807,41 +1808,41 @@ def build_reserved_candidates(
                 "data_valid": bool(_src.get("data_valid", False)),
             }
 
-        # 전략별 권장 파라미터 추가
+        # Add per-strategy recommended parameters
         strat_upper = str(strategy).upper()
-        # 변동성: 24시간 range_ratio 사용 (0.05 = 5%)
-        # ai_features의 volatility는 5분 캔들 기준이라 너무 작음
+        # Volatility: use the 24h range_ratio (0.05 = 5%)
+        # ai_features' volatility is based on 5-min candles and too small
         range_ratio = float(s.range_ratio_24h) if s.range_ratio_24h else 0.0
-        volatility_pct = range_ratio * 100.0  # 비율 → 퍼센트 (0.05 → 5%)
+        volatility_pct = range_ratio * 100.0  # ratio → percent (0.05 → 5%)
 
-        # fallback: ai_features의 volatility (이미 % 단위)
+        # fallback: ai_features' volatility (already in % units)
         if volatility_pct < 0.5:
             volatility_pct = float(ai_features.get("volatility", 0.0)) if ai_features else 0.0
 
-        # RSI 기반 조정을 위해 가져오기
+        # Fetch for RSI-based adjustment
         rsi_val = float(rsi_macd.get("rsi", 50.0)) if rsi_macd else 50.0
 
         trend = float(ai_features.get("trend", 0.0)) if ai_features else 0.0
         momentum = float(ai_features.get("momentum", 0.0)) if ai_features else 0.0
 
         if strat_upper == "LADDER":
-            # LADDER: 변동성 기반 권장 파라미터
-            # ATR 사용 권장: 변동성 > 5%
+            # LADDER: volatility-based recommended parameters
+            # Recommend ATR when volatility > 5%
             use_atr = volatility_pct > 5.0
-            # step_pct: 변동성에 비례 (0.5 ~ 3.0%)
+            # step_pct: proportional to volatility (0.5 ~ 3.0%)
             step_pct = round(max(0.5, min(3.0, volatility_pct * 0.3)), 2)
-            # TP: 변동성에 비례 (1.5 ~ 8.0%)
+            # TP: proportional to volatility (1.5 ~ 8.0%)
             tp_pct = round(max(1.5, min(8.0, volatility_pct * 0.6)), 1)
-            # Steps: 예산에 비례 (5 ~ 20)
+            # Steps: proportional to budget (5 ~ 20)
             steps = max(5, min(20, int(budget / 15)))
-            # 마틴게일: 변동성에 비례 (1.0 ~ 1.2)
+            # Martingale: proportional to volatility (1.0 ~ 1.2)
             martingale = round(max(1.0, min(1.2, 1.0 + volatility_pct * 0.02)), 2)
 
-            # RSI 기반 조정
-            if rsi_val < 30:  # 과매도 → 더 공격적
+            # RSI-based adjustment
+            if rsi_val < 30:  # oversold → more aggressive
                 steps = min(steps + 3, 25)
                 martingale = min(martingale + 0.05, 1.25)
-            elif rsi_val > 70:  # 과매수 → 보수적
+            elif rsi_val > 70:  # overbought → conservative
                 steps = max(steps - 2, 5)
                 tp_pct = max(tp_pct - 1.0, 1.5)
 
@@ -1854,16 +1855,16 @@ def build_reserved_candidates(
                 "martingale": martingale,
             }
         elif strat_upper == "LIGHTNING":
-            # LIGHTNING: 모멘텀 + 변동성 기반 권장 파라미터
-            # TP: 변동성에 비례 (2.0 ~ 10.0%)
+            # LIGHTNING: momentum + volatility-based recommended parameters
+            # TP: proportional to volatility (2.0 ~ 10.0%)
             tp_pct = round(max(2.0, min(10.0, volatility_pct * 0.8 + abs(momentum) * 0.5)), 1)
-            # SL: TP의 50% (손절 비율)
+            # SL: 50% of TP (stop-loss ratio)
             sl_pct = round(-abs(tp_pct * 0.5), 1)
 
-            # RSI 기반 조정
-            if rsi_val < 30:  # 과매도 → 반등 기대
+            # RSI-based adjustment
+            if rsi_val < 30:  # oversold → expect bounce
                 tp_pct = min(tp_pct + 1.0, 12.0)
-            elif rsi_val > 70:  # 과매수 → 보수적
+            elif rsi_val > 70:  # overbought → conservative
                 tp_pct = max(tp_pct - 1.0, 2.0)
                 sl_pct = max(sl_pct + 0.5, -1.0)
 
@@ -1873,19 +1874,19 @@ def build_reserved_candidates(
                 "manual_exit": False,
             }
         elif strat_upper == "GAZUA":
-            # GAZUA: 추세 + 변동성 기반 권장 파라미터
-            # TP: 변동성에 비례 (5.0 ~ 20.0%)
+            # GAZUA: trend + volatility-based recommended parameters
+            # TP: proportional to volatility (5.0 ~ 20.0%)
             tp_pct = round(max(5.0, min(20.0, volatility_pct * 1.5 + abs(trend) * 5.0)), 1)
-            # SL: TP의 40%
+            # SL: 40% of TP
             sl_pct = round(-abs(tp_pct * 0.4), 1)
             profile_mode = "trend" if trend > 0.2 else "sideways"
             sideways_ai_min = 0.58 if volatility_pct < 6.0 else 0.60
             trail_dist = 3.0 if profile_mode == "sideways" else 3.8
 
-            # RSI 기반 조정
-            if rsi_val < 30:  # 과매도 → 큰 반등 기대
+            # RSI-based adjustment
+            if rsi_val < 30:  # oversold → expect a large bounce
                 tp_pct = min(tp_pct + 3.0, 25.0)
-            elif rsi_val > 70:  # 과매수 → 조기 익절
+            elif rsi_val > 70:  # overbought → take profit early
                 tp_pct = max(tp_pct - 3.0, 5.0)
                 sl_pct = max(sl_pct + 1.0, -3.0)
 
@@ -1920,13 +1921,13 @@ def build_reserved_candidates(
                 "add_buy_cooldown_sec": 180,
             }
         elif strat_upper == "PINGPONG":
-            # PINGPONG: 박스권 매매 - 변동성 기반 TP/SL
-            # TP: 변동성에 비례 (1.5 ~ 8.0%)
+            # PINGPONG: range trading - volatility-based TP/SL
+            # TP: proportional to volatility (1.5 ~ 8.0%)
             tp_pct = round(max(1.5, min(8.0, volatility_pct * 0.5 + 1.5)), 1)
-            # SL: TP의 60%
+            # SL: 60% of TP
             sl_pct = round(-abs(tp_pct * 0.6), 1)
 
-            # RSI 매수/매도 기준: 변동성에 따라 조정
+            # RSI buy/sell thresholds: adjusted by volatility
             rsi_buy = 30 if volatility_pct < 5.0 else 25
             rsi_sell = 70 if volatility_pct < 5.0 else 75
 
@@ -1937,16 +1938,16 @@ def build_reserved_candidates(
                 "rsi_sell": rsi_sell,
             }
         elif strat_upper == "AUTOLOOP":
-            # AUTOLOOP: 분할매수 + 익절 - 변동성 + AI 신뢰도 기반
-            # TP: 변동성에 비례 (1.0 ~ 5.0%)
+            # AUTOLOOP: scaled buying + take-profit - based on volatility + AI confidence
+            # TP: proportional to volatility (1.0 ~ 5.0%)
             tp_pct = round(max(1.0, min(5.0, volatility_pct * 0.4 + 1.0)), 1)
-            # 분할 단계: 예산에 비례 (3 ~ 12)
+            # Scaling steps: proportional to budget (3 ~ 12)
             steps = max(3, min(12, int(budget / 25)))
-            # AI 신뢰도 기반 배율 (HIGH: 1.3, MEDIUM: 1.0, LOW: 0.8)
+            # AI-confidence-based multiplier (HIGH: 1.3, MEDIUM: 1.0, LOW: 0.8)
             conf_tier = "high" if ai_score >= 0.8 else ("medium" if ai_score >= 0.6 else "low")
             budget_mult = 1.3 if conf_tier == "high" else (1.0 if conf_tier == "medium" else 0.8)
 
-            # RSI 기반 조정
+            # RSI-based adjustment
             if rsi_val < 30:
                 tp_pct = min(tp_pct + 0.5, 6.0)
                 budget_mult = min(budget_mult + 0.1, 1.5)
@@ -1960,7 +1961,7 @@ def build_reserved_candidates(
                 "confidence_tier": conf_tier,
             }
         elif strat_upper == "CONTRARIAN":
-            # CONTRARIAN: 일관성 우선 프로필 (빠른 회수 + 선택적 트레일)
+            # CONTRARIAN: consistency-first profile (fast recovery + optional trail)
             tp_pct = round(max(0.1, _sf(os.getenv("OMA_CONTRARIAN_MIN_TP_PCT", "15.0"), 15.0)), 2)
             sl_pct = round(-abs(_sf(os.getenv("OMA_CONTRARIAN_DEFAULT_SL_PCT", "50.0"), 50.0)), 2)
             trail_enabled = str(os.getenv("OMA_CONTRARIAN_FORCE_TRAIL", "false")).strip().lower() == "true"
@@ -1982,20 +1983,20 @@ def build_reserved_candidates(
                 "entry_ob_guard_enabled": (not bool(bypass_ob_guard)),
             }
         elif strat_upper == "SNIPER":
-            # SNIPER: 저격 매수/매도 - AI가 자동 계산한 파라미터 사용
+            # SNIPER: sniper buy/sell - use parameters auto-computed by AI
             sniper_params = getattr(s, "_sniper_params", {})
             if sniper_params:
                 item["recommended_params"] = sniper_params
-                # lookback 시간 단위 표시 추가
+                # Add lookback time-unit display
                 lookback_min = sniper_params.get("entry_lookback_min", 360)
                 if lookback_min >= 1440:
-                    item["lookback_display"] = f"{lookback_min // 1440}일"
+                    item["lookback_display"] = f"{lookback_min // 1440}d"
                 elif lookback_min >= 60:
-                    item["lookback_display"] = f"{lookback_min // 60}시간"
+                    item["lookback_display"] = f"{lookback_min // 60}h"
                 else:
-                    item["lookback_display"] = f"{lookback_min}분"
+                    item["lookback_display"] = f"{lookback_min}m"
             else:
-                # 기본값
+                # default
                 item["recommended_params"] = {
                     "entry_enabled": True,
                     "entry_lookback_min": 360,
@@ -2014,11 +2015,11 @@ def build_reserved_candidates(
                     "fallback_to_market": True,
                     "expiry_min": 180,
                 }
-                item["lookback_display"] = "6시간"
+                item["lookback_display"] = "6h"
 
         return item
 
-    # ── [2026-03-18] 옥션 방식: 전문 전략 슬롯 미충족 시 범용 전략에서 코인 양보 ──
+    # ── [2026-03-18] Auction approach: when specialist strategy slots are unfilled, generalist strategies yield coins ──
     _auction_enabled = os.getenv("OMA_AUCTION_ENABLED", "1").strip() != "0"
     if _auction_enabled:
         _specialist = {
@@ -2162,7 +2163,7 @@ def build_reserved_candidates(
             "budget_base_pingpong": pp_base,
             "budget_base_autoloop": al_base,
         },
-        # 동적 예산 배분 정보
+        # dynamic budget allocation info
         "dynamic_budget": {
             "enabled": dynamic_budget_enabled,
             "total_capital_usdt": total_capital_usdt,
@@ -2171,7 +2172,7 @@ def build_reserved_candidates(
         },
     }
 
-    # Session 누수 방지
+    # Prevent session leak
     try:
         sess.close()
     except Exception:

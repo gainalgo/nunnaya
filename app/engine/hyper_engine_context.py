@@ -4,9 +4,9 @@
 # ------------------------------------------------------------
 # - Warm-up(Readiness)
 # - Strategy snapshot / Risk snapshot (UI + Manager Router contract)
-# - Position (qty 기반) + PnL
+# - Position (qty-based) + PnL
 # - Order state (pending) persisted for crash recovery
-# - Context state는 runtime/context_state.json으로 저장/복원
+# - Context state is persisted/restored via runtime/context_state.json
 # ============================================================
 
 from __future__ import annotations
@@ -25,13 +25,13 @@ from app.core.currency import Q
 
 
 class HyperEngineContext:
-    """단일 마켓의 상태 저장소(State).
+    """State store for a single market.
 
-    LIVE 설계 포인트:
-    - 포지션은 qty 기반으로 저장 (실거래 체결량과 일치)
-    - order_state를 dict로 저장하여 서버 리셋 후에도 pending 복구 가능
-    - RECOVERY 모드에서는 '진입 금지'이되, 청산/회수는 허용한다.
-    - 부팅/리셋에도 안전하게 재개할 수 있도록 최소한의 가격 tail을 보존한다.
+    LIVE design points:
+    - Position is stored qty-based (matches actual exchange fill quantity)
+    - order_state is stored as a dict so pending orders survive a server reset
+    - In RECOVERY mode entry is forbidden, but exit/recovery is allowed.
+    - A minimal price tail is preserved so we can resume safely after boot/reset.
     """
 
     def __init__(
@@ -73,11 +73,11 @@ class HyperEngineContext:
         # -----------------------------
         self.policy: Dict[str, Any] = dict(base_policy or {})
 
-        # Position schema (권장)
+        # Position schema (recommended)
         # {
         #   entry: float,
         #   qty: float,
-        #   usdt: float,          # (선택) 누적 투입금
+        #   usdt: float,          # (optional) cumulative invested funds
         #   source: 'paper'|'bybit'|'orphan'
         # }
         self.position: Optional[Dict[str, Any]] = None
@@ -89,7 +89,7 @@ class HyperEngineContext:
         self.price_buffer = self.price_history  # compatibility
         self.volume_history: Deque[float] = deque(maxlen=2000)
         self.last_price_ts: Optional[float] = None
-        # 타임스탬프 포함 가격 히스토리 — 5분봉 저점 계산용 (maxlen=6000 ≈ 1틱/초 × 100분)
+        # Timestamped price history — for 5-min candle low calculation (maxlen=6000 ≈ 1 tick/sec × 100 min)
         self._ts_price_history: Deque[tuple] = deque(maxlen=6000)
         # NOTE: warmup timer anchor (set on first valid price)
         # 🚨 DO NOT REMOVE: some components reference ctx.first_price_ts directly.
@@ -101,7 +101,7 @@ class HyperEngineContext:
         self.created_at: float = time.time()
         self.min_ticks: int = 100
         self.min_seconds: int = 300  # 5 minutes
-        # [2026-02-02] 워밍업 완료 플래그 - True면 is_ready() 체크 스킵
+        # [2026-02-02] Warmup-done flag - if True, skip the is_ready() check
         self._warmup_done: bool = False
 
         # -----------------------------
@@ -157,24 +157,24 @@ class HyperEngineContext:
         # PingPong Cycle (repeatable loop)
         # -----------------------------
         # NOTE:
-        # - Engine(HyperNunnaya)에서 BUY/SELL intent 생성에 사용
-        # - System(HyperSystem)에서 체결 완료 후 IDLE로 복구
+        # - Used by Engine (HyperNunnaya) to generate BUY/SELL intents
+        # - Reset to IDLE by System (HyperSystem) after a fill completes
         self.cycle: str = "IDLE"              # IDLE | HOLDING | EXITING
-        self.entry_tick: int = -1             # BUY 시점 tick
-        self.entry_ts: float = 0.0            # BUY 시점 time.time()
-        self.exit_pending: bool = False       # SELL intent 생성 후 중복 방지
-        self.exit_submit_ts: float = 0.0      # SELL intent 생성 시각(옵션)
-        self.reentry_block_until_ts: float = 0.0  # SELL 후 재진입 쿨다운(옵션)
+        self.entry_tick: int = -1             # tick at BUY time
+        self.entry_ts: float = 0.0            # time.time() at BUY time
+        self.exit_pending: bool = False       # prevent duplicate SELL intents
+        self.exit_submit_ts: float = 0.0      # SELL intent creation time (optional)
+        self.reentry_block_until_ts: float = 0.0  # re-entry cooldown after SELL (optional)
 
         # Last exit (for entry-ceiling guard)
         self.last_exit_price: Optional[float] = None
         self.last_exit_ts: float = 0.0
-        self.engine_started_ts: float = 0.0   # 엔진 start 직후 BUY 폭주 방지용(옵션)
+        self.engine_started_ts: float = 0.0   # prevent BUY bursts right after engine start (optional)
 
         # -----------------------------
         # Entry guard (local cooldown)
         # -----------------------------
-        # 슬리피지/지연 등으로 시장 단위로 잠깐 진입을 막고 싶을 때 사용
+        # Used to briefly block entry per-market due to slippage/latency, etc.
         self.entry_block_until_ts: Optional[float] = None
         self.entry_block_reason: Optional[str] = None
         self.exit_block_until_ts: Optional[float] = None
@@ -191,48 +191,48 @@ class HyperEngineContext:
         # Suspicion / Risk Memory (v1)
         # -----------------------------
         # NOTE:
-        # '의심을 숫자로 만들기' 위한 상태 기억 영역.
-        # Context는 계산을 하지 않고, RiskClassifier가 계산한 결과만 저장한다.
-        # 기존 RiskBand(L0/L1/L2) 구조를 대체하지 않으며, 병행 운용을 전제로 한다.
+        # State-memory area for 'turning suspicion into a number'.
+        # Context does not compute; it only stores results computed by RiskClassifier.
+        # It does not replace the existing RiskBand (L0/L1/L2) structure; both run in parallel.
 
-        # 현재 의심 점수 (0~100)
-        # 50 = 중립(default), 높을수록 의심
+        # Current suspicion score (0~100)
+        # 50 = neutral (default), higher = more suspicious
         self.suspicion_score: float = 50.0
 
-        # 내부 세분화된 Risk Level (L0~L5)
-        # UI에는 신호등 그룹(RED/YELLOW/GREEN)으로 매핑됨
+        # Internal fine-grained Risk Level (L0~L5)
+        # Mapped to a traffic-light group (RED/YELLOW/GREEN) in the UI
         self.suspicion_level: str = "L3"
 
-        # UI용 신호등 그룹
+        # Traffic-light group for the UI
         # RED / YELLOW / GREEN
         self.suspicion_group: str = "YELLOW"
 
-        # 동일 그룹 내 감도 (0.0 ~ 1.0)
-        # 색의 밝기/채도/펄스 강도에 사용
+        # Intensity within the same group (0.0 ~ 1.0)
+        # Used for color brightness/saturation/pulse strength
         self.suspicion_intensity: float = 0.5
 
-        # 마지막 suspicion 갱신 시각
+        # Last suspicion update time
         self.suspicion_ts: Optional[float] = None
 
         # -----------------------------
         # Suspicion / Confidence History
         # -----------------------------
         # NOTE:
-        # Risk 판단의 근거 추적용 히스토리.
-        # '지금 값'이 아니라 '어떻게 변해왔는지'를 보기 위함.
-        # 의심이 해소되기 전까지는 제거하지 않는다.
+        # History for tracing the basis of Risk decisions.
+        # The point is to see 'how it changed over time', not just 'the current value'.
+        # Not removed until the suspicion is resolved.
 
-        # 최근 confidence 변화 기록
+        # Recent confidence changes
         self.confidence_history: Deque[float] = deque(maxlen=30)
 
-        # 최근 suspicion score 변화 기록
+        # Recent suspicion score changes
         self.suspicion_history: Deque[float] = deque(maxlen=30)
 
         # -----------------------------
         # Trade Attempt Tracking
         # -----------------------------
         # NOTE:
-        # BUY 신호가 발생했으나 실제 포지션 오픈으로 이어지지 않은 횟수
+        # Count of BUY signals that fired but did not lead to an actual position open
         self.attempt_count: int = 0
 
         # Win/Loss Tracking for Self-Optimizer
@@ -251,18 +251,18 @@ class HyperEngineContext:
         # Engine Controls (UI Toggles & Sliders)
         # -----------------------------
         # NOTE:
-        # - 버튼/슬라이더 기반 제어를 위한 상태 저장소
-        # - 엔진이 '어떤 판단을 얼마나 반영할지'를 조절하기 위한 용도
-        # - 기본값은 기존 엔진 동작을 최대한 유지하도록 설정
+        # - State store for button/slider-based control
+        # - Used to tune 'which decisions the engine reflects, and how much'
+        # - Defaults are set to preserve existing engine behavior as much as possible
         #
-        # enabled : ON / OFF (버튼)
-        # level   : 0~10 (슬라이더, 신뢰도/강도)
+        # enabled : ON / OFF (button)
+        # level   : 0~10 (slider, confidence/strength)
         #
-        # 이 구조는 엔진에서 "읽기 전용"으로 사용한다.
-        # 계산/판단은 Context가 하지 않는다.
+        # This structure is used "read-only" by the engine.
+        # Context does not compute/decide.
         self.controls: Dict[str, Dict[str, Any]] = {
-            "baseline": {"enabled": False,  "level": 10},  # 최후 안전핀
-            "ai":       {"enabled": True,  "level": 10},  # 기존 AI 판단
+            "baseline": {"enabled": False,  "level": 10},  # last-resort safety pin
+            "ai":       {"enabled": True,  "level": 10},  # existing AI decision
             "strategy": {"enabled": False, "level": 5, "mode": "PINGPONG", "params": {
                 "pp_exit_enabled": True,
                 "pp_exit_lookback": 60,
@@ -280,8 +280,8 @@ class HyperEngineContext:
                 "pp_exit_band_len": 20,
                 "pp_exit_band_k": 2.0,
                 "pp_exit_min_profit_pct": 0.0
-            }},   # 전략 보조 (초기 OFF)
-            "risk":     {"enabled": True,  "level": 10},  # 리스크 차단
+            }},   # strategy assist (initially OFF)
+            "risk":     {"enabled": True,  "level": 10},  # risk blocking
             "tp_sl":    {"enabled": True,  "level": 10},
             "manual":   {"enabled": False},  # Market isolation (no engine orders)  # TP/SL
         }
@@ -362,23 +362,23 @@ class HyperEngineContext:
         if getattr(self, "first_price_ts", None) is None:
             self.first_price_ts = now
 
-        # [PERF] 중복 가격 price_history 저장 방지 (2026-03-18)
-        # 동일 가격 반복 기록 시 deque(maxlen=2000) 윈도우가 짧아짐
-        # 중복 제거 → 유효 lookback 확대 → 인디케이터 품질 향상
-        # _ts_price_history는 항상 기록 (시간 기반 rolling low/high 계산 필요)
+        # [PERF] Avoid storing duplicate prices in price_history (2026-03-18)
+        # Repeatedly recording the same price shrinks the deque(maxlen=2000) window
+        # Dedup -> wider effective lookback -> better indicator quality
+        # _ts_price_history is always recorded (needed for time-based rolling low/high)
         if not self.price_history or self.price_history[-1] != p:
             self.price_history.append(p)
         self._ts_price_history.append((now, p))
         self.last_price_ts = now
 
     def get_rolling_low(self, minutes: float = 5.0) -> float:
-        """최근 N분 내 최저가를 반환. 타임스탬프 기반이라 5분봉 저점과 동일한 축."""
+        """Return the lowest price within the last N minutes. Timestamp-based, so it shares the same axis as the 5-min candle low."""
         cutoff = time.time() - minutes * 60.0
         prices = [p for ts, p in self._ts_price_history if ts >= cutoff]
         return min(prices) if prices else 0.0
 
     def get_rolling_high(self, minutes: float = 5.0) -> float:
-        """최근 N분 내 최고가를 반환. 저점 계산과 동일한 시간축을 사용."""
+        """Return the highest price within the last N minutes. Uses the same time axis as the low calculation."""
         cutoff = time.time() - minutes * 60.0
         prices = [p for ts, p in self._ts_price_history if ts >= cutoff]
         return max(prices) if prices else 0.0
@@ -414,22 +414,22 @@ class HyperEngineContext:
     # Warm-up / Readiness
     # --------------------------------------------------
     def is_ready(self) -> bool:
-        """워밍업 완료 여부 확인.
-        
-        [2026-02-02] 최적화: _warmup_done 플래그가 True면 즉시 반환.
-        ACTIVE 마켓은 매 tick마다 len() + time() 계산을 스킵한다.
+        """Check whether warmup is complete.
+
+        [2026-02-02] Optimization: return immediately if the _warmup_done flag is True.
+        ACTIVE markets skip the len() + time() computation on every tick.
         """
-        # 플래그가 이미 True면 추가 계산 없이 즉시 반환
+        # If the flag is already True, return immediately with no extra computation
         if self._warmup_done:
             return True
-        
-        # 실제 조건 체크
+
+        # Check the actual conditions
         ready = (
             len(self.price_history) >= self.min_ticks
             and (time.time() - self.created_at) >= self.min_seconds
         )
-        
-        # 조건 충족 시 플래그 설정 (이후 호출에서 스킵)
+
+        # Set the flag once conditions are met (skipped on later calls)
         if ready:
             self._warmup_done = True
         
@@ -449,8 +449,8 @@ class HyperEngineContext:
         return self.readiness_status()
 
     def reset_warmup(self) -> None:
-        """가격 히스토리/웜업 기준을 리셋한다."""
-        self._warmup_done = False  # 플래그도 리셋
+        """Reset the price history / warmup baseline."""
+        self._warmup_done = False  # reset the flag too
         self.created_at = time.time()
         self.price_history.clear()
         self.volume_history.clear()
@@ -458,18 +458,18 @@ class HyperEngineContext:
         self.first_price_ts = None
 
     def force_ready(self) -> None:
-        """[2026-02-02] 워밍업을 강제 완료시킨다.
+        """[2026-02-02] Force warmup to complete.
 
-        ACTIVE로 전환될 때 호출하여 워밍업 대기 없이 즉시 거래 가능하게 함.
-        [FIX 2026-03-24] 포지션 없고 데이터 부족하면 force하지 않음.
-        포지션 있으면 기존 보유 코인이므로 즉시 거래 가능해야 함.
+        Called when switching to ACTIVE so trading is immediately possible without warmup wait.
+        [FIX 2026-03-24] Do not force if there is no position and data is insufficient.
+        If a position exists it's an already-held coin, so it must be tradable immediately.
         """
-        # 포지션이 있으면 무조건 ready (기존 보유 코인 관리용)
+        # If a position exists, always ready (for managing already-held coins)
         has_position = bool(self.position and float(self.position.get("qty", 0) or 0) > 0)
         if has_position:
             self._warmup_done = True
             return
-        # 포지션 없으면 데이터 충분할 때만 ready
+        # If no position, ready only when there is enough data
         if len(self.price_history) >= self.min_ticks:
             self._warmup_done = True
 
@@ -572,7 +572,7 @@ class HyperEngineContext:
     # Capital / Position helpers
     # --------------------------------------------------
     def request_capital(self, amount: float) -> bool:
-        """(PAPER) 내부 자본 차감."""
+        """(PAPER) Deduct internal capital."""
         amount = float(amount)
         if self.usable_capital >= amount:
             self.usable_capital -= amount
@@ -580,7 +580,7 @@ class HyperEngineContext:
         return False
 
     def open_position(self, entry_price: float, usdt_amount: float, *, source: str = "paper") -> None:
-        """(PAPER) USDT 금액 기반 포지션 오픈 → qty로 환산."""
+        """(PAPER) Open a position from a USDT amount -> convert to qty."""
         entry = float(entry_price)
         usdt = float(usdt_amount)
         qty = (usdt / entry) if entry > 0 else 0.0
@@ -593,7 +593,7 @@ class HyperEngineContext:
         }
 
     def close_position(self, exit_price: float) -> float:
-        """(PAPER) 포지션 전량 청산."""
+        """(PAPER) Close the entire position."""
         if not self.position:
             return 0.0
 
@@ -603,7 +603,7 @@ class HyperEngineContext:
             self.position = None
             return 0.0
 
-        # 수수료 반영 (매수 0.1% + 매도 0.1%)
+        # Apply fees (buy 0.1% + sell 0.1%)
         FEE_RATE = 0.001  # 0.1%
         buy_fee = entry * qty * FEE_RATE
         sell_fee = float(exit_price) * qty * FEE_RATE
@@ -612,7 +612,7 @@ class HyperEngineContext:
         self.total_profit += profit
         self.unrealized_profit = 0.0
 
-        # 원금(=entry*qty) + profit 반환
+        # Return principal (=entry*qty) + profit
         principal = entry * qty
         # PATCH 2025-12-26: wallet-mode => profit extracted, loss reflected
         if getattr(self, 'wallet_mode', False):
@@ -681,10 +681,10 @@ class HyperEngineContext:
     # LIVE fill apply
     # --------------------------------------------------
     def apply_fill_buy(self, *, avg_price: float, qty: float, funds: float, fee: float, source: str = "bybit") -> None:
-        """체결(매수) 반영.
+        """Apply a fill (buy).
 
-        - qty: 체결 수량
-        - funds: 사용한 USDT
+        - qty: filled quantity
+        - funds: USDT used
         """
         avg_price = float(avg_price)
         qty = float(qty)
@@ -738,7 +738,7 @@ class HyperEngineContext:
             self.position.setdefault("sell_proceeds_usdt", 0.0)
             self.position["source"] = source
 
-        # realized profit는 매수에서 발생하지 않는다.
+        # realized profit does not occur on a buy.
 
     def apply_fill_sell(self, *, avg_price: float, qty: float, funds: float, fee: float, source: str = "bybit") -> None:
         pos = self.position
@@ -808,32 +808,32 @@ class HyperEngineContext:
         override: bool = False
     ) -> None:
         """
-        Tick 종료 후 상태 정리.
+        Tidy up state after a tick ends.
 
-        기본 동작:
-        - signal을 last_signal로 기록
-        - 미실현 손익 계산
+        Default behavior:
+        - Record signal into last_signal
+        - Compute unrealized PnL
 
-        override=True 인 경우:
-        - 엔진(arbiter)에서 확정한 signal을 그대로 신뢰
-        - 외부에서 조정된 판단을 덮어쓰지 않음
+        When override=True:
+        - Trust the signal finalized by the engine (arbiter) as-is
+        - Do not overwrite the externally-adjusted decision
         """
 
         # -----------------------------
-        # signal 기록
+        # record signal
         # -----------------------------
         if override:
             # NOTE:
-            # 엔진에서 최종 확정한 신호.
-            # Context 내부 판단으로 재해석하지 않는다.
+            # Signal finalized by the engine.
+            # Not reinterpreted by Context-internal logic.
             self.last_signal = signal
         else:
             # NOTE:
-            # 기존 동작 유지 (호환성)
+            # Preserve existing behavior (compatibility)
             self.last_signal = signal
 
         # -----------------------------
-        # 손익 계산 (항상 수행)
+        # PnL computation (always performed)
         # -----------------------------
         self.compute_unrealized(price)
 
@@ -842,14 +842,14 @@ class HyperEngineContext:
     # Persistence helpers (context_state.json)
     # --------------------------------------------------
     def _clean_strategy_vars(self) -> Dict[str, Any]:
-        """직렬화 전 strategy_vars에서 오래된 날짜별 키를 제거.
+        """Remove stale date-keyed entries from strategy_vars before serialization.
 
-        lt_shots_YYYYMMDD, sniper_shots_YYYYMMDD 등이 매일 새로 생겨
-        무한 누적되는 문제 방지. 오늘 + 어제 키만 보존.
+        Prevents unbounded accumulation as keys like lt_shots_YYYYMMDD,
+        sniper_shots_YYYYMMDD are created fresh each day. Keep only today + yesterday keys.
         """
         import re
         today = time.strftime("%Y%m%d")
-        # 어제 날짜 계산 (간단히 -1일)
+        # Compute yesterday's date (simply -1 day)
         try:
             from datetime import datetime, timedelta
             yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
@@ -862,7 +862,7 @@ class HyperEngineContext:
         for k, v in self.strategy_vars.items():
             m = date_key_re.match(k)
             if m and m.group(2) not in keep_dates:
-                continue  # 오래된 날짜별 키 제거
+                continue  # drop stale date-keyed entry
             cleaned[k] = v
         return cleaned
 
@@ -882,7 +882,7 @@ class HyperEngineContext:
             "created_at": self.created_at,
             "min_ticks": self.min_ticks,
             "min_seconds": self.min_seconds,
-            "_warmup_done": self._warmup_done,  # [2026-02-02] 워밍업 완료 플래그
+            "_warmup_done": self._warmup_done,  # [2026-02-02] warmup-done flag
             "price_tail": prices,
             "last_price_ts": self.last_price_ts,
             "first_price_ts": self.first_price_ts,
@@ -937,7 +937,7 @@ class HyperEngineContext:
         pos = state.get("position")
         if isinstance(pos, dict):
             self.position = dict(pos)
-            # [FIX 2026-02-19] 기존 포지션에 entry_ts가 없으면 백필 (Grace Period 작동 보장)
+            # [FIX 2026-02-19] Backfill entry_ts if an existing position lacks it (ensures Grace Period works)
             if self.position.get("qty", 0) > 0 and not self.position.get("entry_ts"):
                 self.position["entry_ts"] = time.time()
         else:
@@ -950,9 +950,9 @@ class HyperEngineContext:
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
             logger.warning("[CTX] apply_state entry_ts backfill: %s", exc, exc_info=True)
 
-        # [2026-02-02] 워밍업 완료 플래그 복원
-        # [FIX 2026-03-24] min_ticks 이상 데이터가 실제로 있을 때만 warmup 완료
-        # 이전: ACTIVE면 무조건 True → min_ticks 변경 무력화
+        # [2026-02-02] Restore the warmup-done flag
+        # [FIX 2026-03-24] Mark warmup complete only when data actually meets/exceeds min_ticks
+        # Previously: always True when ACTIVE -> nullified min_ticks changes
         _has_enough_data = len(self.price_history) >= self.min_ticks
         if state.get("_warmup_done") and _has_enough_data:
             self._warmup_done = True
@@ -1036,7 +1036,7 @@ class HyperEngineContext:
                 # Only set if we actually have migrated keys.
                 self.strategy_vars = migrated
 
-        # 가격 tail 복원
+        # Restore the price tail
         tail = state.get("price_tail")
         prices: list[float] = []
         if isinstance(tail, list):
@@ -1136,8 +1136,8 @@ class HyperEngineContext:
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
             logger.warning("[CTX] win/loss count restore: %s", exc, exc_info=True)
 
-        # stale guard: 너무 오래된 tail이면 warmup 리셋
-        # [2026-02-02] ACTIVE/RECOVERY 마켓은 워밍업 리셋 대신 force_ready()
+        # stale guard: reset warmup if the tail is too old
+        # [2026-02-02] For ACTIVE/RECOVERY markets, use force_ready() instead of warmup reset
         try:
             if stale_reset_sec > 0 and self.last_price_ts is not None:
                 if (time.time() - float(self.last_price_ts)) > float(stale_reset_sec):
@@ -1148,11 +1148,11 @@ class HyperEngineContext:
         except (TypeError, ValueError) as exc:
             logger.warning("[CTX] stale guard check: %s", exc, exc_info=True)
 
-        # controls 복원(세팅-표시-실행 일치)
-        # - 과거에는 안전을 위해 재시작 시 기본값으로 리셋했지만,
-        #   전략 모드/파라미터가 재가동 후 PINGPONG/기본값으로 돌아가는 문제를 유발.
-        # - baseline 은 강제/테스트 성격이 강해 기본적으로는 복원하지 않고,
-        #   필요 시 env OMA_PERSIST_BASELINE=1 일 때만 복원한다.
+        # Restore controls (keep settings-display-execution consistent)
+        # - In the past we reset to defaults on restart for safety, but that caused
+        #   strategy mode/params to revert to PINGPONG/defaults after restart.
+        # - baseline is mostly forced/test-oriented, so it is not restored by default;
+        #   it is restored only when env OMA_PERSIST_BASELINE=1.
         ctrls = state.get("controls")
         if isinstance(ctrls, dict) and ctrls:
             try:
@@ -1168,7 +1168,7 @@ class HyperEngineContext:
                     ctrls.pop("baseline", None)
                 self.update_controls(ctrls)
             except (KeyError, AttributeError, TypeError) as exc:
-                # 복원 실패는 치명적일 필요가 없고, 기본값으로 동작하면 된다.
+                # A restore failure need not be fatal; running with defaults is fine.
                 logger.warning("[CTX] controls restore: %s", exc, exc_info=True)
 
         # Legacy policy normalization:
@@ -1253,8 +1253,8 @@ class HyperEngineContext:
         # Atomic update using deepcopy to prevent race conditions
         next_controls = copy.deepcopy(self.controls)
 
-        # 모드 전환 시 이전 전략 params를 클린 교체
-        # deep-merge만 하면 이전 모드의 파라미터가 잔존해 "풀림" 현상 발생
+        # On mode switch, cleanly replace the previous strategy params
+        # A deep-merge alone leaves the previous mode's params behind, causing a "reset/loosening" effect
         try:
             new_mode = str((sanitized.get("strategy") or {}).get("mode") or "").strip().upper()
             if new_mode and new_mode != prev_mode and prev_mode:

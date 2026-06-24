@@ -1,8 +1,9 @@
-"""Upbit Exchange Adapter — 현물(Spot) / KRW 마켓.
+"""Upbit Exchange Adapter — Spot / KRW market.
 
-`exchange_factory.create_exchange_adapter("UPBIT")` 로 생성.
-FOCUS 엔진은 `trade_client`(UpbitTradeClient)를 직접 쓰지만, 이 어댑터는
-거래소-통합 레이어(`ExchangeAdapter`) 정합성을 위해 제공한다.
+Created via `exchange_factory.create_exchange_adapter("UPBIT")`.
+The FOCUS engine uses `trade_client` (UpbitTradeClient) directly, but this
+adapter is provided for consistency with the exchange-integration layer
+(`ExchangeAdapter`).
 """
 import logging
 from decimal import Decimal
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class UpbitAdapter(ExchangeAdapter):
-    # 현물 = 청산 없음. SLArbiter/청산 모듈이 거래소 분기에 쓰는 선택자(DESIGN §4.2).
+    # Spot = no liquidation. Selector used by SLArbiter/liquidation modules to branch by exchange (DESIGN §4.2).
     has_liquidation = False
 
     def __init__(self, access_key: str = "", secret_key: str = ""):
@@ -35,7 +36,7 @@ class UpbitAdapter(ExchangeAdapter):
     def get_quote_currency(self):
         return "KRW"
 
-    # ── 시세 ────────────────────────────────────────────────
+    # ── Market data ─────────────────────────────────────────
     def get_markets(self):
         try:
             data = self.trade_client.get_all_markets()
@@ -71,7 +72,7 @@ class UpbitAdapter(ExchangeAdapter):
     def get_orderbook(self, market):
         return None
 
-    # ── 잔고 ────────────────────────────────────────────────
+    # ── Balances ────────────────────────────────────────────
     def get_balances(self, currency=None):
         try:
             data = self.trade_client.accounts()
@@ -88,9 +89,9 @@ class UpbitAdapter(ExchangeAdapter):
         res = self.get_balances(currency)
         return res[0] if res else None
 
-    # ── 주문 ────────────────────────────────────────────────
+    # ── Orders ──────────────────────────────────────────────
     def buy_market_order(self, market, volume=None, price=None):
-        # Upbit 시장가 매수 = KRW 금액 기준. price(금액) 우선, 없으면 volume 을 금액으로 취급.
+        # Upbit market buy = denominated in KRW amount. Prefer price (amount); otherwise treat volume as the amount.
         amount = price if price is not None else volume
         od = self.trade_client.market_buy(market, float(amount))
         return self._to_result(od, market, OrderSide.BUY)
@@ -148,7 +149,7 @@ class UpbitAdapter(ExchangeAdapter):
         return {"wait": OrderStatus.PENDING, "done": OrderStatus.FILLED,
                 "cancel": OrderStatus.CANCELLED}.get(state, OrderStatus.FAILED)
 
-    # ── 유틸 ────────────────────────────────────────────────
+    # ── Utils ───────────────────────────────────────────────
     def normalize_market_code(self, market, base_currency="KRW"):
         return to_upbit_market(market)
 
@@ -160,7 +161,7 @@ class UpbitAdapter(ExchangeAdapter):
         return (mk, "KRW")
 
     def get_fee_rate(self, order_type="market"):
-        return 0.0005  # Upbit KRW 마켓 ~0.05%
+        return 0.0005  # Upbit KRW market ~0.05%
 
     def get_min_order_amount(self, market):
         return 5000.0  # KRW

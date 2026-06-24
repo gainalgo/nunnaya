@@ -1,13 +1,16 @@
-"""GateLedger — 진입 게이트 통과/거절 집계 장부 (해결안 B, master 설계도 §9.2-B / F3).
+"""GateLedger — entry-gate pass/reject tally ledger (solution B, master blueprint §9.2-B / F3).
 
-부모님 북극성 "봇=차림, 사람=수확"(INV-6)은 *후보 가시화*가 핵심인데, 지금은
-"차린 것(near-miss)"만 보이고 "왜 못 차렸나(게이트 병목)"가 안 보인다. 이 장부가
-그 빈칸을 채운다 — 진입 게이트가 reject 할 때 던지는 reason 을 코인×게이트 매트릭스로
-*세기만* 한다(새 판단 0). _record_skip / _record_near_miss 가 이미 만든 reason 을 받아
-in-memory 카운터로 누적, 주기적으로 runtime/focus_gate_stats.json 에 영속.
+The owner's North Star "bot = sets the table, human = harvests" (INV-6) hinges on
+*candidate visibility*, but right now only "what was set out (near-miss)" is visible
+and "why it couldn't be set out (gate bottleneck)" is not. This ledger fills that gap —
+it *only counts* the reason an entry gate throws on reject, as a coin×gate matrix
+(zero new judgments). It takes the reason already produced by _record_skip /
+_record_near_miss, accumulates it in an in-memory counter, and periodically persists
+to runtime/focus_gate_stats.json.
 
-★ 진입 로직 1바이트도 안 건드린다(관측만). record() 의 모든 예외는 삼켜서 진입 흐름에
-  절대 전파되지 않는다(INV-2 기존 불침). default OFF — FOCUS_GATE_LEDGER_ENABLED 로만 켬.
+★ It does not touch a single byte of entry logic (observation only). Every exception in
+  record() is swallowed so it never propagates into the entry flow (INV-2, unbroken as
+  before). default OFF — enabled only via FOCUS_GATE_LEDGER_ENABLED.
 """
 from __future__ import annotations
 
@@ -19,8 +22,8 @@ from typing import Dict
 
 
 def _atomic_write_json(path: str, data: dict) -> None:
-    """tmp 쓰고 os.replace 로 교체 = 원자적(app.core.io_utils.safe_write_json 과 동일 패턴).
-    ★ 자체 구현 — 무거운 app.core import 체인(fastapi 등)에 의존 안 함(관측 도구가 본체를 깨면 안 됨)."""
+    """Write to tmp then swap via os.replace = atomic (same pattern as app.core.io_utils.safe_write_json).
+    ★ Self-contained — does not depend on the heavy app.core import chain (fastapi etc.) so an observation tool can't break the core."""
     d = os.path.dirname(path)
     if d:
         os.makedirs(d, exist_ok=True)
@@ -30,14 +33,14 @@ def _atomic_write_json(path: str, data: dict) -> None:
     os.replace(tmp, path)
 
 
-# 방어적 상한 — 코드의 reason/코인 집합은 유한하지만 이상 입력에 대비해 카디널리티 캡
+# Defensive caps — the code's reason/coin sets are finite, but cap cardinality to guard against anomalous input
 _MAX_GATES = 300
 _MAX_MARKETS_PER_GATE = 50
 
 
 class GateLedger:
-    """틱당 in-memory 카운터 + 주기 flush. record() 가 lazy flush 를 내장하므로
-    호출자는 결선 지점에서 record() 1줄만 부르면 된다(별도 tick 훅 불필요)."""
+    """Per-tick in-memory counter + periodic flush. Since record() has a lazy flush built in,
+    the caller only needs a single record() line at the wiring point (no separate tick hook needed)."""
 
     def __init__(self, flush_path: str = "runtime/focus_gate_stats.json",
                  flush_sec: float = 60.0) -> None:
@@ -62,8 +65,8 @@ class GateLedger:
 
     def record(self, market: str, gate: str, passed: bool, direction: str = "-",
                detail: str = "") -> None:
-        """진입 게이트 1건 통과/거절 집계. 기존 reject/entry 지점에서 1줄 호출.
-        예외는 절대 전파 금지 — 관측이 진입 흐름을 깨면 안 됨."""
+        """Tally one entry-gate pass/reject. Call as a single line at the existing reject/entry point.
+        Exceptions must never propagate — observation must not break the entry flow."""
         try:
             self._roll_if_new_day()
             g = str(gate or "-").strip()[:80] or "-"
@@ -71,7 +74,7 @@ class GateLedger:
             slot = self._gates.get(g)
             if slot is None:
                 if len(self._gates) >= _MAX_GATES:
-                    return  # 카디널리티 폭주 방어 — 새 게이트 무시(기존 집계는 계속)
+                    return  # cardinality-blowup guard — ignore new gates (existing tallies continue)
                 slot = {"pass": 0, "reject": 0, "markets": Counter()}
                 self._gates[g] = slot
             if passed:
@@ -83,11 +86,11 @@ class GateLedger:
                 mc[mkt] += 1
             self._total_scanned += 1
             self.maybe_flush(time.time())
-        except Exception:  # noqa: BLE001 — 관측 실패는 무해, 진입 불침
+        except Exception:  # noqa: BLE001 — observation failure is harmless, entry flow unbroken
             pass
 
     def snapshot(self) -> dict:
-        """peer_brief / UI 노출용. {"date", "gates": {<gate>: {pass, reject, top_markets}}, "total_scanned"}."""
+        """For peer_brief / UI exposure. {"date", "gates": {<gate>: {pass, reject, top_markets}}, "total_scanned"}."""
         try:
             gates_out: Dict[str, Dict] = {}
             for g, slot in self._gates.items():
@@ -102,7 +105,7 @@ class GateLedger:
             return {"date": self._date, "gates": {}, "total_scanned": 0}
 
     def maybe_flush(self, now: float) -> None:
-        """flush_sec 경과 시 원자적 쓰기로 영속. 실패해도 무해."""
+        """Persist via atomic write once flush_sec has elapsed. Harmless even on failure."""
         try:
             if (now - self._last_flush) < self.flush_sec:
                 return

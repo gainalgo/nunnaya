@@ -1,16 +1,16 @@
-"""경제 캘린더 자동 fetch — ForexFactory 주간 피드.
+"""Economic calendar auto-fetch — ForexFactory weekly feed.
 
-[2026-06-08 부모] Event Shield 의 이벤트 시각을 자동으로 가져온다.
-BLS 직접은 봇 차단(Access Denied) → ForexFactory 무료 주간 JSON(API 키 불필요) 사용.
-USD High impact 만 필터 → KST "YYYY-MM-DD HH:MM" 리스트(같은 시각 중복 제거).
+[2026-06-08 owner] Automatically fetches event times for the Event Shield.
+BLS direct is bot-blocked (Access Denied) → use ForexFactory free weekly JSON (no API key needed).
+Filters USD High impact only → KST "YYYY-MM-DD HH:MM" list (dedup same times).
 
-설계 안전 원칙:
-  - 인메모리 캐시 — _event_shield_label 이 매 polling 호출해도 가벼움(네트워크 X).
-  - 비동기 refresh — ttl 만료 시 daemon thread 로 fetch, 메인 polling 블로킹 X
-    ([[feedback_b12_journal_fullparse_dashboard_lag]] 회피).
-  - 디스크 영속(runtime/econ_calendar.json) — 재시작·fetch 실패해도 마지막 값 유지.
-  - fetch 실패 = 옛 캐시 유지(예외 삼키고 경고만). 수동 입력값과는 독립.
-  - this/next week 둘 다 fetch → 최대 2주 미리 커버.
+Safe design principles:
+  - In-memory cache — light even if _event_shield_label calls it every polling cycle (no network).
+  - Async refresh — on ttl expiry, fetch in a daemon thread, no blocking of main polling
+    (avoids [[feedback_b12_journal_fullparse_dashboard_lag]]).
+  - Disk persistence (runtime/econ_calendar.json) — keeps last value across restart/fetch failure.
+  - Fetch failure = keep old cache (swallow exception, warn only). Independent of manual inputs.
+  - Fetch both this/next week → cover up to 2 weeks ahead.
 """
 import os
 import json
@@ -30,7 +30,7 @@ _FEED_URLS = (
 _CACHE_PATH = os.path.join("runtime", "econ_calendar.json")
 _KST = _dt.timezone(_dt.timedelta(hours=9))
 
-# 인메모리 캐시: events = 정렬된 ["2026-06-10 21:30", ...] (KST)
+# In-memory cache: events = sorted ["2026-06-10 21:30", ...] (KST)
 _CACHE = {"fetched_at": 0.0, "events": []}
 _CACHE_LOADED = False
 _lock = threading.Lock()
@@ -44,7 +44,7 @@ def _to_kst_label(iso_str):
     except (ValueError, TypeError):
         return None
     if dt.tzinfo is None:
-        return None  # tz 없는 항목(All Day 등)은 시각 불명 → skip
+        return None  # entries without tz (All Day, etc.) have unknown time → skip
     return dt.astimezone(_KST).strftime("%Y-%m-%d %H:%M")
 
 
@@ -56,7 +56,7 @@ def _fetch_one(url):
 
 
 def _fetch_now(impact="High", country="USD"):
-    """this/next week 합쳐 USD High impact 시각만 KST 라벨로. 한 피드 실패는 무시."""
+    """Merge this/next week, keep only USD High impact times as KST labels. One feed failing is ignored."""
     times = set()
     got_any = False
     for url in _FEED_URLS:
@@ -112,13 +112,13 @@ def _do_refresh(impact, country):
         logger.info("[EconCal] refreshed: %d %s %s events: %s",
                     len(events), country, impact, ", ".join(events) or "-")
     except Exception as e:
-        logger.warning("[EconCal] fetch failed (옛 캐시 유지): %s", e)
+        logger.warning("[EconCal] fetch failed (keeping old cache): %s", e)
     finally:
         _refreshing = False
 
 
 def maybe_refresh(ttl_sec=21600, impact="High", country="USD"):
-    """ttl(기본 6h) 만료 시 백그라운드 비동기 fetch. 호출 즉시 반환(메인 블로킹 X)."""
+    """On ttl (default 6h) expiry, fetch async in background. Returns immediately (no main blocking)."""
     global _refreshing
     if not _CACHE_LOADED:
         _load_disk()
@@ -136,14 +136,14 @@ def maybe_refresh(ttl_sec=21600, impact="High", country="USD"):
 
 
 def get_event_times():
-    """인메모리 캐시의 이벤트 시각 리스트 반환 (절대 네트워크 호출 안 함)."""
+    """Return the in-memory cache's list of event times (never makes a network call)."""
     if not _CACHE_LOADED:
         _load_disk()
     return list(_CACHE.get("events", []))
 
 
 def get_status():
-    """UI/디버그용 — 마지막 fetch 시각(KST 문자열)과 이벤트 수."""
+    """For UI/debug — last fetch time (KST string) and event count."""
     if not _CACHE_LOADED:
         _load_disk()
     ts = _CACHE.get("fetched_at", 0.0)

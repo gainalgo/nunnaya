@@ -2,9 +2,9 @@
 # File: app/manager/ai_trainer.py
 # Autocoin OS v3-H — AI Training Manager (LightGBM + Time-Split)
 # ============================================================
-# PATCH 2026-01-28: LightGBM 교체, Time-split 검증, Feature 확장
-# PATCH 2026-01-28b: 코인 등급별 샘플 가중치, 하이브리드 라벨링 지원
-# PATCH 2026-01-30: Multi-horizon (1m/5m/15m) 모델 학습 지원
+# PATCH 2026-01-28: LightGBM swap, Time-split validation, Feature expansion
+# PATCH 2026-01-28b: Per-coin-tier sample weights, hybrid labeling support
+# PATCH 2026-01-30: Multi-horizon (1m/5m/15m) model training support
 # ============================================================
 
 import json
@@ -17,11 +17,11 @@ from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Multi-horizon 설정
-HORIZONS = [60, 300, 900, 3600]  # 1m, 5m, 15m, 1h (초 단위)
-HORIZON_WEIGHTS = [0.15, 0.35, 0.30, 0.20]  # 앙상블 가중치 (1h 추가)
-MIN_RET_THRESHOLD = 0.2  # 최소 문턱값 (%)
-ATR_THRESHOLD_MULT = 0.3  # ATR 기반 문턱값 배수
+# Multi-horizon settings
+HORIZONS = [60, 300, 900, 3600]  # 1m, 5m, 15m, 1h (in seconds)
+HORIZON_WEIGHTS = [0.15, 0.35, 0.30, 0.20]  # ensemble weights (1h added)
+MIN_RET_THRESHOLD = 0.2  # minimum threshold (%)
+ATR_THRESHOLD_MULT = 0.3  # ATR-based threshold multiplier
 
 try:
     from app.notify.telegram import send_telegram
@@ -88,7 +88,7 @@ def _ensure_ml_imports() -> bool:
         
         _ml_available = True
         
-        # LightGBM 시도 (import 성공 = 사용 가능)
+        # Try LightGBM (successful import = available)
         try:
             import lightgbm as lgb
             # Test if DLL loads properly
@@ -99,7 +99,7 @@ def _ensure_ml_imports() -> bool:
             logger.warning("[AITrainer] LightGBM import failed", exc_info=True)
             _lgbm_available = False
         
-        # XGBoost 시도 (LightGBM 대안)
+        # Try XGBoost (LightGBM alternative)
         try:
             import xgboost as xgb
             _ml_modules["xgb"] = xgb
@@ -108,7 +108,7 @@ def _ensure_ml_imports() -> bool:
             logger.warning("[AITrainer] XGBoost import failed", exc_info=True)
             _xgb_available = False
         
-        # RandomForest는 항상 로드 (fallback용)
+        # RandomForest is always loaded (for fallback)
         from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
         _ml_modules["RandomForestClassifier"] = RandomForestClassifier
         _ml_modules["GradientBoostingClassifier"] = GradientBoostingClassifier
@@ -141,8 +141,8 @@ class AITrainer:
         horizons: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         """
-        Multi-horizon 라벨링 지원.
-        horizons: 예측할 시간대 리스트 (초 단위). 기본값 [60, 300, 900]
+        Multi-horizon labeling support.
+        horizons: list of prediction horizons (in seconds). Default [60, 300, 900]
         """
         if not _ensure_ml_imports():
             return {"ok": False, "error": "pandas/sklearn not installed"}
@@ -191,7 +191,7 @@ class AITrainer:
                             logger.warning("[AITrainer] extract_data: record parse failed", exc_info=True)
                             continue
             except (OSError, json.JSONDecodeError, KeyError, AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[AI_TRAIN] Include all strategy snapshots: AUTOLOOP, PINGPONG, LADDER, LIGHTNING, GAZUA, CO: %s", exc, exc_info=True)
+                logger.warning("[AI_TRAIN] extract_data: ledger file read failed: %s", exc, exc_info=True)
 
         if not records:
             strat_msg = f", strategy={strategy}" if strategy else ""
@@ -214,7 +214,7 @@ class AITrainer:
         df = df.dropna(subset=["price", "ts"])
         
         # ========================================
-        # 전략 추출 (event 기반)
+        # Strategy extraction (event-based)
         # ========================================
         def extract_strategy_from_event(event: str) -> str:
             if not event:
@@ -227,7 +227,7 @@ class AITrainer:
         
         df["strategy"] = df["event"].apply(extract_strategy_from_event)
         
-        # reason 컬럼에서도 추출 시도
+        # Also try extracting from the reason column
         if "reason" in df.columns:
             def refine_strategy(row):
                 if row["strategy"] == "unknown" and row.get("reason"):
@@ -236,28 +236,28 @@ class AITrainer:
             df["strategy"] = df.apply(refine_strategy, axis=1)
         
         # ========================================
-        # 확장 Features 계산 (시장별 groupby)
+        # Extended feature computation (groupby per market)
         # ========================================
         def compute_extended_features(g):
             g = g.sort_values("ts").copy()
             price = g["price"]
-            
-            # 멀티 윈도우 수익률 (%)
+
+            # Multi-window returns (%)
             for n in [1, 3, 5, 10, 20]:
                 g[f"ret_{n}"] = price.pct_change(n) * 100.0
-            
+
             # EMA
             g["ema_fast"] = price.ewm(span=12, adjust=False).mean()
             g["ema_slow"] = price.ewm(span=26, adjust=False).mean()
             g["ema_gap_pct"] = (g["ema_fast"] - g["ema_slow"]) / price * 100.0
             g["ema_slope"] = g["ema_fast"].diff(3) / price * 100.0
-            
-            # 변동성
+
+            # Volatility
             returns = price.pct_change() * 100.0
             g["realized_vol_5"] = returns.rolling(5, min_periods=2).std()
             g["realized_vol_20"] = returns.rolling(20, min_periods=5).std()
-            
-            # ATR 근사 (가격 변동폭 기반)
+
+            # ATR approximation (based on price range)
             g["atr_pct"] = price.rolling(14, min_periods=3).apply(
                 lambda x: (x.max() - x.min()) / x.mean() * 100.0 if x.mean() > 0 else 0.0,
                 raw=True
@@ -268,7 +268,7 @@ class AITrainer:
             std20 = price.rolling(20, min_periods=5).std()
             g["bb_width"] = (std20 * 2) / sma20 * 100.0
             
-            # 거래량 Z-score (있으면)
+            # Volume Z-score (if available)
             if "volume" in g.columns:
                 vol = pd.to_numeric(g["volume"], errors="coerce")
                 vol_mean = vol.rolling(20, min_periods=5).mean()
@@ -278,13 +278,13 @@ class AITrainer:
             
             return g
         
-        # market을 인덱스가 아닌 컬럼으로 유지
+        # Keep market as a column, not an index
         df = df.reset_index(drop=True)
         df = df.groupby("market", group_keys=False).apply(compute_extended_features)
         df = df.reset_index(drop=True)
         
         # ========================================
-        # BTC 베타 (전체 마켓 기준)
+        # BTC beta (relative to the whole market)
         # ========================================
         if "market" not in df.columns:
             df["market"] = df.index.get_level_values("market") if "market" in df.index.names else "UNKNOWN"
@@ -299,16 +299,16 @@ class AITrainer:
             df["coin_vs_btc"] = 0.0
         
         # ========================================
-        # Horizon별 라벨 생성 (merge_asof 벡터화)
+        # Per-horizon label generation (merge_asof vectorized)
         # ========================================
-        # 데이터 간격 추정 (tolerance 동적 설정)
+        # Estimate data interval (dynamic tolerance setting)
         ts_diff = df.groupby("market")["ts"].diff().median()
         base_tolerance = max(60, ts_diff * 1.5 if pd.notna(ts_diff) else 60)
         
         for horizon in horizons:
             tolerance = max(horizon * 0.3, base_tolerance)
             
-            # 미래 가격 매칭 (벡터화)
+            # Future price matching (vectorized)
             future_prices = []
             for market, g in df.groupby("market"):
                 g = g.sort_values("ts")
@@ -318,13 +318,13 @@ class AITrainer:
                 
                 for i, ts in enumerate(timestamps):
                     target_ts = ts + horizon
-                    # 이진 탐색으로 가장 가까운 미래 시점 찾기
+                    # Binary search for the nearest future timestamp
                     future_idx = np.searchsorted(timestamps, target_ts)
                     
                     if future_idx >= len(timestamps):
                         fp.append(np.nan)
                     else:
-                        # 양쪽 후보 비교
+                        # Compare both candidates
                         candidates = []
                         if future_idx < len(timestamps):
                             candidates.append((future_idx, abs(timestamps[future_idx] - target_ts)))
@@ -345,37 +345,37 @@ class AITrainer:
             price_col = f"price_next_{horizon}s"
             df[price_col] = future_prices
             
-            # 수익률 계산
+            # Return computation
             ret_col = f"ret_{horizon}s"
             df[ret_col] = (df[price_col] - df["price"]) / df["price"] * 100.0
             
             # ========================================
-            # 대칭 라벨링 + 중립 제거 (핵심 개선)
+            # Symmetric labeling + neutral removal (key improvement)
             # ========================================
-            # 동적 문턱값 (ATR 기반)
+            # Dynamic threshold (ATR-based)
             if "atr_pct" in df.columns:
                 df["_threshold"] = (df["atr_pct"].fillna(MIN_RET_THRESHOLD) * ATR_THRESHOLD_MULT).clip(lower=MIN_RET_THRESHOLD, upper=1.0)
             else:
                 df["_threshold"] = MIN_RET_THRESHOLD
             
-            # 대칭 라벨: 상승=1, 하락=0, 중립=NaN (학습에서 제외)
+            # Symmetric label: up=1, down=0, neutral=NaN (excluded from training)
             col_name = f"target_{horizon}s"
             df[col_name] = np.where(
                 df[ret_col] >= df["_threshold"], 1,
                 np.where(df[ret_col] <= -df["_threshold"], 0, np.nan)
             )
         
-        # 기본 target은 5분(300s)
+        # Default target is 5 minutes (300s)
         if "target_300s" in df.columns:
             df["target"] = df["target_300s"]
             df["price_next"] = df.get("price_next_300s", np.nan)
             df["ret"] = df.get("ret_300s", np.nan)
         
-        # 샘플 가중치: |ret| 기반 (큰 움직임 더 학습)
+        # Sample weight: based on |ret| (learn larger moves more)
         if "ret_300s" in df.columns:
             df["sample_weight_ret"] = df["ret_300s"].abs().clip(lower=0.1, upper=3.0) / 1.5
         
-        # 통계 로깅
+        # Statistics logging
         horizon_stats = {}
         for h in horizons:
             ret_col = f"ret_{h}s"
@@ -388,7 +388,7 @@ class AITrainer:
         
         strategy_dist = df["strategy"].value_counts().to_dict()
         
-        # 중립 제거 (target이 NaN인 행 제외)
+        # Neutral removal (drop rows where target is NaN)
         df_valid = df.dropna(subset=["target"])
         df_valid.to_csv(self.dataset_path, index=False)
         
@@ -404,11 +404,11 @@ class AITrainer:
 
     def train_model(self, use_time_split: bool = True, multi_horizon: bool = True) -> Dict[str, Any]:
         """
-        모델 학습.
-        - LightGBM 우선, 없으면 RandomForest fallback
-        - Time-split 검증 (최근 20%를 test로)
-        - 확장된 feature set 사용
-        - multi_horizon=True이면 각 horizon별로 별도 모델 학습 후 저장
+        Model training.
+        - LightGBM first, RandomForest fallback if unavailable
+        - Time-split validation (most recent 20% as test)
+        - Uses the extended feature set
+        - if multi_horizon=True, trains and saves a separate model per horizon
         """
         if not _ensure_ml_imports():
             return {"ok": False, "error": "pandas/sklearn not installed"}
@@ -429,7 +429,7 @@ class AITrainer:
             return {"ok": False, "error": "target_column_missing"}
         
         # ========================================
-        # Feature 추출 (확장된 feature set)
+        # Feature extraction (extended feature set)
         # ========================================
         feature_rows = []
         for _, row in df.iterrows():
@@ -438,18 +438,18 @@ class AITrainer:
         
         feature_df = pd.DataFrame(feature_rows)
         
-        # Numeric 변환 및 결측 처리
+        # Numeric conversion and missing-value handling
         for col in feature_df.columns:
             feature_df[col] = pd.to_numeric(feature_df[col], errors="coerce")
         
-        # 전부 NaN인 컬럼 제거
+        # Drop columns that are entirely NaN
         valid_cols = [c for c in feature_df.columns if feature_df[c].notna().sum() > len(df) * 0.1]
         feature_df = feature_df[valid_cols]
         
         X = feature_df
         y = df["target"].astype(int)
         
-        # 결측치 있는 행 제거 (또는 LightGBM은 NaN 허용)
+        # Drop rows with missing values (LightGBM also tolerates NaN)
         valid_mask = X.notna().all(axis=1) & y.notna()
         X = X[valid_mask].reset_index(drop=True)
         y = y[valid_mask].reset_index(drop=True)
@@ -461,10 +461,10 @@ class AITrainer:
             return {"ok": False, "error": "insufficient_data", "rows": len(X)}
 
         # ========================================
-        # Time-split (시간순 분할)
+        # Time-split (chronological split)
         # ========================================
         if use_time_split:
-            # ts 기준 정렬 후 최근 20%를 test로
+            # Sort by ts, then use the most recent 20% as test
             ts_col = df.loc[valid_mask, "ts"].reset_index(drop=True) if "ts" in df.columns else None
             if ts_col is not None:
                 sorted_idx = ts_col.argsort()
@@ -483,12 +483,12 @@ class AITrainer:
         feature_names = list(X.columns)
         
         # ========================================
-        # 전략별 샘플 가중치 계산 (strategy 컬럼 우선)
+        # Per-strategy sample weight computation (strategy column first)
         # ========================================
         sample_weights_train = None
         strategy_stats: Dict[str, int] = {}
-        
-        # 먼저 strategy 컬럼 사용 (extract_data에서 추출됨)
+
+        # First use the strategy column (extracted in extract_data)
         if "strategy" in df.columns:
             strategies = df.loc[valid_mask, "strategy"].reset_index(drop=True)
             if use_time_split and "ts" in df.columns:
@@ -505,7 +505,7 @@ class AITrainer:
                 strategy_stats[strategy] = strategy_stats.get(strategy, 0) + 1
             sample_weights_train = np.array(weights)
         else:
-            # fallback: reason 컬럼에서 전략 추출
+            # fallback: extract strategy from the reason column
             reason_col = None
             for col in ["reason", "signal", "tactic", "buy_reason"]:
                 if col in df.columns:
@@ -529,7 +529,7 @@ class AITrainer:
                 sample_weights_train = np.array(weights)
         
         # ========================================
-        # Multi-horizon 학습 분기
+        # Multi-horizon training branch
         # ========================================
         has_multi_targets = all(f"target_{h}s" in df.columns for h in HORIZONS)
         
@@ -540,7 +540,7 @@ class AITrainer:
             )
         
         # ========================================
-        # 단일 모델 학습 (LightGBM 우선)
+        # Single model training (LightGBM first)
         # ========================================
         model_type = "unknown"
         clf = None
@@ -615,7 +615,7 @@ class AITrainer:
             y_pred = clf.predict(X_test)
         
         # ========================================
-        # 성능 평가
+        # Performance evaluation
         # ========================================
         acc = accuracy_score(y_test, y_pred)
         
@@ -739,7 +739,7 @@ class AITrainer:
         strategy_stats: Dict[str, int],
         use_time_split: bool,
     ) -> Dict[str, Any]:
-        """Multi-horizon (1m/5m/15m) 모델 학습. X/y 정렬 동기화."""
+        """Multi-horizon (1m/5m/15m) model training. Keeps X/y ordering in sync."""
         np = _ml_modules["np"]
         pd = _ml_modules["pd"]
         accuracy_score = _ml_modules["accuracy_score"]
@@ -749,20 +749,20 @@ class AITrainer:
         metrics = {}
         
         # ========================================
-        # 핵심 수정: X와 df를 동일 인덱스로 맞춤
-        # valid_mask는 boolean array, X는 이미 valid_mask 적용 후 reset된 상태
+        # Key fix: align X and df to the same index
+        # valid_mask is a boolean array; X already has valid_mask applied and reset
         # ========================================
-        # df도 valid_mask 적용 후 reset
+        # Apply valid_mask to df too, then reset
         df_valid = df[valid_mask].reset_index(drop=True).copy()
-        X_valid = X.copy()  # 이미 valid_mask 적용됨
-        
-        # 정렬
+        X_valid = X.copy()  # valid_mask already applied
+
+        # Sort
         if use_time_split and "ts" in df_valid.columns:
             sorted_idx = df_valid["ts"].argsort().values
             df_valid = df_valid.iloc[sorted_idx].reset_index(drop=True)
             X_valid = X_valid.iloc[sorted_idx].reset_index(drop=True)
         
-        # 샘플 가중치
+        # Sample weights
         sw_ret = None
         if "sample_weight_ret" in df_valid.columns:
             sw_ret = df_valid["sample_weight_ret"].reset_index(drop=True)
@@ -776,7 +776,7 @@ class AITrainer:
             
             y_horizon = df_valid[target_col].reset_index(drop=True)
             
-            # 유효한 라벨만 (NaN 제외)
+            # Valid labels only (exclude NaN)
             valid_y_mask = y_horizon.notna()
             X_h = X_valid[valid_y_mask].reset_index(drop=True)
             y_h = y_horizon[valid_y_mask].astype(int).reset_index(drop=True)
@@ -788,7 +788,7 @@ class AITrainer:
             X_train, X_test = X_h.iloc[:split_idx], X_h.iloc[split_idx:]
             y_train, y_test = y_h.iloc[:split_idx], y_h.iloc[split_idx:]
             
-            # 가중치 결합: 전략 가중치 × 수익률 기반 가중치
+            # Combine weights: strategy weight x return-based weight
             combined_weights = None
             if sample_weights_train is not None and sw_ret is not None:
                 sw_ret_valid = sw_ret[valid_y_mask].reset_index(drop=True)
@@ -893,7 +893,7 @@ class AITrainer:
         if not models:
             return {"ok": False, "error": "no_models_trained"}
         
-        # Feature Importance 집계 (모든 horizon 평균)
+        # Feature Importance aggregation (averaged across all horizons)
         importances = {}
         for horizon, clf in models.items():
             try:
@@ -906,14 +906,14 @@ class AITrainer:
                 for name, val in zip(feature_names, imp_vals):
                     importances[name] = importances.get(name, 0.0) + float(val)
             except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[AI_TRAIN] Feature Importance 집계 (모든 horizon 평균) except-> continue: %s", exc, exc_info=True)
+                logger.warning("[AI_TRAIN] Feature Importance aggregation except-> continue: %s", exc, exc_info=True)
                 continue
-        # 평균화 (horizon 개수로 나눔)
+        # Average (divide by number of horizons)
         if importances and len(models) > 0:
             for k in importances:
                 importances[k] /= len(models)
         
-        # 모델 저장 (멀티 모델)
+        # Save model (multi-model)
         model_data = {
             "models": models,
             "feature_names": feature_names,
@@ -926,7 +926,7 @@ class AITrainer:
         with open(self.model_path, "wb") as f:
             pickle.dump(model_data, f)
         
-        # 대표 메트릭 (300s 기준)
+        # Representative metric (based on 300s)
         main_metrics = metrics.get(300, list(metrics.values())[0] if metrics else {})
         
         meta = {
@@ -946,23 +946,23 @@ class AITrainer:
             from app.core.io_utils import safe_write_json
             safe_write_json(self.meta_path, meta)
         except (OSError, TypeError, ValueError) as exc:
-            logger.warning("[AI_TRAIN] 대표 메트릭 (300s 기준): %s", exc, exc_info=True)
+            logger.warning("[AI_TRAIN] meta safe_write_json failed: %s", exc, exc_info=True)
         
-        # Telegram 알림
+        # Telegram notification
         try:
             msg = f"🤖 [AI] Multi-Horizon Model Trained\n"
             for h, m in metrics.items():
                 msg += f"• {h}s: Acc={m['accuracy']:.1%} AUC={m['auc']:.3f} (n={m['rows']})\n"
             send_telegram(msg)
         except (KeyError, AttributeError, TypeError) as exc:
-            logger.warning("[AI_TRAIN] Telegram 알림: %s", exc, exc_info=True)
+            logger.warning("[AI_TRAIN] Telegram notification failed: %s", exc, exc_info=True)
         
         return {
             "ok": True,
             "model_type": "MultiHorizon",
             "horizons": HORIZONS,
             "metrics": metrics,
-            "accuracy": main_metrics.get("accuracy", 0.0),  # UI 호환성
+            "accuracy": main_metrics.get("accuracy", 0.0),  # UI compatibility
             "auc": main_metrics.get("auc", 0.5),
             "model_path": self.model_path,
             "meta": meta,
@@ -970,8 +970,8 @@ class AITrainer:
 
     def predict(self, features: Dict[str, float]) -> Dict[str, Any]:
         """
-        Multi-horizon 앙상블 예측.
-        각 모델의 확률을 가중 결합하여 최종 ai_score 반환.
+        Multi-horizon ensemble prediction.
+        Combines each model's probability with weights to return the final ai_score.
         """
         if not _ensure_ml_imports():
             return {"ai_score": 0.5, "confidence": 0.0, "error": "ml_not_available"}
@@ -988,17 +988,17 @@ class AITrainer:
             logger.warning("[AITrainer] predict: model load failed", exc_info=True)
             return {"ai_score": 0.5, "confidence": 0.0, "error": "load_failed"}
         
-        # Multi-horizon 모델인지 확인
+        # Check whether it is a multi-horizon model
         if isinstance(model_data, dict) and model_data.get("is_multi_horizon"):
             models = model_data["models"]
             feature_names = model_data["feature_names"]
             weights = model_data.get("weights", HORIZON_WEIGHTS)
             horizons = model_data.get("horizons", HORIZONS)
             
-            # Feature 벡터 구성
+            # Build the feature vector
             X = np.array([[features.get(f, 0.0) for f in feature_names]])
             
-            # 각 horizon별 예측
+            # Prediction per horizon
             probs = []
             horizon_probs = {}
             for i, horizon in enumerate(horizons):
@@ -1018,15 +1018,15 @@ class AITrainer:
             if not probs:
                 return {"ai_score": 0.5, "confidence": 0.0, "error": "no_predictions"}
             
-            # 가중 평균
+            # Weighted average
             total_weight = sum(w for _, w in probs)
             ensemble_score = sum(p * w for p, w in probs) / total_weight
             
-            # 합의 기반 신뢰도: 모델들이 같은 방향이면 높은 신뢰도
+            # Consensus-based confidence: high confidence when models agree on direction
             directions = [1 if p > 0.55 else (-1 if p < 0.45 else 0) for p, _ in probs]
             agreement = abs(sum(directions)) / len(directions) if directions else 0.0
             
-            # 신뢰도 조정: 합의가 높으면 점수 극단화
+            # Confidence adjustment: push score to extremes when agreement is high
             if agreement >= 0.8:
                 if ensemble_score > 0.5:
                     ensemble_score = 0.5 + (ensemble_score - 0.5) * 1.3
@@ -1042,10 +1042,10 @@ class AITrainer:
             }
         
         else:
-            # 기존 단일 모델
+            # Legacy single model
             clf = model_data
-            
-            # feature_names를 메타에서 로드
+
+            # Load feature_names from the metadata
             try:
                 with open(self.meta_path, "r", encoding="utf-8") as f:
                     meta = json.loads(f.read())

@@ -1,6 +1,6 @@
 """
 Volume Spike Detector
-거래량 급등 감지 - 급등락 선행 신호
+Detects volume spikes - a leading signal for sharp price moves
 """
 
 import logging
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class VolumeSpikeSignal:
-    """거래량 급등 신호"""
+    """Volume spike signal"""
     market: str
     volume_24h: float
     avg_volume_7d: float
@@ -27,33 +27,33 @@ class VolumeSpikeSignal:
 
 class VolumeSpikeDetector:
     """
-    거래량 급등 감지기
-    
-    전략:
-    - 24시간 거래량 > 7일 평균 × 3배 → 강한 신호
-    - 24시간 거래량 > 7일 평균 × 2배 → 중간 신호
-    - 가격 동반 상승 → 상승 신호
-    - 가격 동반 하락 → 하락 신호
+    Volume spike detector
+
+    Strategy:
+    - 24h volume > 7d average × 3 → strong signal
+    - 24h volume > 7d average × 2 → medium signal
+    - Price rising alongside → bullish signal
+    - Price falling alongside → bearish signal
     """
     
     def __init__(
         self,
         trade_client: Any,
-        spike_threshold: float = 3.0,  # 3배 이상
-        medium_threshold: float = 2.0,  # 2배 이상
+        spike_threshold: float = 3.0,  # 3x or more
+        medium_threshold: float = 2.0,  # 2x or more
         history_size: int = 100,
     ):
         self.trade_client = trade_client
         self.spike_threshold = spike_threshold
         self.medium_threshold = medium_threshold
         
-        # 마켓별 거래량 히스토리
+        # Per-market volume history
         self.volume_history: Dict[str, deque] = {}
         self.history_size = history_size
-        
-        # 최근 신호 캐시 (중복 방지)
+
+        # Recent signal cache (dedup)
         self.recent_signals: Dict[str, VolumeSpikeSignal] = {}
-        self.signal_cooldown_sec = 3600  # 1시간
+        self.signal_cooldown_sec = 3600  # 1 hour
         
         logger.info(
             f"VolumeSpike: spike={spike_threshold}x, "
@@ -62,11 +62,11 @@ class VolumeSpikeDetector:
     
     def update_volume_data(self, markets: List[str]) -> None:
         """
-        마켓별 거래량 데이터 업데이트
+        Update per-market volume data
         """
         try:
             for market in markets:
-                # 일봉 데이터 (7일)
+                # Daily candles (7 days)
                 candles = self.trade_client.get_candles_daily(market, count=7)
                 if not candles or len(candles) < 7:
                     continue
@@ -74,11 +74,11 @@ class VolumeSpikeDetector:
                 if market not in self.volume_history:
                     self.volume_history[market] = deque(maxlen=self.history_size)
                 
-                # 7일 평균 거래량
+                # 7-day average volume
                 volumes = [float(c.get("candle_acc_trade_volume", 0)) for c in candles]
                 avg_volume_7d = sum(volumes) / len(volumes)
-                
-                # 24시간 거래량 (최신 캔들)
+
+                # 24h volume (latest candle)
                 volume_24h = float(candles[0].get("candle_acc_trade_volume", 0))
                 
                 self.volume_history[market].append({
@@ -93,7 +93,7 @@ class VolumeSpikeDetector:
     
     def detect_spikes(self) -> List[VolumeSpikeSignal]:
         """
-        거래량 급등 감지
+        Detect volume spikes
         """
         signals = []
         now = time.time()
@@ -112,17 +112,17 @@ class VolumeSpikeDetector:
                 
                 spike_ratio = volume_24h / avg_volume_7d
                 
-                # 임계값 미달
+                # Below threshold
                 if spike_ratio < self.medium_threshold:
                     continue
-                
-                # 최근 신호 중복 체크
+
+                # Dedup against recent signal
                 if market in self.recent_signals:
                     prev_signal = self.recent_signals[market]
                     if (now - prev_signal.timestamp) < self.signal_cooldown_sec:
                         continue
                 
-                # 가격 변화 계산
+                # Compute price change
                 price_change_24h = 0.0
                 if len(history) >= 2:
                     prev = history[-2]
@@ -130,7 +130,7 @@ class VolumeSpikeDetector:
                         (latest["price"] / prev["price"] - 1.0) * 100
                     ) if prev["price"] > 0 else 0.0
                 
-                # 방향성 판단
+                # Determine direction
                 direction = "neutral"
                 confidence = 0.5
                 
@@ -175,12 +175,12 @@ class VolumeSpikeDetector:
     
     def get_signal_for_market(self, market: str) -> Optional[VolumeSpikeSignal]:
         """
-        특정 마켓의 최신 신호 조회
+        Get the latest signal for a specific market
         """
         if market in self.recent_signals:
             signal = self.recent_signals[market]
             now = time.time()
-            # 1시간 이내 신호만 유효
+            # Only signals within the last hour are valid
             if (now - signal.timestamp) < self.signal_cooldown_sec:
                 return signal
         return None
@@ -192,34 +192,34 @@ class VolumeSpikeDetector:
         strategy: str,
     ) -> float:
         """
-        거래량 급등 신호를 기반으로 스코어 조정
-        
+        Adjust the score based on the volume spike signal
+
         Args:
-            market: 마켓 심볼
-            base_score: 기본 스코어
-            strategy: 전략명
-        
+            market: market symbol
+            base_score: base score
+            strategy: strategy name
+
         Returns:
-            조정된 스코어
+            adjusted score
         """
         signal = self.get_signal_for_market(market)
         if not signal:
             return base_score
         
-        # 전략별 가중치
+        # Per-strategy weighting
         strategy_multipliers = {
-            "PINGPONG": 1.2,  # 빠른 회전 → 거래량 급등 활용
-            "AUTOLOOP": 1.3,  # 중속 회전 → 거래량 급등 활용
-            "LIGHTNING": 1.5, # 변동성 전략 → 거래량 급등 핵심
-            "SNIPER": 1.4,    # 저격 전략 → 거래량 급등 선호
-            "LADDER": 1.0,    # DCA → 거래량 무관
-            "GAZUA": 1.0,     # 장기 → 거래량 무관
-            "CONTRARIAN": 0.8, # 역발상 → 거래량 급등 회피
+            "PINGPONG": 1.2,  # fast rotation -> leverage volume spikes
+            "AUTOLOOP": 1.3,  # medium rotation -> leverage volume spikes
+            "LIGHTNING": 1.5, # volatility strategy -> volume spikes are key
+            "SNIPER": 1.4,    # sniper strategy -> prefers volume spikes
+            "LADDER": 1.0,    # DCA -> volume-agnostic
+            "GAZUA": 1.0,     # long-term -> volume-agnostic
+            "CONTRARIAN": 0.8, # contrarian -> avoids volume spikes
         }
-        
+
         multiplier = strategy_multipliers.get(strategy, 1.0)
-        
-        # Confidence 기반 보너스
+
+        # Confidence-based bonus
         bonus = 1.0
         if signal.direction == "bullish":
             bonus = 1.0 + (signal.confidence * 0.3 * multiplier)
@@ -239,13 +239,13 @@ class VolumeSpikeDetector:
         return adjusted
 
 
-# 싱글톤 인스턴스
+# Singleton instance
 _DETECTOR_INSTANCE: Optional[VolumeSpikeDetector] = None
 
 
 def get_volume_spike_detector() -> Optional[VolumeSpikeDetector]:
     """
-    VolumeSpike Detector 싱글톤 인스턴스 반환
+    Return the VolumeSpike Detector singleton instance
     """
     global _DETECTOR_INSTANCE
     return _DETECTOR_INSTANCE
@@ -253,7 +253,7 @@ def get_volume_spike_detector() -> Optional[VolumeSpikeDetector]:
 
 def initialize_volume_spike_detector(trade_client: Any) -> VolumeSpikeDetector:
     """
-    VolumeSpike Detector 초기화
+    Initialize the VolumeSpike Detector
     """
     global _DETECTOR_INSTANCE
     if _DETECTOR_INSTANCE is None:

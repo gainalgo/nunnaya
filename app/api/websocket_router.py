@@ -24,12 +24,12 @@ router = APIRouter(tags=["websocket"])
 # Multi-timeframe price history cache
 _price_history_cache: Dict[str, Dict[str, Any]] = {}
 _price_history_cache_ts: float = 0.0
-PRICE_HISTORY_CACHE_TTL = 30.0  # 30초 캐싱
+PRICE_HISTORY_CACHE_TTL = 30.0  # 30s cache
 
-MAX_CONNECTIONS = 50  # WebSocket 동시 연결 상한 (DoS 방지)
+MAX_CONNECTIONS = 50  # max concurrent WebSocket connections (DoS protection)
 
 class ConnectionManager:
-    """WebSocket 연결 관리자."""
+    """WebSocket connection manager."""
 
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -113,8 +113,8 @@ def _trusted_ws_origin(websocket: WebSocket) -> bool:
 
         trusted_csv = (os.getenv("DASHBOARD_WS_TRUSTED_ORIGINS", "") or "").strip()
         trusted = [x.strip().lower() for x in trusted_csv.split(",") if x.strip()]
-        # 공개 배포 안전 기본값: 추가 신뢰 origin 은 DASHBOARD_WS_TRUSTED_ORIGINS env 로만 지정 (하드코딩 도메인 없음).
-        # 미설정 시엔 위의 same-host 검사만으로 판정.
+        # Safe public-deploy default: extra trusted origins are configured only via the DASHBOARD_WS_TRUSTED_ORIGINS env (no hardcoded domains).
+        # When unset, rely solely on the same-host check above.
         for t in trusted:
             th = urlparse(t).hostname.lower().strip() if "://" in t else t
             th = th[1:] if th.startswith(".") else th
@@ -128,7 +128,7 @@ def _trusted_ws_origin(websocket: WebSocket) -> bool:
         return False
 
 async def broadcast_rankings_loop(app):
-    """10초마다 rankings 데이터를 브로드캐스트."""
+    """Broadcast rankings data every 10 seconds."""
     while manager._running:
         if manager.connection_count > 0:
             try:
@@ -150,8 +150,8 @@ async def broadcast_rankings_loop(app):
 
 def fetch_multi_timeframe_prices(symbols: List[str]) -> Dict[str, Dict[str, List[float]]]:
     """
-    멀티 타임프레임 가격 히스토리 조회.
-    
+    Fetch multi-timeframe price history.
+
     Returns:
         {symbol: {"5m": [prices...], "15m": [...], "1h": [...], "4h": [...], "1d": [...]}}
     """
@@ -159,8 +159,8 @@ def fetch_multi_timeframe_prices(symbols: List[str]) -> Dict[str, Dict[str, List
     global _price_history_cache, _price_history_cache_ts
     
     now = time_module.time()
-    
-    # 캐시가 유효하면 캐시에서 필요한 심볼만 반환
+
+    # If the cache is valid, return only the requested symbols from the cache
     if now - _price_history_cache_ts < PRICE_HISTORY_CACHE_TTL and _price_history_cache:
         result = {}
         for sym in symbols:
@@ -196,14 +196,14 @@ def fetch_multi_timeframe_prices(symbols: List[str]) -> Dict[str, Dict[str, List
     finally:
         session.close()
 
-    # 캐시 업데이트
+    # Update cache
     _price_history_cache = result
     _price_history_cache_ts = now
 
     return result
 
 def _build_bybit_session():
-    """TCP/SSL 연결 재사용 + 자동 재시도가 내장된 requests.Session."""
+    """requests.Session with TCP/SSL connection reuse + built-in automatic retries."""
     import requests
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
@@ -221,7 +221,7 @@ def _build_bybit_session():
     return session
 
 def fetch_rankings_data_sync(system) -> dict:
-    """동기 버전의 rankings 데이터 fetch."""
+    """Synchronous version of the rankings data fetch."""
     import requests
     from app.core.constants import (
         BYBIT_MARKET_TICKERS,
@@ -395,7 +395,7 @@ def fetch_rankings_data_sync(system) -> dict:
     tech_list.sort(key=lambda x: x["tech_score"], reverse=True)
     upside_list.sort(key=lambda x: x["upside_pct"], reverse=True)
     
-    # TOP 5 코인들의 멀티 타임프레임 가격 히스토리 조회
+    # Fetch multi-timeframe price history for the TOP 5 coins
     all_top_symbols = set()
     for lst in [rebound_list[:top_n], rsi_list[:top_n], tech_list[:top_n], upside_list[:top_n]]:
         for item in lst:
@@ -427,9 +427,9 @@ def fetch_rankings_data_sync(system) -> dict:
                 formatted["score"] = round(item["upside_pct"], 1)
                 formatted["ai_score"] = 0.7
             if "rsi" in item and "rebound_score" not in item and "tech_score" not in item:
-                formatted["rsi_status"] = "과매도" if item["rsi"] < 30 else "중립"
-            
-            # 멀티 타임프레임 가격 히스토리 추가
+                formatted["rsi_status"] = "Oversold" if item["rsi"] < 30 else "Neutral"
+
+            # Attach multi-timeframe price history
             if symbol in price_history_map:
                 formatted["price_history"] = price_history_map[symbol]
             
@@ -447,13 +447,13 @@ def fetch_rankings_data_sync(system) -> dict:
     }
 
 async def start_broadcast_task(app):
-    """브로드캐스트 태스크 시작."""
+    """Start the broadcast task."""
     if manager._broadcast_task is None or manager._broadcast_task.done():
         manager._running = True
         manager._broadcast_task = asyncio.create_task(broadcast_rankings_loop(app))
 
 async def stop_broadcast_task():
-    """브로드캐스트 태스크 중지."""
+    """Stop the broadcast task."""
     manager._running = False
     if manager._broadcast_task:
         manager._broadcast_task.cancel()
@@ -465,10 +465,10 @@ async def stop_broadcast_task():
 @router.websocket("/ws/dashboard")
 async def websocket_endpoint(websocket: WebSocket):
     """
-    대시보드 WebSocket 엔드포인트.
-    
-    연결 시 클라이언트 등록, 10초마다 rankings 데이터 푸시.
-    클라이언트는 ping 메시지를 보내서 연결 유지 가능.
+    Dashboard WebSocket endpoint.
+
+    Registers the client on connect and pushes rankings data every 10 seconds.
+    Clients can keep the connection alive by sending ping messages.
     """
     user = os.getenv("DASHBOARD_USER", "").strip()
     password = os.getenv("DASHBOARD_PASSWORD", "").strip()
@@ -496,8 +496,8 @@ async def websocket_endpoint(websocket: WebSocket):
             except (KeyError, AttributeError, TypeError):
                 logger.warning("websocket_router.to_section_format L494 except", exc_info=True)
                 ok = False
-        # [2026-04-09 보안 강화] same-origin bypass 제거.
-        # Origin 헤더는 위조 가능하므로 쿠키/Basic Auth만 신뢰.
+        # [2026-04-09 security hardening] removed same-origin bypass.
+        # The Origin header can be forged, so trust only cookies / Basic Auth.
         if not ok:
             await websocket.close(code=1008)
             return
@@ -521,16 +521,16 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @router.websocket("/ws/prices")
 async def websocket_prices_endpoint(websocket: WebSocket):
-    """실시간 가격 WebSocket — Bybit ticker 스트림 중계.
+    """Real-time price WebSocket — relays the Bybit ticker stream.
 
-    [2026-04-19] UI 체감 지연 개선 ("제대로가 정답")
-    - 기존: dashboard_v2.js 가 5초마다 /api/strategy/focus/status polling → 5~8초 지연
-    - 신규: 서버의 bybit_price_feed(WS ticker 수신기) 에 클라이언트 직접 등록
-            → Bybit 서버에서 tick 올 때마다 { "market": "SOLUSDT", "price": 86.75, "volume": ... } 즉시 push
-    - 효과: ms 단위 반영. 수동 청산 타이밍 정밀도 ↑
-    - 가격 소스: hyper_price_feed_bybit.BybitHyperPriceFeed._handle_ticker → _broadcast()
+    [2026-04-19] Reduced perceived UI latency ("doing it right is the answer")
+    - Before: dashboard_v2.js polled /api/strategy/focus/status every 5s → 5~8s lag
+    - Now: clients register directly with the server's bybit_price_feed (WS ticker receiver)
+            → every tick from the Bybit server immediately pushes { "market": "SOLUSDT", "price": 86.75, "volume": ... }
+    - Effect: ms-level updates. Higher precision for manual-exit timing ↑
+    - Price source: hyper_price_feed_bybit.BybitHyperPriceFeed._handle_ticker → _broadcast()
     """
-    # Auth (동일 패턴: /ws/dashboard 와 일치)
+    # Auth (same pattern as /ws/dashboard)
     user = os.getenv("DASHBOARD_USER", "").strip()
     password = os.getenv("DASHBOARD_PASSWORD", "").strip()
     if user and password:
@@ -557,7 +557,7 @@ async def websocket_prices_endpoint(websocket: WebSocket):
             await websocket.close(code=1008)
             return
 
-    # system.price_feed 접근 (main.py L412: app.state.system = system)
+    # Access system.price_feed (main.py L412: app.state.system = system)
     price_feed = None
     try:
         system = websocket.app.state.system
@@ -569,7 +569,7 @@ async def websocket_prices_endpoint(websocket: WebSocket):
         await websocket.close(code=1011, reason="price_feed unavailable")
         return
 
-    # [2026-04-19 형 검수 UI#2] 연결 상한 20 (DoS 방지, 1인 환경엔 충분)
+    # [2026-04-19 this agent review UI#2] connection cap 20 (DoS protection, plenty for a single-user setup)
     try:
         current = len(getattr(price_feed, "clients", []))
     except Exception:
@@ -579,12 +579,12 @@ async def websocket_prices_endpoint(websocket: WebSocket):
         await websocket.close(code=1008, reason="too many price clients")
         return
 
-    # register() 내부에서 ws.accept() + clients.add() 수행
+    # register() performs ws.accept() + clients.add() internally
     await price_feed.register(websocket)
     try:
         while True:
             data = await websocket.receive_text()
-            # [2026-04-19 형 검수 UI#3] JSON ping 정식, text "ping" 은 하위호환
+            # [2026-04-19 this agent review UI#3] JSON ping is canonical, text "ping" is for backward compatibility
             is_ping = False
             if data == "ping":
                 is_ping = True
@@ -611,7 +611,7 @@ async def websocket_prices_endpoint(websocket: WebSocket):
 
 @router.get("/ws/status", summary="WebSocket connection status")
 def websocket_status():
-    """현재 WebSocket 연결 상태 조회."""
+    """Query the current WebSocket connection status."""
     return {
         "ok": True,
         "active_connections": manager.connection_count,
@@ -621,15 +621,15 @@ def websocket_status():
 
 
 # ============================================================
-# Phase C-1 (2026-04-20): /ws/state — 엔진 상태 변화 푸시
+# Phase C-1 (2026-04-20): /ws/state — push engine state changes
 # ============================================================
-# 폴링이 cover 못 하는 변화(POSITION_OPEN/CLOSE, CONFIG_CHANGED, STATE_TRANSITION)를
-# 엔진 hot path에서 즉시 push. 폴링은 fallback/sync 보정용.
+# Pushes changes that polling can't cover (POSITION_OPEN/CLOSE, CONFIG_CHANGED, STATE_TRANSITION)
+# immediately from the engine hot path. Polling serves as fallback/sync correction.
 #
-# 메시지 포맷:
+# Message format:
 #   { "type": "state_event", "event": "POSITION_OPEN", "payload": {...}, "ts": 1.7e9 }
 #
-# 엔진 hook 인터페이스:
+# Engine hook interface:
 #   - async path: `await state_broadcast(event, payload)`
 #   - sync path:  `state_broadcast_safe(event, payload)`  ← fire-and-forget
 # ============================================================
@@ -638,7 +638,7 @@ state_manager = ConnectionManager()
 
 
 async def state_broadcast(event_type: str, payload: dict):
-    """엔진 → 구독 클라이언트 푸시. 구독자 0이면 즉시 반환 (비용 0)."""
+    """Push from engine → subscribed clients. Returns immediately if there are 0 subscribers (zero cost)."""
     if state_manager.connection_count == 0:
         return
     msg = {
@@ -651,10 +651,10 @@ async def state_broadcast(event_type: str, payload: dict):
 
 
 def state_broadcast_safe(event_type: str, payload: dict):
-    """Sync wrapper — 엔진의 sync hot path에서 fire-and-forget.
+    """Sync wrapper — fire-and-forget from the engine's sync hot path.
 
-    asyncio 루프가 돌고 있으면 task 생성, 없으면 silent skip (테스트 환경 등).
-    실패해도 거래 path 영향 없음 (예외 모두 흡수).
+    Creates a task if an asyncio loop is running, otherwise silently skips (e.g. test environments).
+    A failure does not affect the trading path (all exceptions are absorbed).
     """
     if state_manager.connection_count == 0:
         return
@@ -671,12 +671,12 @@ def state_broadcast_safe(event_type: str, payload: dict):
 
 @router.websocket("/ws/state")
 async def websocket_state_endpoint(websocket: WebSocket):
-    """엔진 상태 변화 WebSocket — Phase C-1 (2026-04-20).
+    """Engine state-change WebSocket — Phase C-1 (2026-04-20).
 
-    Auth/cap/ping 패턴은 /ws/prices 와 동일.
-    엔진 hook은 C-2 단계에서 추가됨 (POSITION_OPEN/CLOSE, CONFIG_CHANGED, STATE_TRANSITION).
+    The auth/cap/ping pattern is identical to /ws/prices.
+    Engine hooks are added in the C-2 stage (POSITION_OPEN/CLOSE, CONFIG_CHANGED, STATE_TRANSITION).
     """
-    # Auth (동일 패턴)
+    # Auth (same pattern)
     user = os.getenv("DASHBOARD_USER", "").strip()
     password = os.getenv("DASHBOARD_PASSWORD", "").strip()
     if user and password:
@@ -703,7 +703,7 @@ async def websocket_state_endpoint(websocket: WebSocket):
             await websocket.close(code=1008)
             return
 
-    # 연결 cap 20 (UI#2 패턴 — 1인 환경 충분)
+    # connection cap 20 (UI#2 pattern — plenty for a single-user setup)
     if state_manager.connection_count >= 20:
         logger.warning("[ws/state] too many clients (%d≥20) — rejecting", state_manager.connection_count)
         await websocket.close(code=1008, reason="too many state clients")
@@ -714,7 +714,7 @@ async def websocket_state_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            # Ping/pong (UI#3 — JSON 정식, text "ping" 하위호환)
+            # Ping/pong (UI#3 — JSON canonical, text "ping" backward-compatible)
             is_ping = False
             if data == "ping":
                 is_ping = True

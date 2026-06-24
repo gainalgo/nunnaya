@@ -1,6 +1,6 @@
 # ============================================================
 # File: autocoin/hyper/event/hyper_event_bus.py
-# HyperEventBus – 초고속 비동기 Event Message Bus (개선판)
+# HyperEventBus – ultra-fast async event message bus (improved)
 # ============================================================
 
 import asyncio
@@ -21,7 +21,7 @@ class HyperEvent:
 class HyperEventBus:
     def __init__(self):
         self._subscribers: Dict[str, List[asyncio.Queue]] = {}
-        self._lock = asyncio.Lock()  # race 방지
+        self._lock = asyncio.Lock()  # prevent races
 
     # --------------------------------------------------------
     # Subscribe
@@ -39,7 +39,7 @@ class HyperEventBus:
                 event = await queue.get()
                 yield event
         finally:
-            # 안전한 remove
+            # safe remove
             async with self._lock:
                 if channel in self._subscribers and queue in self._subscribers[channel]:
                     self._subscribers[channel].remove(queue)

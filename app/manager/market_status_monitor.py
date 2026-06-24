@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Market Status Monitor - 마켓 상태 변경 감지 (종료 예정, 신규 상장).
+Market Status Monitor - detect market status changes (pending delisting, new listing).
 
 File: app/manager/market_status_monitor.py
 
-기능:
-1. 활성 마켓 중 거래지원 종료 예정 감지 → 알림
-2. 신규 상장 (PREVIEW → ACTIVE) 감지 → 알림
+Features:
+1. Detect pending delisting among active markets → alert
+2. Detect new listing (PREVIEW → ACTIVE) → alert
 """
 
 from __future__ import annotations
@@ -22,11 +22,11 @@ logger = logging.getLogger(__name__)
 from app.integrations.bybit_markets import fetch_bybit_markets as fetch_bybit_markets
 from app.core.currency import Q
 
-# 상태 저장 경로
+# State file path
 DEFAULT_STATE_PATH = "runtime/market_status_state.json"
 
 def _load_state(path: str = DEFAULT_STATE_PATH) -> Dict[str, Any]:
-    """이전 마켓 상태 로드."""
+    """Load previous market status."""
     try:
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
@@ -36,7 +36,7 @@ def _load_state(path: str = DEFAULT_STATE_PATH) -> Dict[str, Any]:
     return {"known_markets": {}, "last_check_ts": 0}
 
 def _save_state(data: Dict[str, Any], path: str = DEFAULT_STATE_PATH) -> None:
-    """마켓 상태 저장."""
+    """Save market status."""
     from app.core.io_utils import safe_write_json
     try:
         safe_write_json(path, data)
@@ -48,16 +48,16 @@ def check_market_status_changes(
     state_path: str = DEFAULT_STATE_PATH,
 ) -> Dict[str, Any]:
     """
-    마켓 상태 변경 감지.
-    
+    Detect market status changes.
+
     Args:
-        active_markets: 현재 활성화된 마켓 집합 (OMA ACTIVE 상태)
-    
+        active_markets: set of currently active markets (OMA ACTIVE state)
+
     Returns:
         {
             "delisting_alerts": [{market, delisting_date, korean_name}, ...],
             "new_listings": [{market, korean_name}, ...],
-            "preview_markets": [{market, korean_name}, ...],  # 상장 대기
+            "preview_markets": [{market, korean_name}, ...],  # awaiting listing
         }
     """
     result = {
@@ -68,13 +68,13 @@ def check_market_status_changes(
     }
     
     try:
-        # Bybit 마켓 정보 조회 (isDetails=true)
+        # Fetch Bybit market info (isDetails=true)
         markets = fetch_bybit_markets(is_details=True, timeout=10.0)
     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError):
         logger.warning("[MarketStatusMonitor] check_market_status: fetch failed", exc_info=True)
         return result
 
-    # 이전 상태 로드
+    # Load previous state
     prev_state = _load_state(state_path)
     prev_known = prev_state.get("known_markets", {})
     
@@ -99,18 +99,18 @@ def check_market_status_changes(
         prev_info = prev_known.get(code, {})
         prev_market_state = prev_info.get("market_state", "")
         
-        # 1. 종료 예정 감지: 활성 마켓이 DELISTED이거나 delisting_date가 새로 생김
+        # 1. Detect pending delisting: active market is DELISTED, or a new delisting_date appeared
         is_delisting = (market_state == "DELISTED") or (delist_date is not None and str(delist_date).strip() != "")
         was_delisting = prev_info.get("delisting_date") is not None
-        
+
         if is_delisting and not was_delisting:
-            # 새로 종료 예정이 됨
+            # Newly scheduled for delisting
             if code in active_markets:
                 result["delisting_alerts"].append({
                     "market": code,
                     "delisting_date": str(delist_date) if delist_date else None,
                     "korean_name": korean_name,
-                    "severity": "critical",  # 활성 마켓
+                    "severity": "critical",  # active market
                 })
             else:
                 result["delisting_alerts"].append({
@@ -120,7 +120,7 @@ def check_market_status_changes(
                     "severity": "info",
                 })
         
-        # 2. 신규 상장 감지: PREVIEW → ACTIVE
+        # 2. Detect new listing: PREVIEW → ACTIVE
         if market_state == "ACTIVE" and prev_market_state == "PREVIEW":
             result["new_listings"].append({
                 "market": code,
@@ -128,14 +128,14 @@ def check_market_status_changes(
                 "listed_at": time.time(),
             })
         
-        # 3. 상장 대기 중 마켓 목록
+        # 3. List of markets awaiting listing
         if market_state == "PREVIEW":
             result["preview_markets"].append({
                 "market": code,
                 "korean_name": korean_name,
             })
     
-    # 상태 저장
+    # Save state
     _save_state({
         "known_markets": current_known,
         "last_check_ts": time.time(),
@@ -147,9 +147,9 @@ def get_active_delisting_markets(
     active_markets: Set[str],
 ) -> List[Dict[str, Any]]:
     """
-    현재 활성 마켓 중 종료 예정인 마켓 조회.
-    
-    Reconcile 시 호출하여 즉시 경고할 수 있음.
+    Query active markets that are scheduled for delisting.
+
+    Can be called during reconcile to warn immediately.
     """
     alerts = []
     

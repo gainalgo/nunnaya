@@ -1,13 +1,13 @@
 """
-Harpoon (작살) Strategy API Router
+Harpoon Strategy API Router
 
 Endpoints:
-    GET  /api/strategy/harpoon/status     — 상태 조회
-    POST /api/strategy/harpoon/config     — 설정 변경
-    POST /api/strategy/harpoon/enable     — 활성화
-    POST /api/strategy/harpoon/disable    — 비활성화
-    GET  /api/strategy/harpoon/history    — 최근 스캘프 이력
-    POST /api/strategy/harpoon/reset      — 카운터 리셋
+    GET  /api/strategy/harpoon/status     — get status
+    POST /api/strategy/harpoon/config     — change config
+    POST /api/strategy/harpoon/enable     — enable
+    POST /api/strategy/harpoon/disable    — disable
+    GET  /api/strategy/harpoon/history    — recent scalp history
+    POST /api/strategy/harpoon/reset      — reset counters
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def _get_hm(request: Request):
     if hm is None:
         from app.manager.harpoon_manager import HarpoonManager
         fm = getattr(system, "focus_manager", None)
-        # ★ A4 FIX: fm=None 시 경고 (tick에서 _is_focus_compatible() False로 안전)
+        # ★ A4 FIX: warn when fm=None (safe via _is_focus_compatible() False in tick)
         if fm is None:
             logger.warning("[HARPOON] FocusManager not initialized — Harpoon will be inactive until FOCUS starts")
         hm = HarpoonManager(focus_manager=fm, system=system)
@@ -71,48 +71,48 @@ def harpoon_config(
     entry_tf: Optional[str] = Query(None),
     server_side_tpsl: Optional[bool] = Query(None),
     # ── ADX Filter ──
-    min_adx: Optional[int] = Query(None, ge=0, le=50, description="하푼 ADX 임계값 (0=FOCUS 상속)"),
+    min_adx: Optional[int] = Query(None, ge=0, le=50, description="Harpoon ADX threshold (0=inherit from FOCUS)"),
     # ── Dynamic Trailing SL ──
-    dynamic_trailing: Optional[bool] = Query(None, description="스캘프 동적 트레일링 ON/OFF"),
-    breakeven_trigger_pct: Optional[float] = Query(None, ge=0.01, le=2.0, description="손익분기 트리거 (%)"),
-    trailing_preserve_pct: Optional[float] = Query(None, ge=10, le=90, description="수익 보존율 (%)"),
-    # ── Stage 0 (2026-04-22 부모 B 결정, plan v3 통합) ──
-    paper_mode: Optional[bool] = Query(None, description="Stage 0: paper mode (True=진입 차단 + JSONL 기록만)"),
-    respect_b11_regime_lock: Optional[bool] = Query(None, description="Stage 0-1: FOCUS B11 regime_lock 통합"),
-    min_adx_v2: Optional[int] = Query(None, ge=0, le=50, description="Stage 0-2: min_adx 0 fallback 시 사용 (default 20)"),
-    respect_focus_adx_slope: Optional[bool] = Query(None, description="Stage 0-3: FOCUS J v2 ADX 하락 공유"),
-    respect_morning_guard: Optional[bool] = Query(None, description="Stage 0-4: Morning Guard 자동 standby"),
-    respect_coin_loss_cap: Optional[bool] = Query(None, description="Stage 0-5: FOCUS coin_loss_cap 공유"),
-    fast_reject_v2_enabled: Optional[bool] = Query(None, description="Stage 0-6: Fast-Reject v2 (60초 peak 0% 즉시 컷)"),
+    dynamic_trailing: Optional[bool] = Query(None, description="scalp dynamic trailing ON/OFF"),
+    breakeven_trigger_pct: Optional[float] = Query(None, ge=0.01, le=2.0, description="breakeven trigger (%)"),
+    trailing_preserve_pct: Optional[float] = Query(None, ge=10, le=90, description="profit preservation rate (%)"),
+    # ── Stage 0 (2026-04-22 owner decision B, plan v3 integration) ──
+    paper_mode: Optional[bool] = Query(None, description="Stage 0: paper mode (True=block entry + JSONL logging only)"),
+    respect_b11_regime_lock: Optional[bool] = Query(None, description="Stage 0-1: integrate FOCUS B11 regime_lock"),
+    min_adx_v2: Optional[int] = Query(None, ge=0, le=50, description="Stage 0-2: used as min_adx 0 fallback (default 20)"),
+    respect_focus_adx_slope: Optional[bool] = Query(None, description="Stage 0-3: share FOCUS J v2 ADX decline"),
+    respect_morning_guard: Optional[bool] = Query(None, description="Stage 0-4: Morning Guard auto standby"),
+    respect_coin_loss_cap: Optional[bool] = Query(None, description="Stage 0-5: share FOCUS coin_loss_cap"),
+    fast_reject_v2_enabled: Optional[bool] = Query(None, description="Stage 0-6: Fast-Reject v2 (instant cut at 60s peak 0%)"),
     fast_reject_v2_max_sec: Optional[float] = Query(None, ge=10, le=300),
     fast_reject_v2_peak_threshold_pct: Optional[float] = Query(None, ge=0, le=1),
     fast_reject_v2_pnl_pct: Optional[float] = Query(None, ge=-2, le=0),
-    post_sl_cooldown_min: Optional[float] = Query(None, ge=0, le=240, description="Stage 0-7: SL 후 동일 코인+방향 차단 분"),
-    morning_extended_end_hour_kst: Optional[float] = Query(None, ge=7, le=12, description="Stage 0-9: HARPOON Morning Guard 확장 종료 시각 (KST)"),
-    pa_double_confirm_enabled: Optional[bool] = Query(None, description="Stage 0-10: PA 2건 합의 (default OFF)"),
+    post_sl_cooldown_min: Optional[float] = Query(None, ge=0, le=240, description="Stage 0-7: minutes to block same coin+direction after SL"),
+    morning_extended_end_hour_kst: Optional[float] = Query(None, ge=7, le=12, description="Stage 0-9: HARPOON Morning Guard extended end hour (KST)"),
+    pa_double_confirm_enabled: Optional[bool] = Query(None, description="Stage 0-10: PA 2-signal consensus (default OFF)"),
     pa_double_confirm_window_sec: Optional[float] = Query(None, ge=30, le=300),
-    # ── ★ Phase M (2026-04-24) — Multi-Market + Budget 분리 ──
+    # ── ★ Phase M (2026-04-24) — Multi-Market + Budget split ──
     # [M.A] Scan Universe
-    scan_universe: Optional[str] = Query(None, description="Phase M: 스캔 대상 (all/top20/top50/custom)"),
-    scan_blacklist: Optional[str] = Query(None, description="Phase M: 제외 코인 (comma-separated)"),
-    scan_whitelist: Optional[str] = Query(None, description="Phase M: 전용 코인 (comma-separated, 비면 all)"),
-    scan_min_volume_usdt_24h: Optional[float] = Query(None, ge=0, description="Phase M: 최소 24h 거래대금 USDT"),
+    scan_universe: Optional[str] = Query(None, description="Phase M: scan target (all/top20/top50/custom)"),
+    scan_blacklist: Optional[str] = Query(None, description="Phase M: excluded coins (comma-separated)"),
+    scan_whitelist: Optional[str] = Query(None, description="Phase M: exclusive coins (comma-separated, empty=all)"),
+    scan_min_volume_usdt_24h: Optional[float] = Query(None, ge=0, description="Phase M: minimum 24h turnover USDT"),
     # [M.B] Multi-position
-    max_concurrent_scalps: Optional[int] = Query(None, ge=1, le=10, description="Phase M: 동시 보유 최대 스캘프"),
-    max_same_direction_scalps: Optional[int] = Query(None, ge=1, le=10, description="Phase M: 같은 방향 최대"),
-    cooldown_per_coin_sec: Optional[float] = Query(None, ge=0, le=3600, description="Phase M: 코인별 쿨다운 (초)"),
-    # [M.C] FOCUS 조율
-    respect_focus_coin_lock: Optional[bool] = Query(None, description="Phase M: FOCUS 보유 코인 skip"),
-    respect_focus_direction_lock: Optional[bool] = Query(None, description="Phase M: FOCUS 반대 방향 금지"),
+    max_concurrent_scalps: Optional[int] = Query(None, ge=1, le=10, description="Phase M: max concurrent scalps"),
+    max_same_direction_scalps: Optional[int] = Query(None, ge=1, le=10, description="Phase M: max same direction"),
+    cooldown_per_coin_sec: Optional[float] = Query(None, ge=0, le=3600, description="Phase M: per-coin cooldown (sec)"),
+    # [M.C] FOCUS coordination
+    respect_focus_coin_lock: Optional[bool] = Query(None, description="Phase M: skip coins held by FOCUS"),
+    respect_focus_direction_lock: Optional[bool] = Query(None, description="Phase M: forbid opposite direction to FOCUS"),
     coin_exclusive_priority: Optional[str] = Query(None, description="Phase M: first_come/focus/harpoon"),
-    focus_entry_freeze_sec: Optional[float] = Query(None, ge=0, le=300, description="Phase M: FOCUS 진입 후 HARPOON freeze 초"),
-    # [M.D] HARPOON 자체 임계
-    min_adx_self: Optional[int] = Query(None, ge=0, le=50, description="Phase M: HARPOON 자체 ADX 임계"),
-    min_conviction_self: Optional[float] = Query(None, ge=0, le=100, description="[2026-05-17 100점 ×10] HARPOON 자체 conviction (default 50)"),
+    focus_entry_freeze_sec: Optional[float] = Query(None, ge=0, le=300, description="Phase M: HARPOON freeze seconds after FOCUS entry"),
+    # [M.D] HARPOON own threshold
+    min_adx_self: Optional[int] = Query(None, ge=0, le=50, description="Phase M: HARPOON own ADX threshold"),
+    min_conviction_self: Optional[float] = Query(None, ge=0, le=100, description="[2026-05-17 100pt ×10] HARPOON own conviction (default 50)"),
     # [M.E] Zone
-    zone_source: Optional[str] = Query(None, description="Phase M: zone 소스 (self/focus)"),
-    zone_lookback_bars: Optional[int] = Query(None, ge=10, le=200, description="Phase M: zone lookback 봉 수"),
-    harpoon_standalone_mode: Optional[bool] = Query(None, description="★ Phase M.F: HARPOON 단독 모드 (FOCUS 무관)"),
+    zone_source: Optional[str] = Query(None, description="Phase M: zone source (self/focus)"),
+    zone_lookback_bars: Optional[int] = Query(None, ge=10, le=200, description="Phase M: zone lookback bars"),
+    harpoon_standalone_mode: Optional[bool] = Query(None, description="★ Phase M.F: HARPOON standalone mode (independent of FOCUS)"),
 ):
     """Update Harpoon config."""
     hm = _get_hm(request)
@@ -137,7 +137,7 @@ def harpoon_config(
         "dynamic_trailing": dynamic_trailing,
         "breakeven_trigger_pct": breakeven_trigger_pct,
         "trailing_preserve_pct": trailing_preserve_pct,
-        # ★ Stage 0 (2026-04-22 부모 B 결정, plan v3 통합)
+        # ★ Stage 0 (2026-04-22 owner decision B, plan v3 integration)
         "paper_mode": paper_mode,
         "respect_b11_regime_lock": respect_b11_regime_lock,
         "min_adx_v2": min_adx_v2,
@@ -152,7 +152,7 @@ def harpoon_config(
         "morning_extended_end_hour_kst": morning_extended_end_hour_kst,
         "pa_double_confirm_enabled": pa_double_confirm_enabled,
         "pa_double_confirm_window_sec": pa_double_confirm_window_sec,
-        # ★ Phase M (2026-04-24) — Multi-Market + Budget 분리
+        # ★ Phase M (2026-04-24) — Multi-Market + Budget split
         "scan_universe": scan_universe,
         "scan_min_volume_usdt_24h": scan_min_volume_usdt_24h,
         "max_concurrent_scalps": max_concurrent_scalps,
@@ -171,7 +171,7 @@ def harpoon_config(
         if v is not None:
             patch[k] = v
 
-    # comma-separated list 처리 (blacklist / whitelist)
+    # handle comma-separated list (blacklist / whitelist)
     if scan_blacklist is not None:
         patch["scan_blacklist"] = [x.strip().upper() for x in scan_blacklist.split(",") if x.strip()]
     if scan_whitelist is not None:
@@ -201,7 +201,7 @@ def harpoon_enable(request: Request):
 def harpoon_disable(request: Request):
     """Disable Harpoon. Closes open scalp if any."""
     hm = _get_hm(request)
-    # ★ H10 FIX: lock으로 bg_loop 레이스 방지
+    # ★ H10 FIX: prevent bg_loop race via lock
     with hm._lock:
         if hm.current_scalp:
             price = hm._get_current_price(hm.current_scalp.market)
@@ -259,7 +259,7 @@ def harpoon_reset(request: Request):
         hm.consecutive_losses = 0
         hm.daily_pnl = 0.0
         hm.loss_pause_until = 0.0
-        # state 유지 (변경 없음)
+        # keep state (no change)
         hm._save_config()
     logger.info("[HARPOON-API] Counters reset")
     return {"ok": True, "message": "counters_reset"}

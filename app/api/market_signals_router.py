@@ -1,6 +1,6 @@
 """
 Market Signals API Router
-실시간 시장 신호 (Volume Spike, Time Volatility, BTC Leading)
+Real-time market signals (Volume Spike, Time Volatility, BTC Leading)
 """
 
 import logging
@@ -18,8 +18,8 @@ router = APIRouter(
 @router.get("/summary")
 def get_market_signals_summary() -> Dict[str, Any]:
     """
-    실시간 시장 신호 요약
-    
+    Real-time market signals summary
+
     Returns:
         {
             "volume_spike": {
@@ -85,7 +85,7 @@ def get_market_signals_summary() -> Dict[str, Any]:
                     "direction": s.direction,
                     "confidence": round(s.confidence, 2),
                 }
-                for s in signals[:10]  # 상위 10개만
+                for s in signals[:10]  # top 10 only
             ]
     except (KeyError, IndexError, AttributeError, TypeError, ValueError) as e:
         logger.warning(f"Volume Spike summary failed: {e}")
@@ -133,7 +133,7 @@ def get_market_signals_summary() -> Dict[str, Any]:
 @router.get("/volume-spike/detail")
 def get_volume_spike_detail() -> Dict[str, Any]:
     """
-    Volume Spike 상세 정보
+    Volume Spike detail info
     """
     try:
         from app.monitor.volume_spike_detector import get_volume_spike_detector
@@ -169,7 +169,7 @@ def get_volume_spike_detail() -> Dict[str, Any]:
 @router.get("/btc-leading/detail")
 def get_btc_leading_detail() -> Dict[str, Any]:
     """
-    BTC Leading Signal 상세 정보
+    BTC Leading Signal detail info
     """
     try:
         from app.monitor.btc_leading_signal import get_btc_leading_detector

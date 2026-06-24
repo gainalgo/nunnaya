@@ -2,12 +2,12 @@
 # File: app/manager/ladder_auto_tuner.py
 # Autocoin OS v3-H — LADDER Auto-Tuner
 # ------------------------------------------------------------
-# 시장 상황에 따라 LADDER 전략 파라미터를 자동 조정
-# - 멀티 타임프레임 분석 (24h / 7d / 30d)
-# - 국면 분류 + 히스테리시스
-# - 외부 시그널 통합 (F&G, BTC Leading, Volume Spike, Regime)
-# - 성과 피드백 루프
-# - 수익성 바닥 보장 (수수료+슬리피지+안전마진)
+# Auto-tunes LADDER strategy parameters based on market conditions
+# - Multi-timeframe analysis (24h / 7d / 30d)
+# - Regime classification + hysteresis
+# - External signal integration (F&G, BTC Leading, Volume Spike, Regime)
+# - Performance feedback loop
+# - Profitability floor guarantee (fees + slippage + safety margin)
 # ============================================================
 
 from __future__ import annotations
@@ -119,7 +119,7 @@ _REGIME_BOUNDS: Dict[str, Dict[str, tuple]] = {
 # ── LadderAutoTuner ──────────────────────────────────────────
 
 class LadderAutoTuner:
-    """LADDER 전략 파라미터 자동 조정 엔진"""
+    """LADDER strategy parameter auto-tuning engine."""
 
     def __init__(
         self,
@@ -307,7 +307,7 @@ class LadderAutoTuner:
             return False
         pnl_pct = ((current_price - entry) / entry) * 100.0
 
-        # "야속한 칼컷" 방지: TP 근접/상승 모멘텀일 때 grace 시간을 자동 부여
+        # Prevent "premature knife-cut": auto-grant grace time when near TP / on upward momentum
         min_profit = float(self.rotate_min_profit_pct or 0.8)
         grace_ext_h = 0.0
         grace_reasons: List[str] = []

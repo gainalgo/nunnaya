@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="ko">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Upbit FOCUS · 현물</title>
+<title>Upbit FOCUS · Spot</title>
 <style>
   :root{
     --bg:#0e1116; --panel:#161b22; --line:#262d36; --txt:#c9d1d9; --muted:#7d8590;
@@ -41,10 +41,10 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>🏛️ Upbit FOCUS <span class="muted" style="font-weight:400">· 현물 long-only (₩)</span></h1>
-  <div class="sub">진입 = GreenPen(롱) · 청산 = cycle_tp(TP/SL) · Bybit FOCUS 와 완전 격리</div>
+  <h1>🏛️ Upbit FOCUS <span class="muted" style="font-weight:400">· spot long-only (₩)</span></h1>
+  <div class="sub">Entry = GreenPen(long) · Exit = cycle_tp(TP/SL) · fully isolated from Bybit FOCUS</div>
 
-  <!-- 상태 + 컨트롤 -->
+  <!-- status + controls -->
   <div class="panel">
     <div class="row">
       <span id="b-enabled" class="badge off">enabled: ?</span>
@@ -53,20 +53,20 @@
       <span class="grow"></span>
       <button id="btn-enable" class="go" onclick="doEnable()">Enable</button>
       <button id="btn-disable" class="stop" onclick="doDisable()">Disable</button>
-      <button id="btn-paper" onclick="togglePaper()">Paper 토글</button>
+      <button id="btn-paper" onclick="togglePaper()">Toggle Paper</button>
     </div>
     <div class="row" style="margin-top:10px">
-      <label class="f">예산 budget (0=가용잔고 자동)
+      <label class="f">budget (0 = auto available balance)
         <input id="in-budget" type="number" min="0" step="1000" placeholder="0">
       </label>
-      <button onclick="saveBudget()">예산 저장</button>
+      <button onclick="saveBudget()">Save Budget</button>
       <span class="grow"></span>
       <span class="muted" id="daily">plans 0/0 · SL 0</span>
     </div>
     <div id="ctrl-err" class="err"></div>
   </div>
 
-  <!-- 포지션 -->
+  <!-- positions -->
   <div class="panel">
     <div class="sec-title">📦 Positions</div>
     <table>
@@ -78,43 +78,43 @@
     </table>
   </div>
 
-  <!-- 스캔 -->
+  <!-- scan -->
   <div class="panel">
     <div class="row">
       <div class="sec-title grow">🔎 Scan</div>
-      <button onclick="loadScanList()">거래대금 상위</button>
-      <button onclick="runScan()">3중확인 미리보기</button>
+      <button onclick="loadScanList()">Top by Volume</button>
+      <button onclick="runScan()">Triple-Check Preview</button>
     </div>
     <div id="scanlist" class="chips muted" style="margin-top:8px">—</div>
     <div id="scanresult" class="muted" style="margin-top:8px">—</div>
   </div>
 
-  <!-- 대사면 -->
+  <!-- amnesty -->
   <div class="panel">
     <div class="row">
-      <div class="sec-title grow">🕊️ 대사면 · 유치장 코인 입양</div>
-      <button onclick="loadOrphans()">갇힌 코인 조회</button>
+      <div class="sec-title grow">🕊️ Amnesty · Adopt Stranded Coins</div>
+      <button onclick="loadOrphans()">List Stranded Coins</button>
     </div>
     <div class="muted" style="font-size:12px;margin:2px 0 8px">
-      거래소엔 있지만 봇 밖에 있는 코인. 고른 것만 봇이 평단 기준 TP/SL 걸어 관리합니다.
-      <span style="color:var(--warn)">운영자이 봇과 무관하게 보유한 코인은 누르지 마세요.</span>
+      Coins held on the exchange but outside the bot. Only the ones you pick get managed by the bot with TP/SL based on average cost.
+      <span style="color:var(--warn)">Do not select coins you hold independently of this bot.</span>
     </div>
     <table>
       <thead><tr>
-        <th>market</th><th>보유</th><th>평단 ₩</th><th>현재 ₩</th><th>평가 ₩</th><th>PnL%</th><th></th>
+        <th>market</th><th>balance</th><th>avg ₩</th><th>now ₩</th><th>value ₩</th><th>PnL%</th><th></th>
       </tr></thead>
-      <tbody id="orphan-body"><tr><td colspan="7" class="muted">— (조회 버튼)</td></tr></tbody>
+      <tbody id="orphan-body"><tr><td colspan="7" class="muted">— (click List)</td></tr></tbody>
     </table>
     <div id="orphan-err" class="err"></div>
   </div>
 
-  <!-- 설정 -->
+  <!-- config -->
   <div class="panel">
     <details>
-      <summary>⚙️ 설정 (config)</summary>
+      <summary>⚙️ Config</summary>
       <div class="cfg-grid" id="cfg-grid"></div>
       <div class="row" style="margin-top:12px">
-        <button class="go" onclick="saveConfig()">설정 저장</button>
+        <button class="go" onclick="saveConfig()">Save Config</button>
         <span id="cfg-err" class="err"></span>
       </div>
     </details>
@@ -132,10 +132,10 @@ async function api(path, opts={}){
 function krw(v){ v=Number(v||0); return v? v.toLocaleString('ko-KR',{maximumFractionDigits:0}) : '0'; }
 function num(v,d=8){ return Number(v||0).toLocaleString('en-US',{maximumFractionDigits:d}); }
 
-// 편집 가능한 설정 필드 (key: 라벨)
+// editable config fields (key: label)
 const CFG_FIELDS = {
   max_positions:'max_positions', max_daily_plans:'max_daily_plans', risk_pct:'risk_pct(%)',
-  min_conf:'min_conf', entry_conf_threshold:'entry_conf_thr', primary_tf:'primary_tf(분)',
+  min_conf:'min_conf', entry_conf_threshold:'entry_conf_thr', primary_tf:'primary_tf(min)',
   top_n:'top_n', scan_interval_sec:'scan_interval(s)', cooldown_sec:'cooldown(s)',
   tp1_mult:'tp1_mult', tp2_mult:'tp2_mult', sl_mult:'sl_mult', min_rr:'min_rr',
   min_tp_distance_pct:'min_tp_dist(%)', trailing_pct:'trailing(%)', partial_pct:'partial(%)',
@@ -173,7 +173,7 @@ async function refresh(){
     // positions
     const tb = document.getElementById('pos-body');
     const ps = s.positions||[];
-    if(!ps.length){ tb.innerHTML = '<tr><td colspan="9" class="muted">보유 없음 (—)</td></tr>'; }
+    if(!ps.length){ tb.innerHTML = '<tr><td colspan="9" class="muted">no holdings (—)</td></tr>'; }
     else tb.innerHTML = ps.map(p=>{
       const pnl = Number(p.pnl_pct||0);
       const cls = pnl>0?'pos':(pnl<0?'neg':'muted');
@@ -183,9 +183,9 @@ async function refresh(){
         <td>${num(p.qty)}</td><td class="muted">${p.paper?'paper':'live'}</td></tr>`;
     }).join('');
 
-    document.getElementById('foot').textContent = '갱신 '+new Date().toLocaleTimeString('ko-KR');
+    document.getElementById('foot').textContent = 'updated '+new Date().toLocaleTimeString('ko-KR');
     document.getElementById('ctrl-err').textContent = '';
-  }catch(e){ document.getElementById('ctrl-err').textContent = '상태 조회 실패: '+e; }
+  }catch(e){ document.getElementById('ctrl-err').textContent = 'status fetch failed: '+e; }
 }
 
 async function doEnable(){
@@ -213,55 +213,55 @@ async function saveConfig(){
   if(!parts.length) return;
   try{
     const r = await api('/config?'+parts.join('&'), {method:'POST'});
-    document.getElementById('cfg-err').textContent = r.ok?'저장됨 ✓':('실패: '+(r.error||''));
+    document.getElementById('cfg-err').textContent = r.ok?'saved ✓':('failed: '+(r.error||''));
     setTimeout(()=>document.getElementById('cfg-err').textContent='', 2000);
-  }catch(e){ document.getElementById('cfg-err').textContent = '실패: '+e; }
+  }catch(e){ document.getElementById('cfg-err').textContent = 'failed: '+e; }
 }
 async function loadScanList(){
-  const el = document.getElementById('scanlist'); el.textContent = '조회 중…';
+  const el = document.getElementById('scanlist'); el.textContent = 'loading…';
   try{
     const r = await api('/scan-list');
-    el.innerHTML = (r.markets&&r.markets.length)? r.markets.map(m=>`<span>${m}</span>`).join('') : '<span class="muted">후보 없음</span>';
-  }catch(e){ el.textContent = '실패: '+e; }
+    el.innerHTML = (r.markets&&r.markets.length)? r.markets.map(m=>`<span>${m}</span>`).join('') : '<span class="muted">no candidates</span>';
+  }catch(e){ el.textContent = 'failed: '+e; }
 }
 async function runScan(){
-  const el = document.getElementById('scanresult'); el.textContent = '3중확인 스캔 중… (수 초)';
+  const el = document.getElementById('scanresult'); el.textContent = 'triple-check scanning… (a few sec)';
   try{
     const r = await api('/scan');
     if(r.result){
       const x = r.result;
       el.innerHTML = `<span class="pos">✔ ${x.market} LONG</span> · conf ${(x.confidence*100||0).toFixed(0)}% · trend ${x.trend} · ₩${krw(x.price)}`;
-    } else el.innerHTML = '<span class="muted">통과 후보 없음 (안 들어가는 것도 전략)</span>';
-  }catch(e){ el.textContent = '실패: '+e; }
+    } else el.innerHTML = '<span class="muted">no candidate passed (staying out is also a strategy)</span>';
+  }catch(e){ el.textContent = 'failed: '+e; }
 }
 
-// 🕊️ 대사면
+// 🕊️ amnesty
 async function loadOrphans(){
   const tb = document.getElementById('orphan-body');
-  tb.innerHTML = '<tr><td colspan="7" class="muted">조회 중…</td></tr>';
+  tb.innerHTML = '<tr><td colspan="7" class="muted">loading…</td></tr>';
   document.getElementById('orphan-err').textContent = '';
   try{
     const r = await api('/orphans');
     const os = r.orphans||[];
-    if(!os.length){ tb.innerHTML = '<tr><td colspan="7" class="muted">갇힌 코인 없음</td></tr>'; return; }
+    if(!os.length){ tb.innerHTML = '<tr><td colspan="7" class="muted">no stranded coins</td></tr>'; return; }
     tb.innerHTML = os.map(o=>{
       const pnl = Number(o.pnl_pct||0);
       const cls = pnl>0?'pos':(pnl<0?'neg':'muted');
       return `<tr><td>${o.market}</td><td>${num(o.balance)}</td><td>${krw(o.avg_buy_price)}</td>
         <td>${krw(o.current_price)}</td><td>${krw(o.value_krw)}</td>
         <td class="${cls}">${pnl>0?'+':''}${pnl.toFixed(2)}%</td>
-        <td><button class="go" onclick="adopt('${o.market}')">사면</button></td></tr>`;
+        <td><button class="go" onclick="adopt('${o.market}')">Amnesty</button></td></tr>`;
     }).join('');
-  }catch(e){ document.getElementById('orphan-err').textContent = '실패: '+e; }
+  }catch(e){ document.getElementById('orphan-err').textContent = 'failed: '+e; }
 }
 async function adopt(market){
-  if(!confirm(market+' 을(를) 봇이 입양합니다.\n운영자이 봇과 무관하게 보유한 코인이 아닌지 확인하세요.')) return;
+  if(!confirm(market+' will be adopted by the bot.\nMake sure this is not a coin you hold independently of the bot.')) return;
   document.getElementById('orphan-err').textContent = '';
   try{
     const r = await api('/adopt?market='+encodeURIComponent(market), {method:'POST'});
     if(r.ok){ loadOrphans(); refresh(); }
-    else document.getElementById('orphan-err').textContent = '사면 실패: '+(r.error||'');
-  }catch(e){ document.getElementById('orphan-err').textContent = '실패: '+e; }
+    else document.getElementById('orphan-err').textContent = 'amnesty failed: '+(r.error||'');
+  }catch(e){ document.getElementById('orphan-err').textContent = 'failed: '+e; }
 }
 
 refresh();

@@ -1,8 +1,8 @@
-"""Cross-Strategy Guard — FOCUS ↔ Nunnaya 교차 포지션 확인.
+"""Cross-Strategy Guard — check for FOCUS ↔ Nunnaya cross positions.
 
-상태를 저장하지 않는 순수 쿼리 모듈.
-기존 데이터(focus_manager.positions, coordinator.contexts)만 읽는다.
-Harpoon 패턴과 동일: 읽기 전용 교차 참조.
+A stateless, pure-query module.
+Reads only existing data (focus_manager.positions, coordinator.contexts).
+Same pattern as Harpoon: read-only cross-reference.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ class StrategyOwnership:
 
 
 def _get_focus_positions(system) -> Dict[str, StrategyOwnership]:
-    """FOCUS 매니저의 활성 포지션 맵 반환."""
+    """Return a map of active positions from the FOCUS manager."""
     result: Dict[str, StrategyOwnership] = {}
     try:
         fm = getattr(system, "focus_manager", None)
@@ -50,7 +50,7 @@ def _get_focus_positions(system) -> Dict[str, StrategyOwnership]:
 
 
 def _get_nunnaya_positions(system) -> Dict[str, StrategyOwnership]:
-    """Nunnaya 엔진(coordinator.contexts)의 활성 포지션 맵 반환."""
+    """Return a map of active positions from the Nunnaya engine (coordinator.contexts)."""
     result: Dict[str, StrategyOwnership] = {}
     try:
         coordinator = getattr(system, "coordinator", None)
@@ -67,7 +67,7 @@ def _get_nunnaya_positions(system) -> Dict[str, StrategyOwnership]:
             deployed = qty * entry_price if entry_price > 0 else 0.0
             result[mkt_upper] = StrategyOwnership(
                 market=mkt_upper, owner="NUNNAYA", qty=qty,
-                direction="",  # Nunnaya ctx에서 방향은 별도 추적
+                direction="",  # direction is tracked separately in the Nunnaya ctx
                 deployed_usdt=deployed,
             )
     except Exception as exc:
@@ -78,10 +78,10 @@ def _get_nunnaya_positions(system) -> Dict[str, StrategyOwnership]:
 def is_market_owned_by_other(
     system, market: str, caller: str,
 ) -> Optional[StrategyOwnership]:
-    """다른 전략이 이 마켓을 보유 중이면 OwnershipInfo 반환, 아니면 None.
+    """Return OwnershipInfo if another strategy holds this market, else None.
 
-    caller="FOCUS"  → Nunnaya 쪽 확인
-    caller="NUNNAYA" → FOCUS 쪽 확인
+    caller="FOCUS"  → check the Nunnaya side
+    caller="NUNNAYA" → check the FOCUS side
     """
     mkt = market.upper()
     try:
@@ -96,7 +96,7 @@ def is_market_owned_by_other(
 
 
 def get_total_deployed_usdt(system) -> Tuple[float, float]:
-    """(focus_deployed, nunnaya_deployed) USDT 반환."""
+    """Return (focus_deployed, nunnaya_deployed) in USDT."""
     focus_total = 0.0
     nunnaya_total = 0.0
     try:

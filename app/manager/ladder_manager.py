@@ -37,7 +37,7 @@ import urllib.request
 import urllib.parse
 
 log = logging.getLogger(__name__)
-logger = log  # Pylance 호환: 파일 내 logger/log 혼용 통일
+logger = log  # Pylance compat: unify logger/log usage within the file
 
 from app.core.constants import BYBIT_MARKET_TICKERS, BYBIT_MARKET_KLINE
 from app.core.currency import Q
@@ -56,17 +56,17 @@ LONGHOLD_STORE_DEFAULTS = {
     "defaults": {
         "enabled": True,
         "strategy": "LADDER",          # LADDER | GAZUA
-        "target_profit_pct": 50.0,     # [2026-02-04] LongHold 기본 목표 수익 50%
+        "target_profit_pct": 50.0,     # [2026-02-04] LongHold default profit target 50%
         "notify_cooldown_sec": 3600,   # anti-spam cooldown
-        "auto_sell_check_interval_min": 10,  # [2026-02-04] 자동 매도 체크 주기 (분)
+        "auto_sell_check_interval_min": 10,  # [2026-02-04] auto-sell check interval (minutes)
         "min_position_usdt": 10,
         "budget_usdt": 0,      # ignore tiny dust unless overridden
         "repeat": True,                # allow repeated alerts after cooldown
-        # [2026-02-04] Hybrid Auto Sell 설정
-        "trailing_stop_pct": 2.0,      # Trailing Stop 거리 (%) (기본 2.0%)
-        "limit_order_timeout_sec": 30, # 지정가 대기 시간 (초)
-        "enable_market_fallback": True, # 미체결 시 시장가 전환
-        # [2026-03-19] LongHold 손절 기준 (진입가 대비 절대값, 0=비활성화)
+        # [2026-02-04] Hybrid Auto Sell settings
+        "trailing_stop_pct": 2.0,      # Trailing Stop distance (%) (default 2.0%)
+        "limit_order_timeout_sec": 30, # limit order wait time (seconds)
+        "enable_market_fallback": True, # switch to market order if unfilled
+        # [2026-03-19] LongHold stop-loss threshold (absolute vs entry price, 0=disabled)
         "stop_loss_pct": -30.0,
     },
     "markets": {},   # market -> overrides
@@ -95,18 +95,18 @@ DEFAULTS = {
     "spacing_value": 0.5,
     "order_usdt": 10,
     "max_levels": 30,
-    "ladder_fixed_order_usdt": 10,  # [LADDER] 고정 매수 금액
-    "ladder_max_buy_steps": 5,        # [LADDER] 최대 매수 계단 수 (N)
-    "ladder_pending_steps": 0,        # [LADDER] 상승 반전 대기 계단 수 (F)
-    "ladder_last_buy_ts": 0.0,        # [LADDER] 마지막 매수 시각
-    "ladder_last_buy_price": 0.0,     # [LADDER] 마지막 매수 가격
+    "ladder_fixed_order_usdt": 10,  # [LADDER] fixed buy amount
+    "ladder_max_buy_steps": 5,        # [LADDER] max buy steps (N)
+    "ladder_pending_steps": 0,        # [LADDER] pending steps awaiting upward reversal (F)
+    "ladder_last_buy_ts": 0.0,        # [LADDER] last buy timestamp
+    "ladder_last_buy_price": 0.0,     # [LADDER] last buy price
     "reseed_mode": "LOCAL_ONLY",  # LOCAL_ONLY | NONE
     "risk": DEFAULT_RISK,
     "limits": DEFAULT_LIMITS,
     "ids": {"rid": "", "created_ts": 0.0, "updated_ts": 0.0},
-    # [LADDER] 상승반전 차입 매수 관련
-    "ladder_max_borrow_steps": 2,   # 상승반전 시 최대 차입 허용 횟수
-    "ladder_borrowed_steps": 0,     # 현재까지 차입 사용한 횟수
+    # [LADDER] borrowed buys on upward reversal
+    "ladder_max_borrow_steps": 2,   # max borrow count allowed on upward reversal
+    "ladder_borrowed_steps": 0,     # borrow count used so far
     # [LADDER] Sell lock (pairing) — never move sell lines down
     "sell_lock_mode": "TRAIL_UP",        # OFF | LOCK | TRAIL_UP
     "sell_lock_activate_pct": 0.4,       # activate ratchet when price > lock by this %
@@ -130,7 +130,7 @@ DEFAULTS = {
 
 class LadderManager:
         def get_global_ladder_exposure(self) -> dict:
-            """전체 LADDER 마켓의 미실현 손실률, 총 매수액, 활성 마켓 수 집계"""
+            """Aggregate unrealized loss rate, total buy amount, and active market count across all LADDER markets."""
             all_cfg = self._read_json(CONFIG_PATH)
             total_unrealized_loss = 0.0
             total_exposure_usdt = 0.0
@@ -146,11 +146,11 @@ class LadderManager:
                 if holding > 0 and avg_price > 0:
                     unrealized = (cur_price - avg_price) / avg_price * 100.0
                     exposure_usdt_market = holding * avg_price
-                    total_unrealized_loss += unrealized * exposure_usdt_market  # [FIX C3] USDT 가중 평균 (기존: qty 가중 → 차원 오류로 100배 축소)
+                    total_unrealized_loss += unrealized * exposure_usdt_market  # [FIX C3] USDT-weighted average (was: qty-weighted -> dimension error shrank it 100x)
                     total_exposure_usdt += exposure_usdt_market
                     total_alloc_usdt += alloc
                     active_markets += 1
-            avg_unrealized_loss_pct = (total_unrealized_loss / total_exposure_usdt) if total_exposure_usdt > 0 else 0.0  # [FIX C3] ×100 제거 (unrealized가 이미 %)
+            avg_unrealized_loss_pct = (total_unrealized_loss / total_exposure_usdt) if total_exposure_usdt > 0 else 0.0  # [FIX C3] removed x100 (unrealized is already %)
             return {
                 "avg_unrealized_loss_pct": avg_unrealized_loss_pct,
                 "total_exposure_usdt": total_exposure_usdt,
@@ -312,7 +312,7 @@ class LadderManager:
             return {"ok": True, "signal": True, "canceled": canceled, "total_qty": total_qty, "sell_result": sell_result, "rsi": rsi, "macd": is_bullish_macd, "golden": is_golden}
 
         def reset_stats_for_market(self, market: str) -> bool:
-            """특정 마켓의 실현손익/수수료/매수/매도 카운트 리셋"""
+            """Reset realized PnL/fee/buy/sell counts for a specific market."""
             reg = self._read_order_registry()
             if market in reg:
                 filled_uuids = [
@@ -329,7 +329,7 @@ class LadderManager:
             return True
 
         def reset_stats_for_all(self) -> int:
-            """전체 마켓의 실현손익/수수료/매수/매도 카운트 리셋"""
+            """Reset realized PnL/fee/buy/sell counts across all markets."""
             all_cfg = self._read_json(CONFIG_PATH)
             reg = self._read_order_registry()
             count = 0
@@ -340,10 +340,10 @@ class LadderManager:
 
         def auto_tune_budget_and_levels(self, market: str, min_order_usdt: int = 5, max_order_usdt: int = 500, min_levels: int = 5, max_levels: int = 40) -> Dict[str, any]:
             """
-            최근 24시간 체결 빈도, 변동성, 거래량 등을 기반으로
-            - 소강장: 예산↓, 계단수↑
-            - 활발장: 예산↑, 계단수↓
-            로 자동 조정하여 config에 반영
+            Based on the last 24h fill frequency, volatility, and volume:
+            - Quiet market: budget down, step count up
+            - Active market: budget up, step count down
+            Auto-adjusts and writes back to config.
             """
             try:
                 from app.backtest.candle_loader import CandleLoader
@@ -387,7 +387,7 @@ class LadderManager:
             }
 
         def prune_deleted_orders(self, market: str = None) -> int:
-            """ladder_orders.json에서 status가 'deleted'인 주문을 완전히 제거한다. market 지정 시 해당 마켓만, 미지정 시 전체 마켓 대상."""
+            """Permanently remove orders with status 'deleted' from ladder_orders.json. If market is given, only that market; otherwise all markets."""
             reg = self._read_order_registry()
             count = 0
             markets = [market] if market else list(reg.keys())
@@ -405,14 +405,14 @@ class LadderManager:
             return count
 
         def auto_set_spacing_value(self, market: str, target_levels: int = 20, interval_minutes: int = 60, window: int = 24) -> float:
-            """진폭 기반 spacing_value(%) 자동 설정: 24h 진폭을 target_levels등분"""
+            """Auto-set spacing_value(%) based on amplitude: divide 24h amplitude into target_levels parts."""
             gap_info = self.get_dynamic_gap_info(market, interval_minutes, window)
             if gap_info.get("error"):
                 return float(self.get_config(market).get("spacing_value") or 0.5)
             return float(gap_info.get("spacing_pct") or 0.5)
 
         def get_dynamic_gap_info(self, market: str, interval_minutes: int = 60, window: int = 24, target_levels: int = 20) -> Dict[str, Any]:
-            """24h 캔들 기반 진폭 계산 → 진폭/target_levels로 spacing 결정 (최소 수수료×3)"""
+            """Compute amplitude from 24h candles -> derive spacing as amplitude/target_levels (min fee x3)."""
             try:
                 from app.backtest.candle_loader import CandleLoader
             except ImportError:
@@ -483,9 +483,9 @@ class LadderManager:
         def __init__(self, system: Any):
             self.system = system
             self._cache_status: Dict[str, Dict[str, Any]] = {}
-            self._poll_fail_counts: Dict[str, Dict[str, int]] = {}  # [FIX C2] 마켓별 체결 감지 실패 카운터 (호출 간 유지)
-            self._json_locks: Dict[str, threading.RLock] = {}  # [FIX H2] 파일별 RLock
-            self._json_locks_lock = threading.Lock()           # [FIX H2] _json_locks 접근 보호
+            self._poll_fail_counts: Dict[str, Dict[str, int]] = {}  # [FIX C2] per-market fill-detection failure counter (persists across calls)
+            self._json_locks: Dict[str, threading.RLock] = {}  # [FIX H2] per-file RLock
+            self._json_locks_lock = threading.Lock()           # [FIX H2] guards access to _json_locks
             self._longhold_candidates_cache: Dict[str, Any] = {}
             self._longhold_candidates_cache_ts: float = 0.0
             self._longhold_candidates_cache_ttl: float = 300.0
@@ -500,7 +500,7 @@ class LadderManager:
             if not isinstance(cfg, dict):
                 out = dict(DEFAULTS)
                 out["market"] = market
-                # Phase persist 기본값
+                # Phase persist defaults
                 out["ladder_phase"] = "DOWN"
                 out["ladder_consecutive_down_buys"] = 0
                 out["ladder_base_price"] = 0.0
@@ -514,7 +514,7 @@ class LadderManager:
             out.setdefault("risk", dict(DEFAULT_RISK))
             out.setdefault("limits", dict(DEFAULT_LIMITS))
             out.setdefault("ids", {"rid": "", "created_ts": 0.0, "updated_ts": 0.0})
-            # Phase persist 보장
+            # Ensure Phase persist
             out.setdefault("ladder_phase", "DOWN")
             out.setdefault("ladder_consecutive_down_buys", 0)
             out.setdefault("ladder_base_price", 0.0)
@@ -530,7 +530,7 @@ class LadderManager:
             cfg = self.get_config(market)
             cfg.update(cfg_dict)
 
-            # grid_auto_sync 옵션이 있으면 저장 (controls에서 온 값 우선)
+            # Save grid_auto_sync option if present (value from controls takes priority)
             if "grid_auto_sync" in cfg_dict:
                 cfg["grid_auto_sync"] = bool(cfg_dict["grid_auto_sync"])
 
@@ -569,19 +569,19 @@ class LadderManager:
             else:
                 lim = dict(DEFAULT_LIMITS); lim.update(cfg["limits"]); cfg["limits"] = lim
 
-            # Phase persist 보장
+            # Ensure Phase persist
             cfg.setdefault("ladder_phase", "DOWN")
             cfg.setdefault("ladder_consecutive_down_buys", 0)
             cfg.setdefault("ladder_base_price", 0.0)
             cfg.setdefault("ladder_lowest_since_stop", 0.0)
             cfg.setdefault("ladder_active", False)
 
-            # 2026-03-10: 완전히 빈 그리드(max_levels=0, enabled=False) 저장 방지
-            # bounds는 grid_auto_sync가 나중에 채울 수 있으므로 max_levels만 체크
+            # 2026-03-10: prevent saving a completely empty grid (max_levels=0, enabled=False)
+            # bounds may be filled later by grid_auto_sync, so only check max_levels
             ml = int(float(cfg.get("max_levels") or 0))
             en = bool(cfg.get("enabled"))
             if ml <= 0 and not en:
-                # max_levels=0이고 비활성 → 유령 항목, 저장하지 않음
+                # max_levels=0 and disabled -> ghost entry, do not save
                 return cfg
 
             all_cfg = self._read_json(CONFIG_PATH)
@@ -596,7 +596,7 @@ class LadderManager:
             out = []
             for m in markets:
                 cfg = self.get_config(m)
-                # 실현손익/수수료/매수매도 카운트 집계
+                # Aggregate realized PnL/fee/buy-sell counts
                 reg = order_reg.get(m, {})
                 realized_profit = 0.0
                 total_fee = 0.0
@@ -623,7 +623,7 @@ class LadderManager:
                             if qty > 0 and sell_price > 0 and entry_price > 0:
                                 realized_profit += (sell_price - entry_price) * qty
                         total_fee += fee
-                # 수수료 차감
+                # Deduct fees
                 realized_profit -= total_fee
                 cfg["realized_profit_usdt"] = round(realized_profit, 2)
                 cfg["total_fee_usdt"] = round(total_fee, 2)
@@ -633,10 +633,10 @@ class LadderManager:
             return out
 
         def _get_json_lock(self, path: str) -> "threading.RLock":
-            """[FIX H2] 파일별 RLock 반환 — 같은 파일에 대한 동시 읽기/쓰기 직렬화
-            [2026-03-15] longhold_config.json은 strategy_plugins와 공유 락 사용
+            """[FIX H2] Return a per-file RLock — serialize concurrent read/write on the same file.
+            [2026-03-15] longhold_config.json uses a shared lock with strategy_plugins.
             """
-            # longhold_config.json → 전역 공유 락 (strategy_plugins와 동일)
+            # longhold_config.json -> global shared lock (same as strategy_plugins)
             if os.path.basename(path) == "longhold_config.json":
                 from app.core.longhold_file_lock import longhold_file_lock
                 return longhold_file_lock
@@ -646,7 +646,7 @@ class LadderManager:
                 return self._json_locks[path]
 
         def _read_json(self, path: str) -> Dict[str, Any]:
-            with self._get_json_lock(path):  # [FIX H2] 파일 락으로 읽기-수정-쓰기 원자화
+            with self._get_json_lock(path):  # [FIX H2] file lock makes read-modify-write atomic
                 try:
                     if not os.path.exists(path):
                         return {}
@@ -659,7 +659,7 @@ class LadderManager:
 
         def _write_json(self, path: str, data: Dict[str, Any]) -> None:
             from app.core.io_utils import safe_write_json
-            with self._get_json_lock(path):  # [FIX H2] 파일 락으로 원자적 쓰기 보장
+            with self._get_json_lock(path):  # [FIX H2] file lock guarantees atomic write
                 safe_write_json(path, data)
 
             # --------------------------------------------------------
@@ -695,7 +695,7 @@ class LadderManager:
             self._write_order_registry(reg)
 
         def update_order_status(self, market: str, uuid_: str, status: str) -> bool:
-            """계단(주문) 상태 변경: active/paused/deleted"""
+            """Change step (order) status: active/paused/deleted"""
             reg = self._read_order_registry()
             m = reg.get(market)
             if not isinstance(m, dict) or uuid_ not in m:
@@ -706,7 +706,7 @@ class LadderManager:
             return True
 
         def delete_order(self, market: str, uuid_: str) -> bool:
-            """계단(주문) 완전 삭제"""
+            """Permanently delete a step (order)"""
             reg = self._read_order_registry()
             m = reg.get(market)
             if not isinstance(m, dict) or uuid_ not in m:
@@ -770,7 +770,7 @@ class LadderManager:
             # Price
             # --------------------------------------------------------
         def get_current_price(self, market: str) -> Optional[float]:
-            # 1) 우선: coordinator context에서 찾기(가장 cheap)
+            # 1) Prefer: look up from coordinator context (cheapest)
             ctx = None
             try:
                 ctx = self.system.coordinator.contexts.get(market)
@@ -1051,7 +1051,7 @@ class LadderManager:
             lower = float(cfg.get("lower_bound") or 0)
             upper = float(cfg.get("upper_bound") or 0)
             if lower > 0 and upper > 0 and (current_price < lower * 0.5 or current_price > upper * 2.0):
-                log.warning(  # [FIX L1] 모듈 상단 log 사용
+                log.warning(  # [FIX L1] use module-level log
                     "seed_buy_orders BLOCKED: %s price=%.2f outside bounds [%.2f ~ %.2f]",
                     market, current_price, lower, upper,
                 )
@@ -1064,14 +1064,14 @@ class LadderManager:
                 ids = cfg.get("ids") if isinstance(cfg.get("ids"), dict) else {}
                 rid = str(ids.get("rid") or "")
 
-            # N회 고정 매수 구조 적용
+            # Apply N-times fixed-buy structure
 
             max_buy_steps = int(cfg.get("ladder_max_buy_steps") or 5)
             fixed_order_usdt = int(cfg.get("ladder_fixed_order_usdt") or cfg.get("order_usdt") or 10)
             pending_steps = int(cfg.get("ladder_pending_steps") or 0)
             max_borrow_steps = int(cfg.get("ladder_max_borrow_steps") or 0)
             borrowed_steps = int(cfg.get("ladder_borrowed_steps") or 0)
-            # 체결된 buy 계단 수 확인
+            # Check the number of filled buy steps
             reg = self._read_order_registry()
             m = reg.get(market, {})
             filled_buy = [u for u, meta in m.items() if isinstance(meta, dict) and meta.get("side") == "buy" and meta.get("status") == "filled"]
@@ -1079,20 +1079,20 @@ class LadderManager:
             total_buys = len(filled_buy) + len(open_buy)
             realized_buy_count = len(filled_buy)
 
-            # N회 도달 시 추가 매수 중단, 남은 계단은 pending 큐에 저장
+            # When N is reached, stop additional buys; queue remaining steps as pending
             if total_buys >= max_buy_steps:
-                # 상승반전 트리거가 아니면 pending 큐에 저장 후 중단
+                # If not an upward-reversal trigger, queue as pending then stop
                 if not is_rebound_trigger:
                     cfg["ladder_pending_steps"] = pending_steps + max(0, len(open_buy) - max_buy_steps)
                     self.save_config(cfg)
                     return {"market": market, "skipped": True, "reason": f"max_buy_steps({max_buy_steps}) reached", "pending_steps": cfg["ladder_pending_steps"]}
-                # 상승반전 트리거일 때: pending_steps > 0 && 차입 허용 횟수 이내면 차입 매수 진행
+                # On upward-reversal trigger: if pending_steps > 0 && within allowed borrow count, do borrowed buys
                 if pending_steps > 0 and borrowed_steps < min(max_borrow_steps, realized_buy_count):
-                    # 차입 매수 진행 (pending_steps만큼)
+                    # Do borrowed buys (as many as pending_steps)
                     allow_borrow = min(pending_steps, min(max_borrow_steps, realized_buy_count) - borrowed_steps)
                     if allow_borrow <= 0:
                         return {"market": market, "skipped": True, "reason": "borrow limit reached", "pending_steps": pending_steps, "borrowed_steps": borrowed_steps}
-                    # 계단 생성: 현재가 아래로 allow_borrow개
+                    # Create steps: allow_borrow levels below the current price
                     levels = self.calc_levels(cfg)
                     lower = float(cfg.get("lower_bound") or 0.0)
                     upper = float(cfg.get("upper_bound") or 0.0)
@@ -1117,7 +1117,7 @@ class LadderManager:
                         except (OSError, KeyError, AttributeError, TypeError, ValueError, OverflowError) as e:
                             log.warning("LadderManager.seed_buy_orders except: %s", e, exc_info=True)
                             failed.append({"price": price, "error": str(e), "current_price": current_price})
-                    # 차입 횟수 증가, pending_steps 차감
+                    # Increment borrow count, decrement pending_steps
                     cfg["ladder_borrowed_steps"] = borrowed_steps + allow_borrow
                     cfg["ladder_pending_steps"] = max(0, pending_steps - allow_borrow)
                     self.save_config(cfg)
@@ -1132,7 +1132,7 @@ class LadderManager:
                 else:
                     return {"market": market, "skipped": True, "reason": "no pending or borrow not allowed", "pending_steps": pending_steps, "borrowed_steps": borrowed_steps}
 
-            # 계단 생성: 현재가 아래로만, N회까지
+            # Create steps: only below the current price, up to N times
             levels = self.calc_levels(cfg)
             lower = float(cfg.get("lower_bound") or 0.0)
             upper = float(cfg.get("upper_bound") or 0.0)
@@ -1140,21 +1140,21 @@ class LadderManager:
             levels = [self.round_to_tick(p, side="buy") for p in levels]
             levels = [p for p in levels if p > 0 and p < float(current_price) and lower <= p <= upper]
             levels = sorted(set(levels), reverse=True)
-            # 남은 계단 수만큼만 생성
+            # Create only as many as the remaining step count
             allow_new = max(0, max_buy_steps - total_buys)
             levels = levels[:allow_new]
 
             created = 0
             failed: List[Dict[str, Any]] = []
             # Prevent duplicate buy orders at nearly the same price (float-safe, min_profit_gap)
-            getcontext().prec = 12  # [FIX L3] 모듈 상단에서 import, 함수 내부 중복 import 제거
+            getcontext().prec = 12  # [FIX L3] imported at module top, removed duplicate import inside function
             min_profit_gap = Decimal(str(cfg.get("min_profit_gap", 0.001)))  # 0.1% default
             existing_buy_prices = set()
             for u, meta in m.items():
                 if isinstance(meta, dict) and meta.get("side") == "buy" and meta.get("status") == "active":
                     existing_buy_prices.add(Decimal(str(meta.get("price", 0))))
 
-            # 누적 매수 금액 상한(cap) 적용
+            # Apply cumulative buy amount cap
             max_total_usdt = int(cfg.get("max_total_buy_usdt", fixed_order_usdt * max_buy_steps * 3))
             total_usdt_used = 0.0
 
@@ -1171,7 +1171,7 @@ class LadderManager:
                         break
                 if duplicate:
                     continue
-                # move_count: 기존 주문 중 같은 가격대가 있으면 그 move_count+1, 없으면 0
+                # move_count: if an existing order shares the same price band, use its move_count+1, else 0
                 move_count = 0
                 for u, meta in m.items():
                     if (
@@ -1182,8 +1182,8 @@ class LadderManager:
                     ):
                         move_count = int(meta.get("move_count", 0)) + 1
 
-                # --- 개선: order_usdt 우선 사용, 없으면 fallback ---
-                # order_usdt 우선, 없으면 fixed_order_usdt, 둘 다 없으면 allocated_capital/max_steps
+                # --- Improvement: prefer order_usdt, fall back otherwise ---
+                # order_usdt first, else fixed_order_usdt, else allocated_capital/max_steps
                 order_usdt = cfg.get("order_usdt")
                 if order_usdt is not None and order_usdt > 0:
                     base_usdt = float(order_usdt)
@@ -1312,7 +1312,7 @@ class LadderManager:
             if qty_dec <= 0:
                 raise ValueError("invalid_qty<=0")
 
-            # Bybit 최소 주문금액 경계(5,000원)에서 float 오차로 미달 판정되는 문제를 방지한다.
+            # Prevent the case where float error falsely fails Bybit's minimum order-value boundary.
             min_total = Decimal(str(Q.min_order))
             try:
                 min_buffer = Decimal(str(max(0.0, float(os.getenv("OMA_LADDER_MIN_ORDER_BUFFER_USDT", "10") or 10.0))))
@@ -1371,10 +1371,10 @@ class LadderManager:
             sm = (spacing_mode or cfg.get("spacing_mode") or "PERCENT").upper()
             sv = spacing_value if spacing_value is not None else float(cfg.get("spacing_value") or 0.5)
             suggested = self._suggest_max_levels(hi_24h, lo_24h, sm, sv, cap=40)
-            # 동적 Gap 정보 추가
+            # Add dynamic gap info
             gap_info = self.get_dynamic_gap_info(market)
 
-            # --- 실현손익, 수수료, 매수/매도 횟수 집계 ---
+            # --- Aggregate realized PnL, fees, buy/sell counts ---
             realized_pnl = 0.0
             total_fee = 0.0
             buy_count = 0
@@ -1394,7 +1394,7 @@ class LadderManager:
                             buy_count += 1
                         elif side == "sell":
                             sell_count += 1
-                            # 실현손익: 매도 체결 시만 계산
+                            # Realized PnL: computed only on sell fills
                             realized_pnl += float(step.get("realized_profit") or 0)
             except (TypeError, ValueError, KeyError) as exc:
                 logger.warning("[LADDER] realized PnL calc: %s", exc, exc_info=True)
@@ -1407,7 +1407,7 @@ class LadderManager:
                 "suggested_max_levels": suggested,
                 "ts": time.time(),
                 "dynamic_gap_info": gap_info,
-                # 추가된 집계 정보
+                # Added aggregate info
                 "realized_pnl": realized_pnl,
                 "total_fee": total_fee,
                 "buy_count": buy_count,
@@ -1478,7 +1478,7 @@ class LadderManager:
                 logger.warning("[LADDER] ladder_orders.json cleanup: %s", exc, exc_info=True)
 
         def seed_ladder_orders(self, cfg: Dict[str, Any], current_price: float) -> Dict[str, Any]:
-            """현재가 기준 N/2개씩 아래(매수), 위(매도) 계단 생성 (Bybit 예약 주문)"""
+            """Create N/2 steps below (buy) and above (sell) the current price (Bybit reservation orders)."""
             market = str(cfg.get("market") or "")
             if not market:
                 raise ValueError("market is required")
@@ -1487,7 +1487,7 @@ class LadderManager:
             lower = float(cfg.get("lower_bound") or 0)
             upper = float(cfg.get("upper_bound") or 0)
             if lower > 0 and upper > 0 and (current_price < lower * 0.5 or current_price > upper * 2.0):
-                log.warning(  # [FIX L1] 모듈 상단 log 사용
+                log.warning(  # [FIX L1] use module-level log
                     "seed_ladder_orders BLOCKED: %s price=%.2f outside bounds [%.2f ~ %.2f]",
                     market, current_price, lower, upper,
                 )
@@ -1563,8 +1563,8 @@ class LadderManager:
             }
 
         def auto_expand_ladder_on_fill(self, market: str, uuid_: str, expand_n: int = 2) -> None:
-            """계단 체결 시 아래/위로 expand_n개씩 자동 추가"""
-            # [FIX L1] 모듈 상단 log 사용, 함수 내부 import logging 제거
+            """On step fill, auto-add expand_n steps below/above."""
+            # [FIX L1] use module-level log, removed in-function import logging
 
             reg = self._read_order_registry()
             m = reg.get(market)
@@ -1579,8 +1579,8 @@ class LadderManager:
             current_price = self.get_current_price(market)
             order_usdt = int(cfg.get("order_usdt") or 0)
 
-            # [NEW] Pairing Sell: 매수 체결 시, 즉시 매도 주문(TP)을 걸어 수익 기회 창출
-            # 중복 방지(Deduplication) 로직 포함: 이미 해당 가격대에 매도 주문이 있으면 생략
+            # [NEW] Pairing Sell: on buy fill, immediately place a sell order (TP) to create a profit opportunity
+            # Includes deduplication: skip if a sell order already exists at that price band
             if side == "buy" and filled_qty > 0:
                 spacing_val = float(cfg.get("spacing_value") or 0.5)
                 spacing_mode = str(cfg.get("spacing_mode") or "PERCENT").upper()
@@ -1592,7 +1592,7 @@ class LadderManager:
                 
                 sell_price = self.round_to_tick(sell_price, side="sell")
                 
-                # 중복 주문 방지: 이미 비슷한 가격(0.05% 오차 내)에 활성 매도 주문이 있다면 패스
+                # Prevent duplicate orders: skip if an active sell order already exists at a similar price (within 0.05%)
                 is_duplicate = False
                 for u, meta in m.items():
                     if meta.get("status") == "active" and meta.get("side") == "sell":
@@ -1603,7 +1603,7 @@ class LadderManager:
                 
                 if not is_duplicate:
                     try:
-                        # 매도 주문 생성 (매수된 수량만큼)
+                        # Create sell order (for the bought quantity)
                         resp = self._place_limit_sell_qty(market=market, price=sell_price, qty=filled_qty)
                         ou = str(resp.get("uuid") or "")
                         if ou:
@@ -1623,19 +1623,19 @@ class LadderManager:
                 else:
                     log.info(f"[LADDER] Pairing Sell Skipped (Duplicate): {market} {sell_price}")
 
-            # [FIX] Ladder Expansion: 체결 시 위/아래로 계단 확장 (중복 방지 적용)
+            # [FIX] Ladder Expansion: on fill, expand steps up/down (with dedup applied)
             spacing_val = float(cfg.get("spacing_value") or 0.5)
             spacing_mode = str(cfg.get("spacing_mode") or "PERCENT").upper()
 
             for i in range(1, expand_n + 1):
                 if side == "buy":
-                    # [FIX M2] dead code 제거: 첫 번째 계산은 즉시 덮어써져 무의미
+                    # [FIX M2] removed dead code: the first computation was immediately overwritten and meaningless
                     if spacing_mode == "PERCENT":
                         new_price = price * (1.0 - spacing_val / 100.0 * i)
                     else:
                         new_price = price - (spacing_val * i)
                     new_price = self.round_to_tick(new_price, side="buy")
-                    # [FIX C1] 중복 체크 먼저, 주문은 중복 아닐 때만 (기존: 주문→중복체크→재주문 = 이중 주문)
+                    # [FIX C1] check duplicates first, place order only when not duplicate (was: order->dedup check->reorder = double order)
                     is_duplicate = False
                     for u, meta in m.items():
                         if meta.get("status") == "active" and meta.get("side") == "buy":
@@ -1651,16 +1651,16 @@ class LadderManager:
                                 ou = str(resp.get("uuid") or "")
                                 if ou:
                                     self._register_order_uuid(market=market, rid=step.get("rid"), uuid_=ou, side="buy", price=new_price, seq=0, qty=qty)
-                            except (KeyError, AttributeError, TypeError) as _e:  # [FIX M1] 로깅 추가
+                            except (KeyError, AttributeError, TypeError) as _e:  # [FIX M1] added logging
                                 log.warning(f"[LADDER] buy expand failed: {market} {new_price} {_e}")
                 elif side == "sell":
-                    # [FIX M2] dead code 제거: 첫 번째 계산은 즉시 덮어써져 무의미
+                    # [FIX M2] removed dead code: the first computation was immediately overwritten and meaningless
                     if spacing_mode == "PERCENT":
                         new_price = price * (1.0 + spacing_val / 100.0 * i)
                     else:
                         new_price = price + (spacing_val * i)
                     new_price = self.round_to_tick(new_price, side="sell")
-                    # [FIX C1] 중복 체크 먼저, 주문은 중복 아닐 때만
+                    # [FIX C1] check duplicates first, place order only when not duplicate
                     is_duplicate = False
                     for u, meta in m.items():
                         if meta.get("status") == "active" and meta.get("side") == "sell":
@@ -1676,15 +1676,15 @@ class LadderManager:
                                 ou = str(resp.get("uuid") or "")
                                 if ou:
                                     self._register_order_uuid(market=market, rid=step.get("rid"), uuid_=ou, side="sell", price=new_price, seq=0, qty=qty)
-                            except (KeyError, AttributeError, TypeError) as _e:  # [FIX M1] 로깅 추가
+                            except (KeyError, AttributeError, TypeError) as _e:  # [FIX M1] added logging
                                 log.warning(f"[LADDER] sell expand failed: {market} {new_price} {_e}")
 
 
         def poll_filled_steps(self, market: str) -> int:
-            """Poll exchange for filled ladder orders, update registry, 그리고 체결 시 반대 방향 2개 자동 추가
-            체결 감지 실패 시 경고 로그 및 일정 횟수 이상 실패 시 자동 취소 fallback
+            """Poll exchange for filled ladder orders, update registry, and on fill auto-add 2 opposite-side steps.
+            On fill-detection failure: warn log, and after a threshold of failures, fall back to auto-cancel.
             """
-            # [FIX L1] 모듈 상단 log 사용, 함수 내부 import logging 제거
+            # [FIX L1] use module-level log, removed in-function import logging
             reg = self._read_order_registry()
             m = reg.get(market)
             if not isinstance(m, dict):
@@ -1694,7 +1694,7 @@ class LadderManager:
                 return 0
             u = self.get_trade_client()
             updated = 0
-            fail_counts = self._poll_fail_counts.setdefault(market, {})  # [FIX C2] 인스턴스 레벨 유지 → 5회 실패 로직 실제 동작
+            fail_counts = self._poll_fail_counts.setdefault(market, {})  # [FIX C2] persist at instance level -> the 5-failure logic actually works
             for uuid_ in uuids:
                 step = m[uuid_]
                 if step.get("status") in ("filled", "deleted"):
@@ -1739,48 +1739,48 @@ class LadderManager:
                             logger.error("[LADDER] entry_price/realized_profit calc: %s", exc, exc_info=True)
                         updated += 1
                         self.auto_expand_ladder_on_fill(market, uuid_, expand_n=2)
-                        # 체결 감지 성공 시 실패 카운트 제거
-                        fail_counts.pop(uuid_, None)  # [FIX C2] 제거하여 다음 사이클에 깨끗하게 시작
+                        # On successful fill detection, clear the failure count
+                        fail_counts.pop(uuid_, None)  # [FIX C2] clear so the next cycle starts clean
                     else:
-                        # 체결 감지 실패 시 카운트 증가 및 경고 로그
+                        # On fill-detection failure, increment count and warn
                         fail_counts[uuid_] = fail_counts.get(uuid_, 0) + 1
                         if fail_counts[uuid_] >= 5:
-                            log.warning(f"[LADDER] 체결 감지 실패 5회 이상: {market} {uuid_} → 자동 취소 시도")
+                            log.warning(f"[LADDER] fill detection failed 5+ times: {market} {uuid_} -> attempting auto-cancel")
                             try:
                                 self._cancel_order(uuid_=uuid_)
-                                # [FIX] 조회 실패 시 삭제하지 않고 unknown 상태로 유지하여 다음 루프에서 재확인
+                                # [FIX] on lookup failure, do not delete; keep as unknown for re-check next loop
                                 # m[uuid_]["status"] = "deleted"
                             except (KeyError, AttributeError, TypeError) as e:
-                                log.error(f"[LADDER] 자동 취소 실패: {market} {uuid_} {e}")
+                                log.error(f"[LADDER] auto-cancel failed: {market} {uuid_} {e}")
                         else:
-                            log.debug(f"[LADDER] 미체결 대기중: {market} {uuid_[:12]} (count={fail_counts[uuid_]})")
+                            log.debug(f"[LADDER] awaiting fill: {market} {uuid_[:12]} (count={fail_counts[uuid_]})")
                 except (OSError, KeyError, IndexError, AttributeError, TypeError, ValueError, OverflowError) as ex:
-                    log.warning(f"[LADDER] 체결 상태 조회 예외: {market} {uuid_} {ex}")
+                    log.warning(f"[LADDER] fill status lookup exception: {market} {uuid_} {ex}")
                     fail_counts[uuid_] = fail_counts.get(uuid_, 0) + 1
                     if fail_counts[uuid_] >= 5:
                         try:
                             self._cancel_order(uuid_=uuid_)
-                            # [FIX] 예외 발생 시에도 삭제 금지
+                            # [FIX] do not delete even on exception
                             # m[uuid_]["status"] = "deleted"
                         except (KeyError, AttributeError, TypeError) as e:
-                            log.error(f"[LADDER] 자동 취소 실패(예외): {market} {uuid_} {e}")
+                            log.error(f"[LADDER] auto-cancel failed (exception): {market} {uuid_} {e}")
             reg[market] = m
             self._write_order_registry(reg)
             return updated
 
             # --------------------------------------------------------
-            # Backfill: 과거 체결 주문 소급 기록
+            # Backfill: retroactively record past filled orders
             # --------------------------------------------------------
         def backfill_filled_orders(self, since_ts: float = 0.0) -> Dict[str, Any]:
-            """Bybit 체결 완료 내역을 조회하여 registry에 소급 기록.
+            """Query Bybit completed-fill history and retroactively record it into the registry.
 
             Args:
-                since_ts: 이 시각(epoch) 이후 체결 건만 처리. 0이면 전부.
+                since_ts: only process fills after this time (epoch). 0 means all.
 
             Returns:
                 {"updated": int, "markets": {market: count}}
             """
-            # [FIX L1] 모듈 상단 log/datetime 사용, 함수 내부 import 제거
+            # [FIX L1] use module-level log/datetime, removed in-function imports
             u = self.get_trade_client()
             reg = self._read_order_registry()
             all_registry_uuids: Dict[str, str] = {}
@@ -2230,7 +2230,7 @@ class LadderManager:
             profile = "ladder" if strat == "LADDER" else "gazua"
             mth = str(method or "candles").lower()
         
-            # [2026-01-30] 캐시 확인 (5분 TTL)
+            # [2026-01-30] Check cache (5-minute TTL)
             cache_key = f"{strat}_{profile}_{mth}_{n}"
             now = time.time()
             if not force_refresh and cache_key in self._longhold_candidates_cache:
@@ -2255,7 +2255,7 @@ class LadderManager:
                     max_markets=max_markets,
                 )
             else:
-                # [2026-01-30] 마켓 제한으로 속도 개선 (상위 100개만)
+                # [2026-01-30] Limit markets for speed (top 100 only)
                 effective_max = max_markets if max_markets else 100
                 ranked = topn_selector.rank_topn_by_public_candles(
                     n=int(n),
@@ -2295,7 +2295,7 @@ class LadderManager:
                 "cached": False,
             }
         
-            # [2026-01-30] 결과 캐시 저장
+            # [2026-01-30] Store result in cache
             self._longhold_candidates_cache[cache_key] = result
         
             return result
@@ -2365,13 +2365,13 @@ class LadderManager:
             defaults = store.get("defaults") if isinstance(store.get("defaults"), dict) else dict(LONGHOLD_STORE_DEFAULTS["defaults"])
             markets = store.get("markets") if isinstance(store.get("markets"), dict) else {}
 
-            # [2026-02-04] Auto Sell 체크 주기 확인
+            # [2026-02-04] Check Auto Sell interval
             check_interval_min = float(defaults.get("auto_sell_check_interval_min", 10))
             last_check_ts = float(defaults.get("last_auto_sell_check_ts", 0.0))
         
             now = time.time()
         
-            # 주기 체크 - 마지막 체크로부터 N분 경과 여부
+            # Interval check - whether N minutes have passed since the last check
             if (now - last_check_ts) < (check_interval_min * 60):
                 return {
                     "ok": True,
@@ -2381,7 +2381,7 @@ class LadderManager:
                     "next_check_sec": int((check_interval_min * 60) - (now - last_check_ts)),
                 }
         
-            # 체크 시간 업데이트
+            # Update check time
             defaults["last_auto_sell_check_ts"] = now
             store["defaults"] = defaults
             self._save_longhold_store(store)
@@ -2436,12 +2436,12 @@ class LadderManager:
 
                 profit_pct = (float(price) / entry - 1.0) * 100.0
 
-                # [2026-03-19] SL 체크: 진입가 대비 절대 손절 (0 = 비활성화)
+                # [2026-03-19] SL check: absolute stop-loss vs entry price (0 = disabled)
                 sl_pct = float(cfg.get("stop_loss_pct", defaults.get("stop_loss_pct", -30.0)) or 0.0)
                 if sl_pct < 0 and profit_pct <= sl_pct:
-                    logger.warning("[LongHold] SL 도달 %s: profit=%.1f%% <= sl=%.1f%%", mkt, profit_pct, sl_pct)
+                    logger.warning("[LongHold] SL reached %s: profit=%.1f%% <= sl=%.1f%%", mkt, profit_pct, sl_pct)
                     sl_msg = (
-                        f"🔴 [LongHold SL] 손절 도달\n"
+                        f"🔴 [LongHold SL] Stop-loss reached\n"
                         f"- Market: {mkt}\n"
                         f"- PnL: {profit_pct:.2f}% (SL {sl_pct:.1f}%)\n"
                         f"- Entry: {entry:,.0f}  Now: {float(price):,.0f}\n"
@@ -2453,12 +2453,12 @@ class LadderManager:
                         if trade_client and qty > 0:
                             sl_sell = trade_client.market_sell(mkt, qty)
                             if sl_sell and sl_sell.get("uuid"):
-                                self._send_telegram(f"✅ [LongHold SL] {mkt} 시장가 매도 완료 ({sl_sell.get('uuid', '')})")
+                                self._send_telegram(f"✅ [LongHold SL] {mkt} market sell completed ({sl_sell.get('uuid', '')})")
                                 triggered.append({"market": mkt, "reason": "stop_loss", "profit_pct": profit_pct, "sl_pct": sl_pct})
                                 updated = True
                     except (KeyError, AttributeError, TypeError, ValueError) as _e:
                         log.warning("LadderManager.poll_longhold_alerts except: %s", _e, exc_info=True)
-                        logger.error("[LongHold] SL 매도 실패 %s: %s", mkt, _e)
+                        logger.error("[LongHold] SL sell failed %s: %s", mkt, _e)
                     continue
 
                 target_pct = float(cfg.get("target_profit_pct") or 0.0)
@@ -2488,8 +2488,8 @@ class LadderManager:
 
                 # ============================================================
                 # HYBRID AUTO SELL (2026-02-04)
-                # - Trailing Stop: 목표 도달 후 최고점 추적
-                # - Limit → Market: 지정가 미체결 시 시장가 전환
+                # - Trailing Stop: track the peak after target is reached
+                # - Limit -> Market: switch to market order if limit stays unfilled
                 # ============================================================
                 auto_sell = bool(cfg.get("auto_sell_on_target", False))
                 sold_ok = False
@@ -2498,10 +2498,10 @@ class LadderManager:
             
                 if auto_sell and qty > 0:
                     base_trailing_pct = float(cfg.get("trailing_stop_pct", 2.0))
-                    # [2026-02-09] ATR 기반 변동성 반영 + 시간대별 조정
+                    # [2026-02-09] Reflect ATR-based volatility + time-of-day adjustment
                     trailing_pct = base_trailing_pct
                     try:
-                        # ATR(14) 기반 trailing 범위 산출 (2~5% 범위)
+                        # Derive trailing range from ATR(14) (2~5% range)
                         from app.strategy import indicators
                         from app.core.hyper_price_store import price_store
                         candles = price_store.get_candles(mkt, count=20)
@@ -2510,11 +2510,11 @@ class LadderManager:
                             atr = indicators.atr(closes, 14)
                             if closes[-1] > 0:
                                 atr_pct = (atr / closes[-1]) * 100.0
-                                # 2~5% 범위로 클리핑
+                                # Clip to 2~5% range
                                 trailing_pct = min(5.0, max(2.0, atr_pct * 2.0))
                     except (KeyError, IndexError, AttributeError, TypeError, ValueError) as exc:
                         logger.warning("[LADDER] ATR trailing clip: %s", exc, exc_info=True)
-                    # 시간대별 변동성 추가 조정
+                    # Additional time-of-day volatility adjustment
                     try:
                         from app.monitor.time_volatility_adjuster import get_time_volatility_adjuster
                         time_adjuster = get_time_volatility_adjuster()
@@ -2526,7 +2526,7 @@ class LadderManager:
                     limit_timeout = int(cfg.get("limit_order_timeout_sec", 30))
                     market_fallback = bool(cfg.get("enable_market_fallback", True))
                 
-                    # Tracking 상태 가져오기
+                    # Get tracking state
                     tracking = store.get("tracking", {})
                     if not isinstance(tracking, dict):
                         tracking = {}
@@ -2539,9 +2539,9 @@ class LadderManager:
                     limit_order_uuid = track.get("limit_order_uuid")
                     limit_order_ts = float(track.get("limit_order_ts", 0))
                 
-                    # Step 1: Trailing Stop 활성화 (목표 도달 시)
+                    # Step 1: Activate Trailing Stop (when target is reached)
                     if not trailing_active:
-                        # 목표 달성 → Trailing 시작
+                        # Target achieved -> start Trailing
                         peak_price = float(price)
                         trailing_active = True
                         track["peak_price"] = peak_price
@@ -2559,9 +2559,9 @@ class LadderManager:
                         )
                         self._send_telegram(trail_msg)
                 
-                    # Step 2: Trailing Stop 추적
+                    # Step 2: Track Trailing Stop
                     if trailing_active:
-                        # 최고점 갱신
+                        # Update peak
                         if float(price) > peak_price:
                             peak_price = float(price)
                             track["peak_price"] = peak_price
@@ -2569,15 +2569,15 @@ class LadderManager:
                             store["tracking"] = tracking
                             updated = True
                     
-                        # Trailing Stop 발동 체크
+                        # Check Trailing Stop trigger
                         trailing_trigger_price = peak_price * (1.0 - trailing_pct / 100.0)
-                    
+
                         if float(price) <= trailing_trigger_price and not limit_order_uuid:
-                            # Step 3: 지정가 주문 실행
+                            # Step 3: Place limit order
                             try:
                                 trade_client = getattr(self.system, "trade_client", None)
                                 if trade_client:
-                                    # 현재가 기준 지정가 주문
+                                    # Limit order at the current price
                                     sell_result = trade_client.limit_sell(mkt, qty, float(price))
                                     if sell_result and sell_result.get("uuid"):
                                         limit_order_uuid = sell_result.get("uuid")
@@ -2603,22 +2603,22 @@ class LadderManager:
                                 err_msg = f"[LIMIT ORDER FAILED] {mkt}\n- Error: {str(e)}"
                                 self._send_telegram(err_msg)
                     
-                        # Step 4: 지정가 타임아웃 → 시장가 폴백
+                        # Step 4: Limit timeout -> market fallback
                         if limit_order_uuid and market_fallback:
                             elapsed = now - limit_order_ts
                             if elapsed >= limit_timeout:
-                                # 주문 상태 확인
+                                # Check order status
                                 try:
                                     trade_client = getattr(self.system, "trade_client", None)
                                     if trade_client:
                                         order_info = trade_client.get_order(uuid=limit_order_uuid)
                                         order_state = order_info.get("state") if order_info else None
                                     
-                                        # 미체결 상태면 취소 후 시장가 (부분 체결 고려)
+                                        # If unfilled, cancel then market sell (accounting for partial fills)
                                         if order_state in ["wait", "watch"]:
-                                            # 주문 취소
+                                            # Cancel order
                                             cancel_result = trade_client.cancel_order(limit_order_uuid)
-                                            # 부분 체결된 경우 남은 수량만 시장가로 매도
+                                            # On partial fill, market-sell only the remaining quantity
                                             remaining_qty = qty
                                             try:
                                                 if order_info and "remaining_volume" in order_info:
@@ -2640,11 +2640,11 @@ class LadderManager:
                                                         f"- Order: {sell_result.get('uuid', 'N/A')}"
                                                     )
                                                     self._send_telegram(market_msg)
-                                                    # Tracking 초기화
+                                                    # Reset tracking
                                                     tracking.pop(mkt, None)
                                                     store["tracking"] = tracking
                                                     updated = True
-                                                    # 원장 기록
+                                                    # Record to ledger
                                                     try:
                                                         ledger = getattr(self.system, "ledger", None)
                                                         if ledger:
@@ -2660,18 +2660,18 @@ class LadderManager:
                                                     except (KeyError, AttributeError, TypeError, ValueError) as exc:
                                                         logger.error("[LADDER] ledger record (limit sell): %s", exc, exc_info=True)
                                         elif order_state == "done":
-                                            # 체결 완료
+                                            # Fill completed
                                             sold_ok = True
                                             sell_method = "limit"
                                             done_msg = f"[LIMIT FILLED] {mkt}\n- Order: {limit_order_uuid}\n- PnL: +{profit_pct:.2f}%"
                                             self._send_telegram(done_msg)
-                                        
-                                            # Tracking 초기화
+
+                                            # Reset tracking
                                             tracking.pop(mkt, None)
                                             store["tracking"] = tracking
                                             updated = True
-                                        
-                                            # 원장 기록
+
+                                            # Record to ledger
                                             try:
                                                 ledger = getattr(self.system, "ledger", None)
                                                 if ledger:
@@ -2741,14 +2741,14 @@ class LadderManager:
             }
 
             # ============================================================
-            # [2026-02-04] Global Profit Take: 모든 ACTIVE 코인 강제 매도
-            # - 전략 TP 무시, N% 이익 시 즉시 시장가 매도
+            # [2026-02-04] Global Profit Take: force-sell all ACTIVE coins
+            # - Ignore strategy TP; market-sell immediately at N% profit
             # ============================================================
         def poll_global_profit_take(self) -> Dict[str, Any]:
             """Poll all ACTIVE markets and force sell if profit >= global_profit_pct."""
             system = self.system
         
-            # 설정 확인
+            # Check settings
             enabled = bool(getattr(system, "global_profit_take", False))
             if not enabled:
                 return {"ok": True, "enabled": False, "checked": 0, "triggered": []}
@@ -2762,10 +2762,10 @@ class LadderManager:
             detector = None
             MarketRegime = None
 
-            # [2026-02-12] 국면별 동적 익절 목표
-            # - base_target_pct를 기준으로 국면별 배율을 적용한다.
-            # - 기본값: BEAR(1.0x), SIDEWAYS(1.8x), BULL(4.0x), VOLATILE(2.6x)
-            # - 결과는 min/max 범위로 클램프한다.
+            # [2026-02-12] Regime-based dynamic profit target
+            # - Apply a per-regime multiplier on top of base_target_pct.
+            # - Defaults: BEAR(1.0x), SIDEWAYS(1.8x), BULL(4.0x), VOLATILE(2.6x)
+            # - Clamp the result to the min/max range.
             def _fenv(name: str, default: float) -> float:
                 try:
                     return float(os.getenv(name, str(default)) or default)
@@ -2857,7 +2857,7 @@ class LadderManager:
             else:
                 target_pct = _clamp(base_target_pct, gpt_min, gpt_max)
         
-            # 주기 체크
+            # Interval check
             now = time.time()
             last_check_ts = float(getattr(system, "_global_profit_last_check_ts", 0.0))
         
@@ -2875,7 +2875,7 @@ class LadderManager:
             triggered: List[Dict[str, Any]] = []
             checked = 0
         
-            # 모든 ACTIVE 마켓 조회
+            # Query all ACTIVE markets
             try:
                 coordinator = getattr(system, "coordinator", None)
                 if not coordinator:
@@ -2891,16 +2891,16 @@ class LadderManager:
                     if not market or not ctx:
                         continue
                 
-                    # ACTIVE 또는 RECOVERY 상태 대상
+                    # Target ACTIVE or RECOVERY state
                     state = str(getattr(ctx, "state", "") or getattr(ctx, "market_state", "") or "").upper()
                     if state not in ("ACTIVE", "RECOVERY"):
                         continue
                 
-                    # LongHold 마켓은 제외 (별도 로직 적용)
+                    # Exclude LongHold markets (handled by separate logic)
                     # NOTE:
-                    # get_longhold_config()는 defaults.enabled를 머지하므로,
-                    # 기본값이 True일 때 모든 마켓이 LongHold로 간주될 수 있다.
-                    # Global Profit Take에서는 "명시적으로 LongHold에 등록된 마켓"만 제외한다.
+                    # get_longhold_config() merges defaults.enabled, so when the
+                    # default is True every market could be treated as LongHold.
+                    # In Global Profit Take, exclude only "markets explicitly registered in LongHold".
                     try:
                         if market in lh_markets:
                             lh_cfg = self.get_longhold_config(market)
@@ -2911,7 +2911,7 @@ class LadderManager:
                 
                     checked += 1
                 
-                    # 포지션 확인
+                    # Check position
                     pos = self._extract_position(ctx)
                     if not pos:
                         continue
@@ -2921,15 +2921,15 @@ class LadderManager:
                     if qty <= 0 or entry <= 0:
                         continue
                 
-                    # 현재가 조회
+                    # Get current price
                     price = self.get_current_price(market)
                     if not price or float(price) <= 0:
                         continue
-                
-                    # 수익률 계산
+
+                    # Compute profit rate
                     profit_pct = (float(price) / entry - 1.0) * 100.0
-                
-                    # 손실(마이너스)은 제외
+
+                    # Exclude losses (negative)
                     if profit_pct < 0:
                         continue
 
@@ -2952,7 +2952,7 @@ class LadderManager:
                         if abs(float(btc_guard_adj_pct)) > 1e-9:
                             market_target_regime = f"{market_target_regime}|BTC_GUARD:{btc_guard_adj_pct:+.2f}"
                 
-                    # 목표 수익률 이상이면 강제 매도
+                    # Force-sell if at or above target profit rate
                     if profit_pct >= market_target_pct:
                         sell_result = None
                         sell_submitted = False
@@ -3015,7 +3015,7 @@ class LadderManager:
                             )
                             self._send_telegram(msg)
                         
-                            # 원장 기록
+                            # Record to ledger
                             try:
                                 system.ledger.append(
                                     "GLOBAL_PROFIT_TAKE_SELL",

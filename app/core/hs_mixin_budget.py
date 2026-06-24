@@ -23,17 +23,17 @@ class BudgetMixin:
     """Budget allocation, smart allocation, and rebalancing mixin."""
 
     def _rebalance_allocations(self, *, active_markets: List[str]) -> None:
-        """ACTIVE 시장에 대한 soft allocation.
+        """Soft allocation across ACTIVE markets.
 
-        목적(이번 이슈의 핵심):
-        - 한 번 매수/매도 후에도 주문 금액이 0 근처로 떨어지지 않게 해서 pingpong이 연속 동작하도록 함.
-        - "원금(stake)"과 "수익"을 분리:
-          * OMA_FIXED_PRINCIPAL=True  → stake(원금)는 고정, 수익은 stake에 합산하지 않음(복리 미적용)
-          * OMA_FIXED_PRINCIPAL=False → 기존 방식(현재 deployed를 제외한 "추가 배치 가능 금액"만 분배)
+        Purpose (core of this issue):
+        - Keep order size from dropping near 0 after a buy/sell so pingpong keeps running continuously.
+        - Separate "principal (stake)" from "profit":
+          * OMA_FIXED_PRINCIPAL=True  -> stake (principal) is fixed, profit is not added to stake (no compounding)
+          * OMA_FIXED_PRINCIPAL=False -> legacy behavior (distribute only the "additional deployable amount" excluding current deployed)
 
-        안전장치:
-        - 손실로 equity가 감소하면(=target_deployed가 감소하면) stake 총액은 자동으로 축소될 수 있음.
-        - LIVE에서도 engine sizing이 stake를 정확히 보도록 usable_capital을 함께 갱신한다.
+        Safeguards:
+        - If equity shrinks due to losses (= target_deployed shrinks), the total stake can be automatically reduced.
+        - Also update usable_capital so engine sizing sees stake accurately even in LIVE.
         """
         with self._lock:
             if not active_markets:
@@ -51,9 +51,9 @@ class BudgetMixin:
             if self.trading_mode == "PAPER":
                 try:
                     if self.trade_client and hasattr(self.trade_client, "get_balance"):
-                        # PaperTradeClient — 실시간 가상 잔고 반영
+                        # PaperTradeClient — reflect real-time virtual balance
                         equity_usdt = float(self.trade_client.get_balance("USDT"))
-                        # 코인 포지션 가치 합산
+                        # Sum coin position values
                         coin_value = 0.0
                         if hasattr(self.trade_client, "_coin_balances"):
                             from app.core.hyper_price_store import price_store
@@ -78,13 +78,13 @@ class BudgetMixin:
                 deployed = float(self._last_deployed_usdt or 0.0)
 
                 if equity <= 0:
-                    # equity 추정 불가 시에는 cash만 기준
+                    # If equity cannot be estimated, use cash only
                     equity = cash
 
             if equity <= 0:
                 return
 
-            # FOCUS 예산 격리: FOCUS가 활성화되어 있으면 해당 예산을 equity에서 차감
+            # FOCUS budget isolation: if FOCUS is enabled, subtract its budget from equity
             try:
                 fm = getattr(self, "focus_manager", None)
                 if fm and getattr(fm, "enabled", False):
@@ -92,7 +92,7 @@ class BudgetMixin:
                     if _focus_fixed > 0:
                         equity = max(0.0, equity - _focus_fixed)
                     else:
-                        # Budget=0 자동 모드: FOCUS 실제 배치 자본 차감
+                        # Budget=0 auto mode: subtract FOCUS actually-deployed capital
                         try:
                             from app.core.cross_strategy_guard import get_total_deployed_usdt
                             _focus_deployed, _ = get_total_deployed_usdt(self)
@@ -103,7 +103,7 @@ class BudgetMixin:
             except Exception:
                 pass
 
-            # deploy_ratio 적용 후 소숫점 2자리 버림 (USDT 기준)
+            # Apply deploy_ratio then truncate to 2 decimals (USDT basis)
             target_deployed = max(
                 0.0,
                 float(int(float(equity) * float(self.deploy_ratio) * 100) / 100),
@@ -117,8 +117,8 @@ class BudgetMixin:
             if bool(getattr(self, "fixed_principal", False)):
                 capital_mode = "FIXED_PRINCIPAL"
 
-                # 최초 1회: 기준 stake 총액을 고정 (이익은 여기에 합산하지 않음)
-                # target_deployed > 0 일 때만 설정 (0이면 의미 없음)
+                # First time only: fix the baseline total stake (profit is not added here)
+                # Set only when target_deployed > 0 (meaningless if 0)
                 if self._principal_total_usdt is None and float(target_deployed) > 0:
                     self._principal_base_equity_usdt = float(equity)
                     self._principal_total_usdt = float(target_deployed)
@@ -132,11 +132,11 @@ class BudgetMixin:
 
                 principal_total = float(self._principal_total_usdt or 0.0)
 
-                # 손실로 equity가 감소하면 stake 총액은 축소(안전)
+                # If equity shrinks due to losses, reduce total stake (safety)
                 principal_effective = float(min(principal_total, float(target_deployed)))
                 deployable = float(principal_effective)
 
-                # 관측용(legacy 뷰 호환)
+                # For observation (legacy view compatibility)
                 additional_budget = max(0.0, float(target_deployed) - max(0.0, float(deployed)))
             else:
                 additional_budget = max(0.0, float(target_deployed) - max(0.0, float(deployed)))
@@ -144,8 +144,8 @@ class BudgetMixin:
 
             # ------------------------------------------------------------
             # MANUAL BUDGET (hard-lock)
-            # - budget_usdt가 설정된 마켓은 자동 분배로 덮어쓰지 않는다.
-            # - 총 수동예산이 deployable을 초과하면 비율 스케일링으로 축소 적용한다.
+            # - Markets with budget_usdt set are not overwritten by auto allocation.
+            # - If total manual budget exceeds deployable, apply proportional scaling down.
             manual_budgets: Dict[str, float] = {}
             manual_budget_n = 0
             manual_budget_total_usdt = 0.0
@@ -155,7 +155,7 @@ class BudgetMixin:
             auto_markets = list(markets)
             auto_n = len(auto_markets)
 
-            # [FIX] Bybit: get_budget_usdt 사용
+            # [FIX] Bybit: use get_budget_usdt
             get_budget_fn = getattr(self.oma_registry, "get_budget_usdt", None)
             if not callable(get_budget_fn):
                 get_budget_fn = getattr(self.oma_registry, "get_budget_usdt", None)
@@ -179,7 +179,7 @@ class BudgetMixin:
 
                 manual_budget_scaled_total_usdt = manual_budget_total_usdt * manual_budget_scale
 
-                # 먼저 수동 예산 적용
+                # Apply manual budgets first
                 for m, b_f in manual_budgets.items():
                     ctx = self.coordinator.ensure_market(m)
                     scaled = float(b_f) * manual_budget_scale
@@ -200,15 +200,15 @@ class BudgetMixin:
                 auto_n = len(auto_markets)
             # ------------------------------------------------------------
 
-            # allocation 대상(시장) 선정: ACTIVE 전체를 기본 대상
-            # 전략 버킷 구성
+            # Select allocation targets (markets): all ACTIVE by default
+            # Build strategy buckets
             buckets: Dict[str, List[str]] = {}
             for m in auto_markets:
                 ctx = self.coordinator.ensure_market(m)
                 strat = str(getattr(ctx, "selected_strategy", None) or getattr(ctx, "bias", None) or "UNKNOWN").upper()
                 buckets.setdefault(strat, []).append(m)
 
-            # 전략 버킷 가중치 적용(선택)
+            # Apply strategy bucket weights (optional)
             weights: Dict[str, float] = {}
             try:
                 if isinstance(self.strategy_bucket_weights, dict):
@@ -222,7 +222,7 @@ class BudgetMixin:
                 logger.warning("[Budget] strategy_bucket_weights not available", exc_info=True)
                 weights = {}
 
-            # 없으면 균등
+            # Equal weighting if none
             if not weights:
                 for k in buckets.keys():
                     weights[k] = 1.0
@@ -231,7 +231,7 @@ class BudgetMixin:
             if wsum <= 0:
                 wsum = 1.0
 
-            # 버킷 예산 → 코인 분배 (Smart Allocation 적용)
+            # Bucket budget -> per-coin distribution (Smart Allocation applied)
             for strat, mks in buckets.items():
                 w = float(weights.get(strat, 0.0))
                 if w <= 0:
@@ -242,11 +242,11 @@ class BudgetMixin:
                 if not mks:
                     continue
 
-                # Smart Allocation: AI/수익 기반 분배
+                # Smart Allocation: AI/profit-based distribution
                 if self.smart_alloc_enabled and len(mks) > 1:
                     allocations = self._smart_allocate_bucket(bucket_budget, mks)
                 else:
-                    # 균등 분배 fallback
+                    # Equal distribution fallback
                     per_market = bucket_budget / float(len(mks))
                     allocations = {m: per_market for m in mks}
 
@@ -254,7 +254,7 @@ class BudgetMixin:
                     ctx = self.coordinator.ensure_market(m)
                     ctx.allocated_capital = float(alloc)
                     ctx.wallet_mode = bool(self.wallet_mode)
-                    # LIVE에서도 engine sizing이 stake를 제대로 보도록 같이 갱신
+                    # Also update so engine sizing sees stake correctly even in LIVE
                     # PATCH 2025-12-26: wallet-mode => do NOT top-up usable_capital
                     if self.wallet_mode:
                         if float(getattr(ctx, 'usable_capital', 0.0) or 0.0) <= 0.0:
@@ -264,7 +264,7 @@ class BudgetMixin:
                     else:
                         ctx.usable_capital = float(alloc)
 
-            # UI/관측용(스팸 방지: 주기/변화 기반)
+            # For UI/observation (spam prevention: interval/change based)
             try:
                 sig = f"{capital_mode}|{len(markets)}|{round(deployable,2)}|{round(equity,2)}|{round(deployed,2)}|{round(target_deployed,2)}|MB{round(manual_budget_scaled_total_usdt,2)}|A{auto_n}"
             except (TypeError, ValueError):
@@ -272,7 +272,7 @@ class BudgetMixin:
                 sig = ""
 
             now = time.time()
-            # [2026-03-09] 로그 빈도 완화: 300초 주기 OR sig 변경 + 최소 60초 간격
+            # [2026-03-09] Relax log frequency: 300s interval OR sig change + min 60s gap
             _alloc_elapsed = now - float(self._last_alloc_log_ts or 0.0)
             _sig_changed = bool(sig and sig != self._last_alloc_sig)
             if _alloc_elapsed >= 300.0 or (_sig_changed and _alloc_elapsed >= 60.0):
@@ -301,12 +301,12 @@ class BudgetMixin:
                 self._last_alloc_sig = sig
 
     def _smart_allocate_bucket(self, bucket_budget: float, markets: List[str]) -> Dict[str, float]:
-        """Smart Allocation: AI/수익/모멘텀/Kelly 기반 버킷 내부 분배.
+        """Smart Allocation: distribute within a bucket based on AI/profit/momentum/Kelly.
 
-        1단계: 코인별 스코어 계산 (수익률, AI, 리스크, 모멘텀, Kelly)
-        2단계: 스코어 기반 초기 weight 산출
-        3단계: 상관관계 패널티 적용 (post-adjust)
-        4단계: 섹터 밸런싱 적용 (post-adjust)
+        Step 1: Compute per-coin scores (returns, AI, risk, momentum, Kelly)
+        Step 2: Derive initial weights from scores
+        Step 3: Apply correlation penalty (post-adjust)
+        Step 4: Apply sector balancing (post-adjust)
         """
         import math
 
@@ -319,10 +319,10 @@ class BudgetMixin:
         lookback_sec = self.smart_alloc_lookback_days * 86400
 
         # ================================================================
-        # 1단계: 코인별 스코어 계산
+        # Step 1: Compute per-coin scores
         # ================================================================
         score_details: Dict[str, Dict[str, float]] = {}
-        price_returns: Dict[str, List[float]] = {}  # 상관관계 계산용
+        price_returns: Dict[str, List[float]] = {}  # for correlation calculation
 
         for m in markets:
             detail = {"profit": 0.0, "ai": 0.0, "risk": 0.0, "momentum": 0.0, "kelly": 0.0}
@@ -333,7 +333,7 @@ class BudgetMixin:
                     score_details[m] = detail
                     continue
 
-                # 웜업 미완료면 균등
+                # Equal weighting if warmup incomplete
                 if hasattr(ctx, 'is_ready') and callable(ctx.is_ready) and not ctx.is_ready():
                     score_details[m] = detail
                     continue
@@ -341,7 +341,7 @@ class BudgetMixin:
                 brain = getattr(ctx, 'current_ai', None)
                 trade_history = getattr(ctx, 'trade_history', None) or []
 
-                # --- 수익률 컴포넌트 ---
+                # --- Returns component ---
                 try:
                     if trade_history:
                         recent_pnl = 0.0
@@ -357,7 +357,7 @@ class BudgetMixin:
                 except (AttributeError, IndexError, TypeError, ValueError) as exc:
                     logger.warning("[BUDGET] profit component error for %s: %s", m, exc, exc_info=True)
 
-                # --- AI 신뢰도 컴포넌트 ---
+                # --- AI confidence component ---
                 try:
                     ai_conf = None
                     if isinstance(brain, dict) and 'brain' in brain:
@@ -370,7 +370,7 @@ class BudgetMixin:
                 except (AttributeError, KeyError, TypeError, ValueError) as exc:
                     logger.warning("[BUDGET] AI confidence component error for %s: %s", m, exc, exc_info=True)
 
-                # --- 리스크 컴포넌트 ---
+                # --- Risk component ---
                 try:
                     vol = 0.0
                     if isinstance(brain, dict) and 'brain' in brain:
@@ -385,7 +385,7 @@ class BudgetMixin:
                 except (AttributeError, KeyError, TypeError, ValueError) as exc:
                     logger.warning("[BUDGET] risk component error for %s: %s", m, exc, exc_info=True)
 
-                # --- 모멘텀 컴포넌트 ---
+                # --- Momentum component ---
                 try:
                     price_history = getattr(ctx, 'price_history', None) or []
                     if not price_history and isinstance(brain, dict) and 'brain' in brain:
@@ -402,25 +402,25 @@ class BudgetMixin:
                                     returns.append(math.log(prices[i] / prices[i-1]))
 
                             if returns:
-                                price_returns[m] = returns  # 상관관계용 저장
+                                price_returns[m] = returns  # store for correlation
                                 mean_ret = sum(returns) / len(returns)
                                 std_ret = (sum((r - mean_ret)**2 for r in returns) / len(returns)) ** 0.5
 
                                 if std_ret > 1e-10:
                                     mom_raw = mean_ret / std_ret
-                                    # sigmoid 정규화 (0~1)
+                                    # sigmoid normalization (0~1)
                                     detail["momentum"] = 1.0 / (1.0 + math.exp(-mom_raw / self.smart_alloc_mom_scale))
                                 else:
-                                    detail["momentum"] = 0.5  # 변동 없음 = 중립
+                                    detail["momentum"] = 0.5  # no variation = neutral
                 except (AttributeError, KeyError, OverflowError, TypeError, ValueError, ZeroDivisionError) as exc:
                     logger.warning("[BUDGET] momentum component error for %s: %s", m, exc, exc_info=True)
 
-                # --- Kelly Criterion 컴포넌트 ---
+                # --- Kelly Criterion component ---
                 try:
                     if trade_history and len(trade_history) >= self.smart_alloc_kelly_min_trades:
                         wins = []
                         losses = []
-                        for rec in trade_history[-100:]:  # 최근 100개
+                        for rec in trade_history[-100:]:  # most recent 100
                             pnl = rec[1] if isinstance(rec, (list, tuple)) else rec.get('pnl', 0)
                             pnl = float(pnl)
                             if pnl > 0:
@@ -430,53 +430,53 @@ class BudgetMixin:
 
                         total_trades = len(wins) + len(losses)
                         if total_trades >= self.smart_alloc_kelly_min_trades and losses:
-                            p = len(wins) / total_trades  # 승률
+                            p = len(wins) / total_trades  # win rate
                             avg_win = sum(wins) / len(wins) if wins else 0
                             avg_loss = sum(losses) / len(losses) if losses else 1
-                            b = avg_win / avg_loss if avg_loss > 0 else 1  # 평균이익/평균손실
+                            b = avg_win / avg_loss if avg_loss > 0 else 1  # avg win / avg loss
 
                             # Kelly formula: f* = (p*(b+1) - 1) / b
                             if b > 0:
                                 kelly_f = (p * (b + 1) - 1) / b
                                 kelly_f = max(0, min(kelly_f, self.smart_alloc_kelly_max))
                                 kelly_f *= self.smart_alloc_kelly_frac  # fractional Kelly
-                                detail["kelly"] = kelly_f / self.smart_alloc_kelly_max  # 0~1 정규화
+                                detail["kelly"] = kelly_f / self.smart_alloc_kelly_max  # normalize 0~1
                 except (AttributeError, IndexError, TypeError, ValueError, ZeroDivisionError) as exc:
                     logger.warning("[BUDGET] Kelly criterion error for %s: %s", m, exc, exc_info=True)
 
-                # --- 유동성 컴포넌트 (거래대금 기반) ---
+                # --- Liquidity component (based on turnover) ---
                 try:
                     vol_24h = 0.0
-                    # price_store에서 거래대금 조회
+                    # Look up turnover from price_store
                     vol_24h = price_store.get_volume(m) or 0.0
 
                     if vol_24h <= 0:
-                        # ctx에서 조회 시도
+                        # Try looking up from ctx
                         if isinstance(brain, dict) and 'brain' in brain:
                             vol_24h = float(brain['brain'].get('vol24_usdt', brain['brain'].get('vol24_usdt', 0)) or 0)
 
                     if vol_24h > 0:
-                        # 24h 거래대금 기준 정규화 (0~1, log scale)
+                        # Normalize by 24h turnover (0~1, log scale)
                         # 1M=0, 10M=0.17, 100M=0.33, 1B=0.5, 10B=0.67
                         log_vol = math.log10(max(vol_24h, 1e6)) - 6  # 1M = 0
                         detail["liquidity"] = min(1.0, max(0.0, log_vol / 6))  # 0~1 (1T USDT = 1.0)
                     else:
-                        detail["liquidity"] = 0.5  # 정보 없으면 중립
+                        detail["liquidity"] = 0.5  # neutral if no info
                 except (KeyError, AttributeError, TypeError, ValueError):
                     logger.warning("[Budget] liquidity score error for %s", m, exc_info=True)
                     detail["liquidity"] = 0.5
 
-                # --- 고래 활동 감지 ---
-                # 2026-03-10: 실제 구현체 연결
+                # --- Whale activity detection ---
+                # 2026-03-10: connected to the real implementation
                 try:
                     from app.monitor.whale_detector import get_whale_detector
                     whale_det = get_whale_detector()
 
-                    # 거래량 데이터
+                    # Volume data
                     vol_24h = price_store.get_volume(m) or 0
-                    avg_vol = equal_share  # 임시 기준 (실제는 평균 거래량 필요)
+                    avg_vol = equal_share  # temporary baseline (real average volume needed)
 
-                    # 가격 변화
+                    # Price change
                     price_change_pct = 0.0
                     if price_history and len(price_history) >= 2:
                         p_now = float(price_history[-1])
@@ -491,9 +491,9 @@ class BudgetMixin:
                     logger.warning("[Budget] whale detection error for %s", m, exc_info=True)
                     detail["whale_mult"] = 1.0
 
-                # --- 이벤트 감지 ---
-                # [2026-03-15] EventDetector 미구현 — 클래스 자체가 없어 매 틱 ImportError.
-                # 구현 시까지 중립값(1.0) 고정. 구현 후 이 블록을 활성화할 것.
+                # --- Event detection ---
+                # [2026-03-15] EventDetector not implemented — the class does not exist, causing ImportError every tick.
+                # Pinned to neutral value (1.0) until implemented. Enable this block once implemented.
                 detail["event_mult"] = 1.0
 
                 score_details[m] = detail
@@ -503,9 +503,9 @@ class BudgetMixin:
                 score_details[m] = detail
 
         # ================================================================
-        # 2단계: 가중합으로 raw_score 계산
+        # Step 2: Compute raw_score via weighted sum
         # ================================================================
-        # 가중치 정규화: w_profit+w_ai+w_risk+w_momentum+w_kelly+w_liquidity 합이 1.0이 되도록
+        # Normalize weights so w_profit+w_ai+w_risk+w_momentum+w_kelly+w_liquidity sums to 1.0
         _w_sum = (
             self.smart_alloc_w_profit + self.smart_alloc_w_ai + self.smart_alloc_w_risk
             + self.smart_alloc_w_momentum + self.smart_alloc_w_kelly + self.smart_alloc_w_liquidity
@@ -525,18 +525,18 @@ class BudgetMixin:
             raw_score += _wp * d.get("profit", 0)
             raw_score += _wa * d.get("ai", 0)
             raw_score -= _wr * d.get("risk", 0)
-            raw_score += _wm * (d.get("momentum", 0.5) - 0.5) * 2  # 0.5 = 중립
+            raw_score += _wm * (d.get("momentum", 0.5) - 0.5) * 2  # 0.5 = neutral
             raw_score += _wk * d.get("kelly", 0)
-            raw_score += _wl * (d.get("liquidity", 0.5) - 0.5) * 2  # 유동성 가중치
+            raw_score += _wl * (d.get("liquidity", 0.5) - 0.5) * 2  # liquidity weight
 
-            # 고래/이벤트 가중치 적용
+            # Apply whale/event weights
             whale_mult = d.get("whale_mult", 1.0)
             event_mult = d.get("event_mult", 1.0)
             raw_score *= whale_mult * event_mult
 
             scores[m] = max(raw_score, 0.1)
 
-        # 초기 weight 계산
+        # Compute initial weights
         total_score = sum(scores.values())
         if total_score <= 0:
             total_score = n
@@ -546,11 +546,11 @@ class BudgetMixin:
             weights[m] = scores[m] / total_score
 
         # ================================================================
-        # 3단계: 상관관계 패널티 (post-adjust)
+        # Step 3: Correlation penalty (post-adjust)
         # ================================================================
         if self.smart_alloc_corr_enabled and len(price_returns) >= 2:
             try:
-                # 간단한 피어슨 상관계수 계산
+                # Simple Pearson correlation calculation
                 def pearson_corr(a: List[float], b: List[float]) -> float:
                     n_min = min(len(a), len(b))
                     if n_min < 5:
@@ -565,7 +565,7 @@ class BudgetMixin:
                         return cov / (std_a * std_b)
                     return 0.0
 
-                # 각 코인의 상관 노출도 계산
+                # Compute correlation exposure for each coin
                 corr_exposure: Dict[str, float] = {}
                 for m in markets:
                     if m not in price_returns:
@@ -582,7 +582,7 @@ class BudgetMixin:
 
                     corr_exposure[m] = exposure
 
-                # 패널티 적용
+                # Apply penalty
                 for m in markets:
                     penalty = 1.0 / (1.0 + self.smart_alloc_corr_lambda * corr_exposure.get(m, 0))
                     weights[m] *= penalty
@@ -591,7 +591,7 @@ class BudgetMixin:
                 logger.warning("[BUDGET] correlation penalty error: %s", exc, exc_info=True)
 
         # ================================================================
-        # 4단계: 섹터 밸런싱 (post-adjust)
+        # Step 4: Sector balancing (post-adjust)
         # ================================================================
         if self.smart_alloc_sector_enabled and self.smart_alloc_sector_map:
             try:
@@ -599,13 +599,13 @@ class BudgetMixin:
                 sector_caps = self.smart_alloc_sector_caps or {}
                 default_cap = self.smart_alloc_sector_default_cap
 
-                # 섹터별 현재 비중 계산
+                # Compute current weight per sector
                 sector_weights: Dict[str, float] = {}
                 for m in markets:
                     sector = sector_map.get(m, "OTHERS")
                     sector_weights[sector] = sector_weights.get(sector, 0) + weights.get(m, 0)
 
-                # 섹터 캡 초과 시 패널티
+                # Penalty when sector cap is exceeded
                 for m in markets:
                     sector = sector_map.get(m, "OTHERS")
                     cap = float(sector_caps.get(sector, default_cap))
@@ -619,28 +619,28 @@ class BudgetMixin:
                 logger.warning("[BUDGET] sector balancing error: %s", exc, exc_info=True)
 
         # ================================================================
-        # 최종: 정규화 및 예산 분배
+        # Final: normalize and distribute budget
         # ================================================================
         total_weight = sum(weights.values())
         if total_weight <= 0:
             total_weight = 1.0
 
-        # min/max 캡 적용
+        # Apply min/max caps
         min_cap = equal_share * self.smart_alloc_min_mult
         max_cap = equal_share * self.smart_alloc_max_mult
 
         # ================================================================
-        # 예산 배율 전략 적용 (OMA_BUDGET_STRATEGY)
+        # Apply budget multiplier strategy (OMA_BUDGET_STRATEGY)
         # ================================================================
-        # - regime  = 기존 추세 추종 (BULL→x1.25, BEAR→x0.70)
-        # - fg      = F&G 역발상 (공포→x1.30, 탐욕→x0.70)
-        # - extreme = F&G 극단값(0-25, 75-100)만, 나머지는 Regime (기본값)
-        # - hybrid  = F&G × Regime 곱연산
+        # - regime  = legacy trend following (BULL->x1.25, BEAR->x0.70)
+        # - fg      = F&G contrarian (fear->x1.30, greed->x0.70)
+        # - extreme = F&G extreme values only (0-25, 75-100), otherwise Regime (default)
+        # - hybrid  = F&G x Regime product
         # ================================================================
         budget_mult = 1.0
         budget_reason = "none"
 
-        # F&G 정보 조회
+        # Look up F&G info
         fg_mult = 1.0
         fg_level = None
         fg_value = 50
@@ -655,7 +655,7 @@ class BudgetMixin:
             except (ImportError, AttributeError, TypeError) as exc:
                 logger.warning("[BUDGET] Fear&Greed lookup error: %s", exc, exc_info=True)
 
-        # Regime 정보 조회
+        # Look up Regime info
         regime_mult = 1.0
         global_regime = None
         if self.regime_enabled:
@@ -675,21 +675,21 @@ class BudgetMixin:
             except (KeyError, AttributeError, TypeError) as exc:
                 logger.warning("[BUDGET] Regime lookup error: %s", exc, exc_info=True)
 
-        # 전략별 적용
+        # Apply per strategy
         strategy = getattr(self, 'budget_strategy', 'extreme')
 
         if strategy == "regime":
-            # 기존 추세 추종만
+            # Legacy trend following only
             budget_mult = regime_mult
             budget_reason = f"regime:{global_regime.regime.value if global_regime else 'UNKNOWN'}→{regime_mult:.2f}"
 
         elif strategy == "fg":
-            # F&G 역발상만
+            # F&G contrarian only
             budget_mult = fg_mult
             budget_reason = f"fg:{fg_value}→{fg_mult:.2f}"
 
         elif strategy == "extreme":
-            # F&G 극단값(0-25, 75-100)만, 나머지는 Regime
+            # F&G extreme values only (0-25, 75-100), otherwise Regime
             try:
                 from app.core.fear_greed import FearGreedLevel
                 if fg_level in (FearGreedLevel.EXTREME_FEAR, FearGreedLevel.EXTREME_GREED):
@@ -704,21 +704,21 @@ class BudgetMixin:
                 budget_reason = f"extreme_fallback→{regime_mult:.2f}"
 
         elif strategy == "hybrid":
-            # F&G × Regime 곱연산
+            # F&G x Regime product
             budget_mult = fg_mult * regime_mult
             budget_reason = f"hybrid:fg{fg_mult:.2f}×regime{regime_mult:.2f}={budget_mult:.2f}"
 
         else:
-            # 알 수 없는 전략 → 기본값 (extreme)
+            # Unknown strategy -> default (extreme)
             budget_mult = regime_mult
             budget_reason = f"unknown_strategy→regime:{regime_mult:.2f}"
 
         max_cap *= budget_mult
         min_cap *= budget_mult
 
-        # 시간대 최적화 적용
-        # 2026-03-10: 실제 구현체(time_volatility_adjuster.py)로 연결
-        # 옵션: system.time_zone_optimizer_enabled (기본 False)
+        # Apply time-zone optimization
+        # 2026-03-10: connected to the real implementation (time_volatility_adjuster.py)
+        # Option: system.time_zone_optimizer_enabled (default False)
         if bool(getattr(self, "time_zone_optimizer_enabled", False)):
             try:
                 from app.monitor.time_volatility_adjuster import get_time_volatility_adjuster
@@ -733,26 +733,26 @@ class BudgetMixin:
         for m in markets:
             raw_alloc = bucket_budget * (weights[m] / total_weight)
 
-            # 유동성 기반 예산 상한 (slippage 방지)
-            # 24시간 거래대금의 일정 비율 이상 배정하지 않음
-            # NOTE: 수동 예산(GAZUA 등)은 이 함수에 들어오기 전에 이미 처리됨
-            #       → 유동성 상한 적용 안됨 (사용자 의도 존중)
+            # Liquidity-based budget cap (slippage prevention)
+            # Do not allocate above a fixed fraction of 24h turnover
+            # NOTE: manual budgets (GAZUA etc.) are already handled before entering this function
+            #       -> liquidity cap not applied (respect user intent)
             liquidity_cap = max_cap
             try:
                 d = score_details.get(m, {})
                 liq_score = d.get("liquidity", 0.5)
-                # 유동성 점수 → 대략적인 거래대금 역산
-                # liq_score 0.5 = 10억, 0.7 = 100억
+                # liquidity score -> rough inverse estimate of turnover
+                # liq_score 0.5 = 1B, 0.7 = 10B
                 estimated_vol24 = 10 ** (6 + liq_score * 6)  # 1M ~ 1T
-                # 거래대금의 0.1% 이상 배정하지 않음 (슬리피지 방지)
+                # Do not allocate more than 0.1% of turnover (slippage prevention)
                 liquidity_cap = min(max_cap, estimated_vol24 * self.smart_alloc_liq_cap_ratio)
             except (AttributeError, TypeError, ValueError) as exc:
                 logger.warning("[BUDGET] liquidity cap error for %s: %s", m, exc, exc_info=True)
 
             capped = max(min_cap, min(max_cap, min(liquidity_cap, raw_alloc)))
-            allocations[m] = float(int(capped * 100) / 100)  # USDT 0.01 단위
+            allocations[m] = float(int(capped * 100) / 100)  # USDT 0.01 unit
 
-        # 합계 조정 (라운딩 오차 보정)
+        # Adjust total (correct rounding error)
         total_alloc = sum(allocations.values())
         diff = bucket_budget - total_alloc
         if abs(diff) > 0.1 and allocations:
@@ -777,13 +777,13 @@ class BudgetMixin:
     # Dynamic Budget Rebalancing
     # --------------------------------------------------------
     def check_and_rebalance_budgets(self, *, force: bool = False) -> Dict[str, Any]:
-        """자본 변동 시 예산 자동 리밸런싱.
+        """Auto-rebalance budgets when capital changes.
 
         Args:
-            force: True면 변동률 무관하게 강제 리밸런싱
+            force: if True, force rebalancing regardless of change rate
 
         Returns:
-            리밸런싱 결과 (변동 사항)
+            Rebalancing result (changes)
         """
         result: Dict[str, Any] = {"rebalanced": False, "reason": "no_change"}
 
@@ -795,21 +795,21 @@ class BudgetMixin:
                 result["reason"] = "no_equity"
                 return result
 
-            # 변동률 계산
+            # Compute change rate
             if old_equity > 0:
                 change_ratio = new_equity / old_equity
             else:
                 change_ratio = 1.0
                 self._prev_rebalance_equity = new_equity
 
-            # 5% 이상 변동 시 리밸런싱 (또는 force=True)
+            # Rebalance when change is 5% or more (or force=True)
             rebalance_threshold = float(getattr(self, "budget_rebalance_threshold", 0.05) or 0.05)
 
             if not force and abs(change_ratio - 1.0) < rebalance_threshold:
                 result["reason"] = f"change_under_threshold ({abs(change_ratio - 1.0) * 100:.2f}% < {rebalance_threshold * 100}%)"
                 return result
 
-            # 리밸런싱 실행
+            # Execute rebalancing
             snap = self.oma_registry.snapshot() if self.oma_registry else {}
             active_markets = [r.get("market") if isinstance(r, dict) else r for r in (snap.get("active") or [])]
 
@@ -817,10 +817,10 @@ class BudgetMixin:
                 result["reason"] = "no_active_markets"
                 return result
 
-            # 예산 재배분 트리거
+            # Trigger budget reallocation
             self._allocate_capital_to_markets(active_markets)
 
-            # 상태 업데이트
+            # Update state
             self._prev_rebalance_equity = new_equity
 
             result = {
@@ -846,6 +846,6 @@ class BudgetMixin:
             try:
                 self.ledger.append("BUDGET_REBALANCE_ERROR", error=str(exc))
             except (AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[BUDGET] 상태 업데이트: %s", exc, exc_info=True)
+                logger.warning("[BUDGET] state update: %s", exc, exc_info=True)
 
         return result

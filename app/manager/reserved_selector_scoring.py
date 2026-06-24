@@ -46,13 +46,13 @@ def _get_market_performance_score(
     strategy: str,
     pnl_cache: Dict[str, Dict[str, Any]],
 ) -> float:
-    """과거 성과 기반 스코어 조정값 반환.
+    """Return a score adjustment based on past performance.
 
     Returns:
-        -0.5 ~ +0.5 범위의 조정값
-        - 양수: 과거 수익 → 보너스
-        - 음수: 과거 손실 → 감점 (but 배제 아님)
-        - 0: 데이터 없음
+        Adjustment in the range -0.5 ~ +0.5
+        - positive: past profit -> bonus
+        - negative: past loss -> penalty (but not exclusion)
+        - 0: no data
     """
     if not pnl_cache:
         return 0.0
@@ -61,10 +61,10 @@ def _get_market_performance_score(
     if not market_data:
         return 0.0
 
-    # 해당 전략으로 거래한 이력만 확인
+    # Only consider trade history for this strategy
     strategy_pnl = market_data.get(strategy.upper(), {})
     if not strategy_pnl:
-        # 전략별 데이터 없으면 전체 데이터 사용
+        # No per-strategy data -> fall back to aggregate data
         strategy_pnl = market_data.get("_total", {})
 
     if not strategy_pnl:
@@ -77,11 +77,11 @@ def _get_market_performance_score(
     if trade_count == 0:
         return 0.0
 
-    # 스코어 계산
-    # 1. 승률 기반 (0.5 기준, ±0.2)
-    win_bonus = (win_rate - 0.5) * 0.4  # 0.3 → -0.08, 0.7 → +0.08
+    # Score calculation
+    # 1. Win-rate based (centered at 0.5, +/-0.2)
+    win_bonus = (win_rate - 0.5) * 0.4  # 0.3 -> -0.08, 0.7 -> +0.08
 
-    # 2. 순수익 기반 (로그 스케일, ±0.3)
+    # 2. Net-profit based (log scale, +/-0.3)
     if net_pnl > 0:
         pnl_bonus = min(0.3, math.log1p(net_pnl / 10000) * 0.05)
     elif net_pnl < 0:
@@ -89,13 +89,13 @@ def _get_market_performance_score(
     else:
         pnl_bonus = 0.0
 
-    # 3. 거래 횟수 가중 (경험치)
-    # 거래가 많을수록 데이터 신뢰도 높음
-    exp_weight = min(1.0, trade_count / 10.0)  # 10회 이상이면 100% 반영
+    # 3. Trade-count weight (experience)
+    # More trades -> higher data confidence
+    exp_weight = min(1.0, trade_count / 10.0)  # 10+ trades -> 100% weight
 
     total_adjustment = (win_bonus + pnl_bonus) * exp_weight
 
-    # 범위 제한
+    # Clamp to range
     return max(-0.5, min(0.5, total_adjustment))
 
 # ============================================================
@@ -103,7 +103,7 @@ def _get_market_performance_score(
 # ============================================================
 
 def _load_market_pnl_cache(system: Any) -> Dict[str, Dict[str, Any]]:
-    """시스템의 거래 원장에서 마켓별 성과 데이터 로드.
+    """Load per-market performance data from the system's trade ledger.
 
     Returns:
         {
@@ -120,21 +120,21 @@ def _load_market_pnl_cache(system: Any) -> Dict[str, Dict[str, Any]]:
     try:
         from app.manager.ledger_pnl import aggregate_fill_pnl
 
-        # 최근 30일 데이터
+        # Last 30 days of data
         ledger = getattr(system, "ledger", None)
         if not ledger:
             return cache
 
-        records = list(ledger.tail(5000))  # 최근 5000개 레코드
+        records = list(ledger.tail(5000))  # last 5000 records
         if not records:
             return cache
 
         now = time.time()
-        since_ts = now - (30 * 24 * 3600)  # 30일 전
+        since_ts = now - (30 * 24 * 3600)  # 30 days ago
 
         aggs = aggregate_fill_pnl(records, since_ts=since_ts, until_ts=now, markets=None)
 
-        # market → strategy 매핑 (OMA_ENTRY / FILL_BUY / FILL_SELL 이벤트 기반)
+        # market -> strategy mapping (based on OMA_ENTRY / FILL_BUY / FILL_SELL events)
         market_strategy: Dict[str, str] = {}
         for rec in records:
             try:
@@ -152,7 +152,7 @@ def _load_market_pnl_cache(system: Any) -> Dict[str, Dict[str, Any]]:
                 if mkt and strat:
                     market_strategy[str(mkt)] = strat.upper()
             except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[reserved_selector_scoring] %s: %s", 'market → strategy 매핑 (OMA_ENTRY / FILL_BUY / FILL_SELL 이벤트 기반) except-> continue', exc, exc_info=True)
+                logger.warning("[reserved_selector_scoring] %s: %s", 'market -> strategy mapping (based on OMA_ENTRY / FILL_BUY / FILL_SELL events) except-> continue', exc, exc_info=True)
                 continue
 
         for market, agg in aggs.items():
@@ -162,7 +162,7 @@ def _load_market_pnl_cache(system: Any) -> Dict[str, Dict[str, Any]]:
             net_pnl = agg.net_cash_usdt
             trade_count = agg.trade_n
 
-            # 승률 계산 (net_pnl 기반 단순화)
+            # Win-rate estimate (simplified, based on net_pnl)
             win_rate = 0.5
             if trade_count > 0:
                 if net_pnl > 0:
@@ -177,7 +177,7 @@ def _load_market_pnl_cache(system: Any) -> Dict[str, Dict[str, Any]]:
             }
             cache[market]["_total"] = entry
 
-            # 전략별 attribution: 동일 마켓은 하나의 전략에만 속함
+            # Per-strategy attribution: a given market belongs to a single strategy
             strat = market_strategy.get(market, "")
             if strat and strat not in ("UNKNOWN", ""):
                 cache[market][strat] = entry
@@ -195,8 +195,8 @@ def _load_market_pnl_cache(system: Any) -> Dict[str, Dict[str, Any]]:
 # ============================================================
 
 def _score_pingpong(s: MarketSnapshot) -> float:
-    # [2026-03-09] decide() 정렬: BB 하단 근접도가 핵심 (현재가 ≤ BB하단 → buy)
-    # 유동성/스프레드는 체결 가능성, BB 근접도는 진입 타이밍
+    # [2026-03-09] Aligned with decide(): proximity to the BB lower band is key (price <= BB lower -> buy)
+    # Liquidity/spread = fill feasibility; BB proximity = entry timing
     _LIQ_CAP = math.log1p(50_000_000_000.0)  # ≈ 24.7
     liq = min(math.log1p(max(0.0, s.vol24_usdt)), _LIQ_CAP)
     spread_pen = math.log1p(max(0.0, s.spread_bps))
@@ -204,26 +204,26 @@ def _score_pingpong(s: MarketSnapshot) -> float:
     trades = math.log1p(float(s.recent_trades or 0))
     eq_pen = _execution_quality_penalty(s.price, s.vol24_usdt, s.spread_bps)
 
-    # ── BB 하단 근접도 (decide가 price <= bb_lower 를 요구) ──
+    # -- BB lower-band proximity (decide() requires price <= bb_lower) --
     bb_entry_score = 0.0
     if s.bb_lower > 0 and s.bb_upper > s.bb_lower and s.price > 0:
         bb_range = s.bb_upper - s.bb_lower
-        dist_from_lower = (s.price - s.bb_lower) / bb_range  # 0=하단, 1=상단
+        dist_from_lower = (s.price - s.bb_lower) / bb_range  # 0=lower, 1=upper
         if dist_from_lower <= 0.05:
-            bb_entry_score = 15.0   # BB 하단 도달/이탈 → decide()가 즉시 buy
+            bb_entry_score = 15.0   # at/below BB lower -> decide() buys immediately
         elif dist_from_lower <= 0.15:
-            bb_entry_score = 10.0   # BB 하단 근접 → 곧 buy 가능
+            bb_entry_score = 10.0   # near BB lower -> buy possible soon
         elif dist_from_lower <= 0.30:
-            bb_entry_score = 5.0    # BB 하단 접근 중
+            bb_entry_score = 5.0    # approaching BB lower
         elif dist_from_lower >= 0.80:
-            bb_entry_score = -8.0   # BB 상단 → decide()가 절대 buy 안 함
+            bb_entry_score = -8.0   # near BB upper -> decide() never buys
 
     return (
         1.5 * liq
         + 0.7 * depth
         + 0.4 * trades
         - 0.8 * spread_pen
-        + 3.0 * bb_entry_score     # BB 근접도가 가장 큰 가중치
+        + 3.0 * bb_entry_score     # BB proximity carries the largest weight
         + eq_pen
     )
 
@@ -253,20 +253,20 @@ def _score_ladder(s: MarketSnapshot) -> float:
         elif s.bb_width_pct > 10.0:
             bb_bonus = max(0.0, 2.0 - (s.bb_width_pct - 10.0) * 0.2)
 
-    # [2026-03-03] 저가/저거래량 실행품질 패널티
+    # [2026-03-03] Execution-quality penalty for low price / low volume
     eq_pen = _execution_quality_penalty(s.price, s.vol24_usdt, s.spread_bps)
     return (1.2 * liq) + (2.5 * vol_score) + (0.6 * depth) - (0.8 * spread_pen) + bb_bonus + eq_pen
 
 def _score_lightning(s: MarketSnapshot, ai_features: Optional[Dict[str, float]] = None) -> float:
-    """LIGHTNING v2: 돌파 적합성 + 변동성/BB 인식 스코어링.
+    """LIGHTNING v2: breakout suitability + volatility/BB-aware scoring.
 
-    [2026-02-23] ATR sweet spot, BB 위치, 모멘텀 가속도 반영.
-    [2026-03-09] decide() 정렬: 모멘텀 급등 + 거래량 서지 추가
+    [2026-02-23] Factors in ATR sweet spot, BB position, momentum acceleration.
+    [2026-03-09] Aligned with decide(): added momentum spike + volume surge
     """
-    # ── 1. 유동성 기본 ──
+    # -- 1. Liquidity base --
     liq = math.log1p(max(0.0, s.vol24_usdt))
 
-    # ── 2. ATR sweet spot (1.0~5% 적정, 돌파 기회 충분 + 과열 아님) ──
+    # -- 2. ATR sweet spot (1.0~5% ideal: enough breakout room, not overheated) --
     volatility = s.atr_pct if s.atr_pct > 0 else 0.0
     if volatility < 0.8:
         vol_score = -1.0
@@ -275,7 +275,7 @@ def _score_lightning(s: MarketSnapshot, ai_features: Optional[Dict[str, float]] 
     else:
         vol_score = max(0.0, 4.0 - (volatility - 5.0) * 0.6)
 
-    # ── 3. BB 위치 (중간~상단 선호 = 돌파 준비 구간) ──
+    # -- 3. BB position (mid~upper preferred = breakout-ready zone) --
     bb_score = 0.0
     if s.bb_lower > 0 and s.bb_upper > s.bb_lower and s.price > 0:
         bb_range = s.bb_upper - s.bb_lower
@@ -287,30 +287,30 @@ def _score_lightning(s: MarketSnapshot, ai_features: Optional[Dict[str, float]] 
         elif position < 0.2:
             bb_score = -1.0
 
-    # ── 4. 체결 가능성 ──
+    # -- 4. Fill feasibility --
     spread_pen = math.log1p(max(0.0, s.spread_bps)) * 0.8
     rr = math.log1p(max(0.0, s.range_ratio_24h))
     trades = math.log1p(float(s.recent_trades or 0))
 
-    # [2026-03-03] 저가/저거래량 실행품질 패널티
+    # [2026-03-03] Execution-quality penalty for low price / low volume
     eq_pen = _execution_quality_penalty(s.price, s.vol24_usdt, s.spread_bps)
 
-    # ── [2026-03-09] 모멘텀/거래량 서지 (decide가 모멘텀 급등 요구) ──
+    # -- [2026-03-09] Momentum / volume surge (decide requires a momentum spike) --
     momentum_score = 0.0
     if ai_features:
         trend = float(ai_features.get("trend", 0.0))
         vol_surge = float(ai_features.get("volume_surge", 0.0))
-        # 양의 추세 + 거래량 급증 = 돌파 신호
+        # Positive trend + volume spike = breakout signal
         if trend > 2.0 and vol_surge > 1.5:
-            momentum_score = 10.0     # 강한 돌파 징후
+            momentum_score = 10.0     # strong breakout sign
         elif trend > 1.0 and vol_surge > 1.0:
-            momentum_score = 5.0      # 돌파 준비
+            momentum_score = 5.0      # breakout-ready
         elif trend > 0.5:
-            momentum_score = 2.0      # 약한 상승
+            momentum_score = 2.0      # mild uptrend
         elif trend < -2.0:
-            momentum_score = -5.0     # 하락 중 → 돌파 부적합
+            momentum_score = -5.0     # falling -> unsuitable for breakout
 
-    # ── [2026-03-18] BB squeeze detection (좁은 밴드 = 돌파 임박) ──
+    # -- [2026-03-18] BB squeeze detection (narrow band = breakout imminent) --
     squeeze_score = 0.0
     if s.bb_lower > 0 and s.bb_upper > s.bb_lower and s.price > 0:
         bb_width_pct = (s.bb_upper - s.bb_lower) / s.price * 100.0
@@ -336,84 +336,84 @@ def _score_lightning(s: MarketSnapshot, ai_features: Optional[Dict[str, float]] 
         + 1.0 * rr
         + 0.5 * trades
         - spread_pen
-        + 2.5 * momentum_score        # 모멘텀이 핵심
+        + 2.5 * momentum_score        # momentum is key
         + eq_pen
         + 1.5 * squeeze_score
         + 1.5 * depth_score
     )
 
 def _score_sniper(s: MarketSnapshot, ai_features: Dict[str, float], rsi: float) -> float:
-    """SNIPER v2 후보 점수: 반등 확률 기반 스코어링.
+    """SNIPER v2 candidate score: scoring based on bounce probability.
 
-    [2026-02-23] ATR/BB 실데이터 기반 전면 개편
-    - BB 하단 근접도 → 구조적 바닥 신호 (가중치 0.25)
-    - RSI 과매도 → 확률적 반등 구간 (0.15)
-    - 거래량 반전 → 매수세 유입 신호 (0.20)
-    - 추세 초기 전환 → EMA cross 초기 (0.15)
-    - cross_exchange 연동은 별도 모듈 (0.15 외부)
-    - 체결 가능성(depth/spread) → 실행 feasibility (0.10)
+    [2026-02-23] Full rework based on real ATR/BB data
+    - BB lower-band proximity -> structural-bottom signal (weight 0.25)
+    - RSI oversold -> probabilistic bounce zone (0.15)
+    - Volume reversal -> buy-side inflow signal (0.20)
+    - Early trend reversal -> early EMA cross (0.15)
+    - cross_exchange integration is a separate module (0.15 external)
+    - Fill feasibility (depth/spread) -> execution feasibility (0.10)
     """
-    # ── 1. 유동성 기본 (최소 기준만) ──
+    # -- 1. Liquidity base (minimum bar only) --
     liq = math.log1p(max(0.0, s.vol24_usdt))
     if s.vol24_usdt > 1_000_000_000:
         liq *= 0.3
     elif s.vol24_usdt > 100_000_000:
         liq *= 0.6
 
-    # ── 2. 변동성: 실제 ATR% 우선, fallback ai_features ──
+    # -- 2. Volatility: prefer real ATR%, fall back to ai_features --
     volatility = s.atr_pct if s.atr_pct > 0 else float(ai_features.get("volatility", 0.0))
 
-    # 변동성 sweet spot (1.5~6%): 저격 기회 충분 + 과열 아님
+    # Volatility sweet spot (1.5~6%): enough sniping opportunity, not overheated
     if volatility < 0.5:
-        vol_score = -2.0                                    # 너무 조용
+        vol_score = -2.0                                    # too quiet
     elif volatility <= 6.0:
         vol_score = min(4.0, volatility * 0.8)              # sweet spot
     else:
-        vol_score = max(0.0, 4.0 - (volatility - 6.0) * 0.5)  # 과열 감점
+        vol_score = max(0.0, 4.0 - (volatility - 6.0) * 0.5)  # overheated penalty
 
-    # ── 3. BB 하단 근접도 (구조적 바닥 신호) ──
+    # -- 3. BB lower-band proximity (structural-bottom signal) --
     bb_proximity = 0.0
     if s.bb_lower > 0 and s.bb_upper > s.bb_lower and s.price > 0:
         bb_range = s.bb_upper - s.bb_lower
-        dist_from_lower = (s.price - s.bb_lower) / bb_range  # 0=하단, 1=상단
+        dist_from_lower = (s.price - s.bb_lower) / bb_range  # 0=lower, 1=upper
         if dist_from_lower <= 0.15:
-            bb_proximity = 5.0          # BB 하단 15% 이내 → 최고점
+            bb_proximity = 5.0          # within 15% of BB lower -> top score
         elif dist_from_lower <= 0.30:
-            bb_proximity = 3.0          # BB 하단 30% 이내 → 양호
+            bb_proximity = 3.0          # within 30% of BB lower -> good
         elif dist_from_lower >= 0.85:
-            bb_proximity = -3.0         # BB 상단 근접 → 고점 매수 위험
+            bb_proximity = -3.0         # near BB upper -> risk of buying the top
 
-    # BB width 보너스: 적정 변동성 밴드
+    # BB width bonus: reasonable volatility band
     bb_width_bonus = 0.0
     if s.bb_width_pct > 0:
         if 2.0 <= s.bb_width_pct <= 8.0:
             bb_width_bonus = min(2.0, s.bb_width_pct * 0.3)
         elif s.bb_width_pct > 12.0:
-            bb_width_bonus = -1.0       # 과도한 확장 → 위험
+            bb_width_bonus = -1.0       # excessive expansion -> risk
 
-    # ── 4. RSI 과매도 (반등 확률 구간) ──
+    # -- 4. RSI oversold (bounce-probability zone) --
     rsi_bonus = 0.0
     if rsi < 25:
-        rsi_bonus = 4.0                 # 극단 과매도
+        rsi_bonus = 4.0                 # extreme oversold
     elif rsi < 30:
         rsi_bonus = 3.0
     elif rsi < 40:
         rsi_bonus = max(0.0, (40.0 - rsi) / 10.0) * 2.0
 
-    # ── 5. 추세 방향 (초기 반전 우대) ──
+    # -- 5. Trend direction (favor early reversal) --
     trend = float(ai_features.get("trend", 0.0))
 
     uptrend_bonus = 0.0
     if trend > 0:
         uptrend_bonus = min(3.0, (trend / 5.0) * 2.5)
 
-    # 과매도 + 추세 반전 초기 = 최적 저격 타이밍
+    # Oversold + early trend reversal = optimal sniping timing
     reversal_bonus = 0.0
     if rsi < 35 and trend > -1.0 and trend < 2.0:
-        reversal_bonus = 2.5            # 바닥 반등 초기
+        reversal_bonus = 2.5            # early bottom bounce
 
-    # 강한 하락 추세 패널티 (떨어지는 칼날, 단계적)
-    # [FIX #11] RSI 극과매도(< 25)일 때 패널티 50% 감경 — 캡철레이션 바닥 기회 보존
+    # Strong-downtrend penalty (falling knife, tiered)
+    # [FIX #11] When RSI is extremely oversold (< 25), halve the penalty -- preserve capitulation-bottom opportunity
     falling_knife_pen = 0.0
     if trend < -5.0:
         falling_knife_pen = 10.0
@@ -424,52 +424,52 @@ def _score_sniper(s: MarketSnapshot, ai_features: Dict[str, float], rsi: float) 
     if rsi < 25 and falling_knife_pen > 0:
         falling_knife_pen *= 0.5
 
-    # ── 6. 거래량 반전 신호 ──
+    # -- 6. Volume reversal signal --
     volume_surge = float(ai_features.get("volume_surge", 0.0))
     vol_reversal = min(2.0, volume_surge * 0.5) if volume_surge > 1.0 else 0.0
 
-    # ── 7. 체결 가능성 (실행 feasibility) ──
+    # -- 7. Fill feasibility (execution feasibility) --
     spread_pen = math.log1p(max(0.0, s.spread_bps)) * 0.8
     depth_score = 0.0
     min_depth = min(s.depth_ask_usdt, s.depth_bid_usdt)
-    if min_depth > 50_000_000:          # 5천만 이상
+    if min_depth > 50_000_000:          # 50M or more
         depth_score = 1.0
     elif min_depth > 10_000_000:
         depth_score = 0.5
 
-    # ── 8. 24h range (변동폭 보너스) ──
+    # -- 8. 24h range (range bonus) --
     range_bonus = math.log1p(max(0.0, s.range_ratio_24h * 100))
 
-    # [2026-03-03] 저가/저거래량 실행품질 패널티
+    # [2026-03-03] Execution-quality penalty for low price / low volume
     eq_pen = _execution_quality_penalty(s.price, s.vol24_usdt, s.spread_bps)
 
-    # 2026-03-10: 고래 활동 가감점 (SNIPER = 고래 매도 → 급락 → 저격 기회)
+    # 2026-03-10: Whale-activity adjustment (SNIPER = whale selling -> sharp drop -> sniping opportunity)
     whale_bonus = 0.0
     try:
         _wd = get_whale_detector()
-        _vs = volume_surge + 1.0  # volume_surge를 spike_ratio로 변환
+        _vs = volume_surge + 1.0  # convert volume_surge to spike_ratio
         _pc = trend * 1.5
         _wi = _wd.detect(_vs, 1.0, _pc, market=s.market)
         whale_bonus = _wd.get_strategy_score_bonus(_wi, "SNIPER")
     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-        logger.warning("[reserved_selector_scoring] %s: %s", '2026-03-10: 고래 활동 가감점 (SNIPER = 고래 매도 → 급락 → 저격 기회)', exc, exc_info=True)
+        logger.warning("[reserved_selector_scoring] %s: %s", '2026-03-10: whale-activity adjustment (SNIPER = whale selling -> sharp drop -> sniping opportunity)', exc, exc_info=True)
 
-    # ── 최종 반등 확률 스코어 ──
+    # -- Final bounce-probability score --
     return (
         0.4 * liq
-        + 2.5 * bb_proximity           # 구조적 바닥 (0.25)
+        + 2.5 * bb_proximity           # structural bottom (0.25)
         + 1.5 * bb_width_bonus
-        + 2.0 * rsi_bonus              # 과매도 (0.15)
-        + 2.0 * uptrend_bonus           # 추세 초기 (0.15)
-        + 2.5 * reversal_bonus          # 반전 초기
-        + 2.0 * vol_reversal            # 거래량 반전 (0.20)
-        + 1.5 * vol_score               # 변동성 적정
-        + 1.0 * depth_score             # 체결 가능성 (0.10)
+        + 2.0 * rsi_bonus              # oversold (0.15)
+        + 2.0 * uptrend_bonus           # early trend (0.15)
+        + 2.5 * reversal_bonus          # early reversal
+        + 2.0 * vol_reversal            # volume reversal (0.20)
+        + 1.5 * vol_score               # reasonable volatility
+        + 1.0 * depth_score             # fill feasibility (0.10)
         + 1.2 * range_bonus
         - spread_pen
         - falling_knife_pen
-        + eq_pen                        # 실행품질 (저가/저거래량)
-        + whale_bonus                   # 고래 활동
+        + eq_pen                        # execution quality (low price / low volume)
+        + whale_bonus                   # whale activity
     )
 
 def _calc_sniper_params(
@@ -478,29 +478,29 @@ def _calc_sniper_params(
     rsi: float,
     session: Optional[requests.Session] = None,
 ) -> Dict[str, Any]:
-    """SNIPER v2 파라미터 자동 계산.
+    """Auto-compute SNIPER v2 parameters.
 
-    [2026-02-23] ATR/BB 기반 정밀 파라미터 + 2-Phase 진입 지원.
-    - ATR% 기반 lookback/threshold (변동성 적응)
-    - BB upper → TP 타겟 참조
-    - Probe/Confirm 2단계 진입 파라미터
-    - Time-stop 파라미터 (횡보 탈출)
+    [2026-02-23] Precise ATR/BB-based parameters + 2-phase entry support.
+    - ATR%-based lookback/threshold (volatility-adaptive)
+    - BB upper -> TP target reference
+    - Probe/Confirm two-stage entry parameters
+    - Time-stop parameters (escape sideways chop)
     """
-    # 실제 ATR% 우선, fallback ai_features
+    # Prefer real ATR%, fall back to ai_features
     volatility = s.atr_pct if s.atr_pct > 0 else float(ai_features.get("volatility", 2.0))
     range_24h = s.range_ratio_24h * 100
 
-    # ATR 기반 Lookback (변동성 높을수록 짧게)
+    # ATR-based lookback (higher volatility -> shorter)
     if volatility > 5.0:
-        lookback_min = 240      # 4시간
+        lookback_min = 240      # 4 hours
     elif volatility > 3.0:
-        lookback_min = 360      # 6시간
+        lookback_min = 360      # 6 hours
     elif volatility > 1.5:
-        lookback_min = 720      # 12시간
+        lookback_min = 720      # 12 hours
     else:
-        lookback_min = 1440     # 24시간
+        lookback_min = 1440     # 24 hours
 
-    # 실제 고가/저가 조회
+    # Fetch real high/low
     highlow_data: Dict[str, float] = {}
     if session is not None:
         highlow_data = fetch_highlow_for_lookback(session, s.market, lookback_min)
@@ -510,25 +510,25 @@ def _calc_sniper_params(
     actual_range_pct = highlow_data.get("range_pct", 0.0)
     distance_from_low = highlow_data.get("distance_from_low_pct", 0.0)
 
-    # ── Threshold: ATR 기반 우선, highlow fallback ──
+    # -- Threshold: prefer ATR-based, fall back to highlow --
     if volatility > 0.5:
-        # ATR의 30~40%를 threshold로 (변동성 적응)
+        # Use 30~40% of ATR as the threshold (volatility-adaptive)
         threshold_pct = max(0.3, min(2.5, volatility * 0.35))
     elif actual_range_pct > 0:
         threshold_pct = max(0.3, min(2.5, actual_range_pct * 0.20))
     else:
         threshold_pct = max(0.3, min(2.0, range_24h * 0.15))
 
-    # ── TP: BB upper 거리 우선, highlow fallback ──
+    # -- TP: prefer distance to BB upper, fall back to highlow --
     trend = float(ai_features.get("trend", 0.0))
 
-    # BB upper까지 거리를 TP 참조값으로
+    # Use distance to BB upper as the TP reference
     bb_tp = 0.0
     if s.bb_upper > 0 and s.price > 0:
         bb_tp = (s.bb_upper - s.price) / s.price * 100.0
 
-    # [2026-03-18] TP/SL: 기본 하한은 낮게, 실제 조절은 UI Guards에서
-    # TP: 0.8% ~ 15%, SL: 1.5% ~ 6% — trailing이 이윤을 키우는 구조
+    # [2026-03-18] TP/SL: keep base lower bounds low; real tuning happens in UI Guards
+    # TP: 0.8% ~ 15%, SL: 1.5% ~ 6% -- trailing grows the profit
     if bb_tp > 1.0:
         base_tp = max(0.8, min(15.0, bb_tp * 0.80))
     elif actual_range_pct > 0:
@@ -536,38 +536,38 @@ def _calc_sniper_params(
     else:
         base_tp = max(0.8, min(8.0, range_24h * 0.45))
 
-    # 추세 기반 TP 조정
+    # Trend-based TP adjustment
     if trend > 3.0:
         base_tp = min(base_tp * 1.5, 15.0)
     elif trend < -3.0:
         base_tp = max(base_tp * 0.7, 0.8)
 
-    # 저점 근처 + 상승 추세 보너스
+    # Near-low + uptrend bonus
     if distance_from_low < 15 and trend > 0:
         base_tp = min(base_tp * 1.4, 15.0)
 
-    # RSI 과매도 보너스 (강한 반등 기대)
+    # RSI oversold bonus (expect a strong bounce)
     if rsi < 30 and trend > -2.0:
         base_tp = min(base_tp + 2.5, 15.0)
     elif rsi < 40 and trend > 0:
         base_tp = min(base_tp + 1.5, 12.0)
 
-    # ── SL: ATR 기반 동적 (변동성 높으면 넓게) ──
+    # -- SL: ATR-based dynamic (wider when volatility is high) --
     if volatility > 0.5:
         base_sl = max(1.5, min(6.0, volatility * 1.0))
     else:
         base_sl = max(1.5, min(5.0, base_tp * 0.6))
 
-    # Trail: TP의 30% (더 넓게 잡아 추세 유지)
+    # Trail: 30% of TP (wider, to ride the trend)
     trail_dist = max(0.8, base_tp * 0.30)
 
-    # ── Time-stop: ATR 기반 (변동성 높으면 짧은 대기) ──
+    # -- Time-stop: ATR-based (shorter wait when volatility is high) --
     if volatility > 4.0:
-        time_stop_min = 30          # 고변동: 30분
+        time_stop_min = 30          # high volatility: 30 min
     elif volatility > 2.0:
-        time_stop_min = 60          # 중변동: 1시간
+        time_stop_min = 60          # mid volatility: 1 hour
     else:
-        time_stop_min = 120         # 저변동: 2시간
+        time_stop_min = 120         # low volatility: 2 hours
 
     return {
         "entry_enabled": True,
@@ -582,8 +582,8 @@ def _calc_sniper_params(
         "trail_dist_pct": round(trail_dist, 1),
         "ai_gate_enabled": True,
         "ai_min_score": 0.45,
-        # [2026-03-07] rsi_entry_max: 셀렉터↔플러그인 RSI 임계값 동기화
-        # 셀렉터 RSI<55 허용 + 플러그인 grace zone(+15%) → 42*1.15≈48.3 실질 허용
+        # [2026-03-07] rsi_entry_max: sync RSI threshold between selector and plugin
+        # Selector allows RSI<55 + plugin grace zone (+15%) -> 42*1.15 approx 48.3 effective allowance
         "rsi_entry_max": 42.0,
         "rsi_entry_enabled": True,
         "rsi_exit_enabled": True,
@@ -592,43 +592,43 @@ def _calc_sniper_params(
         "expiry_min": max(30, lookback_min // 2),
         "trend_protect_enabled": True,
         "ema_cross_enabled": False,
-        # 실제 고가/저가 정보
+        # Real high/low info
         "actual_high": actual_high,
         "actual_low": actual_low,
         "actual_range_pct": round(actual_range_pct, 2),
         "distance_from_low_pct": round(distance_from_low, 2),
-        # [2026-02-23] SNIPER v2 파라미터
+        # [2026-02-23] SNIPER v2 parameters
         "sniper_schema_ver": 2,
-        "probe_ratio": 0.3,             # Probe 진입 비율 (30%)
-        "confirm_ratio": 0.7,           # Confirm 진입 비율 (70%)
-        "watch_sec": 180,               # Phase 0 관측 시간 (초)
-        "confirm_window_sec": 300,      # Probe→Confirm 확인 윈도우 (5분)
-        "time_stop_min": time_stop_min, # 횡보 타임아웃 (분)
+        "probe_ratio": 0.3,             # Probe entry ratio (30%)
+        "confirm_ratio": 0.7,           # Confirm entry ratio (70%)
+        "watch_sec": 180,               # Phase 0 observation time (sec)
+        "confirm_window_sec": 300,      # Probe->Confirm confirmation window (5 min)
+        "time_stop_min": time_stop_min, # sideways-chop timeout (min)
         "atr_pct": round(volatility, 2),
         "bb_upper": round(s.bb_upper, 2) if s.bb_upper > 0 else 0.0,
         "bb_lower": round(s.bb_lower, 2) if s.bb_lower > 0 else 0.0,
         "bb_middle": round(s.bb_middle, 2) if s.bb_middle > 0 else 0.0,
-        # [2026-03-02] DCA 물타기 설정 (UI 조정 가능)
+        # [2026-03-02] DCA averaging-down settings (UI-adjustable)
         "dca_step_pct": float(os.getenv("SNIPER_DCA_STEP_PCT", 0.2)),
         "dca_add_ratio": float(os.getenv("SNIPER_DCA_ADD_RATIO", 0.5)),
         "dca_max_depth_pct": float(os.getenv("SNIPER_DCA_MAX_DEPTH_PCT", 1.0)),
     }
 
 def _score_gazua(s: MarketSnapshot, ai_features: Optional[Dict[str, float]] = None) -> float:
-    # [2026-03-09] decide() 정렬: AI ≥ 0.65 + 추세 상승이 핵심 진입 조건
+    # [2026-03-09] Aligned with decide(): AI >= 0.65 + rising trend are the key entry conditions
     liq = math.log1p(max(0.0, s.vol24_usdt))
     rr = math.log1p(max(0.0, s.range_ratio_24h))
     spread_pen = math.log1p(max(0.0, s.spread_bps))
     depth = math.log1p(max(0.0, min(s.depth_ask_usdt, s.depth_bid_usdt)))
     eq_pen = _execution_quality_penalty(s.price, s.vol24_usdt, s.spread_bps)
 
-    # ── AI 점수 + 추세 (decide가 ai >= 0.65 + RS 상대강도 요구) ──
+    # -- AI score + trend (decide requires ai >= 0.65 + RS relative strength) --
     ai_entry_score = 0.0
     trend_score = 0.0
     if ai_features:
         trend = float(ai_features.get("trend", 0.0))
         vol_surge = float(ai_features.get("volume_surge", 0.0))
-        # 강한 상승 추세 = GAZUA 적합
+        # Strong uptrend = good fit for GAZUA
         if trend > 3.0:
             trend_score = 10.0
         elif trend > 1.5:
@@ -636,8 +636,8 @@ def _score_gazua(s: MarketSnapshot, ai_features: Optional[Dict[str, float]] = No
         elif trend > 0:
             trend_score = 2.0
         elif trend < -2.0:
-            trend_score = -8.0     # 하락장 → GAZUA 부적합
-        # 거래량 급증 보너스
+            trend_score = -8.0     # downtrend -> unsuitable for GAZUA
+        # Volume-surge bonus
         if vol_surge > 2.0:
             trend_score += 3.0
 
@@ -646,12 +646,12 @@ def _score_gazua(s: MarketSnapshot, ai_features: Optional[Dict[str, float]] = No
         + 0.5 * rr
         + 0.5 * depth
         - 0.7 * spread_pen
-        + 2.5 * trend_score            # 추세/AI가 핵심
+        + 2.5 * trend_score            # trend/AI is key
         + eq_pen
     )
 
 def _score_autoloop(s: MarketSnapshot, rsi_macd: Optional[Dict[str, Any]] = None) -> float:
-    # [2026-03-09] decide() 정렬: RSI ≤ 28 + MACD 반전 상승이 핵심 진입 조건
+    # [2026-03-09] Aligned with decide(): RSI <= 28 + MACD upward reversal are the key entry conditions
     liq = math.log1p(max(0.0, s.vol24_usdt))
     rr = math.log1p(max(0.0, s.range_ratio_24h))
     spread_bps = float(s.spread_bps)
@@ -663,42 +663,42 @@ def _score_autoloop(s: MarketSnapshot, rsi_macd: Optional[Dict[str, Any]] = None
     range_bonus = 2.0 if 1.0 <= range_pct <= 3.0 else 0.0
     eq_pen = _execution_quality_penalty(s.price, s.vol24_usdt, s.spread_bps)
 
-    # ── RSI/MACD 진입 적합도 (decide가 rsi<=28 + macd_turning_up 요구) ──
+    # -- RSI/MACD entry suitability (decide requires rsi<=28 + macd_turning_up) --
     rsi_entry_score = 0.0
     macd_entry_score = 0.0
     if rsi_macd:
         rsi = float(rsi_macd.get("rsi") or 50.0)
         macd_hist = float(rsi_macd.get("macd_hist") or 0.0)
         macd_hist_prev = float(rsi_macd.get("macd_hist_prev") or 0.0)
-        # RSI 과매도 구간 (decide: rsi <= rsi_buy=28)
+        # RSI oversold zone (decide: rsi <= rsi_buy=28)
         if rsi <= 28:
-            rsi_entry_score = 12.0    # 즉시 buy 가능 구간
+            rsi_entry_score = 12.0    # immediate-buy zone
         elif rsi <= 35:
-            rsi_entry_score = 6.0     # 근접 — 곧 진입 가능
+            rsi_entry_score = 6.0     # close -- entry possible soon
         elif rsi <= 42:
-            rsi_entry_score = 2.0     # 접근 중
+            rsi_entry_score = 2.0     # approaching
         elif rsi >= 65:
-            rsi_entry_score = -5.0    # 과매수 → decide 절대 buy 안 함
-        # MACD 반전 상승 (decide: macd_turning_up = hist > hist_prev)
+            rsi_entry_score = -5.0    # overbought -> decide never buys
+        # MACD upward reversal (decide: macd_turning_up = hist > hist_prev)
         if macd_hist > macd_hist_prev:
-            macd_entry_score = 5.0    # 반전 상승 확인
+            macd_entry_score = 5.0    # upward reversal confirmed
         elif macd_hist < macd_hist_prev and macd_hist < 0:
-            macd_entry_score = -3.0   # 하락 가속 → buy 불가
+            macd_entry_score = -3.0   # accelerating decline -> no buy
 
     return (
         1.8 * liq
         + 0.5 * rr
         - 0.25 * spread_pen
         + range_bonus
-        + 2.5 * rsi_entry_score       # RSI 과매도가 핵심
-        + 2.0 * macd_entry_score       # MACD 반전 확인
+        + 2.5 * rsi_entry_score       # RSI oversold is key
+        + 2.0 * macd_entry_score       # MACD reversal confirmation
         + eq_pen
     )
 
 def _score_contrarian(s: MarketSnapshot, rsi_macd: Optional[Dict[str, Any]] = None) -> float:
-    """CONTRARIAN 전략 적합성 점수.
+    """CONTRARIAN strategy suitability score.
 
-    [2026-03-09] decide() 정렬: RSI 과매도 반전 + 역행 신호가 핵심
+    [2026-03-09] Aligned with decide(): RSI oversold reversal + counter-trend signal are key
     """
     liq = math.log1p(max(0.0, s.vol24_usdt))
     rr = math.log1p(max(0.0, s.range_ratio_24h))
@@ -706,25 +706,25 @@ def _score_contrarian(s: MarketSnapshot, rsi_macd: Optional[Dict[str, Any]] = No
     depth = math.log1p(max(0.0, min(s.depth_ask_usdt, s.depth_bid_usdt)))
     eq_pen = _execution_quality_penalty(s.price, s.vol24_usdt, s.spread_bps)
 
-    # ── RSI 과매도 (decide가 RSI < 50 + 반전 요구) ──
+    # -- RSI oversold (decide requires RSI < 50 + reversal) --
     rsi_score = 0.0
     if rsi_macd:
         rsi = float(rsi_macd.get("rsi") or 50.0)
         if rsi < 30:
-            rsi_score = 10.0      # 극단 과매도 → 역발상 최적
+            rsi_score = 10.0      # extreme oversold -> ideal for contrarian
         elif rsi < 40:
-            rsi_score = 6.0       # 과매도 구간
+            rsi_score = 6.0       # oversold zone
         elif rsi < 50:
-            rsi_score = 2.0       # CONTRARIAN 진입 가능
+            rsi_score = 2.0       # CONTRARIAN entry possible
         elif rsi >= 60:
-            rsi_score = -5.0      # 과매수 → 역발상 부적합
+            rsi_score = -5.0      # overbought -> unsuitable for contrarian
 
     return (
         1.5 * liq
         + 0.8 * rr
         + 0.6 * depth
         - 0.5 * spread_pen
-        + 2.5 * rsi_score              # RSI 과매도가 핵심
+        + 2.5 * rsi_score              # RSI oversold is key
         + eq_pen
     )
 
@@ -736,18 +736,18 @@ def _score_contrarian_live(
     btc_ret_24h: float = 0.0,
     rsi_macd: Optional[Dict[str, Any]] = None,
 ) -> float:
-    """CONTRARIAN 전략 적합성 점수 (실시간 역행 스캐너 연동).
+    """CONTRARIAN strategy suitability score (with the live counter-trend scanner).
 
     Args:
-        s: 마켓 스냅샷
-        contrarian_score: 역행 스코어 (0-3)
-        contrarian_data: 역행 스캐너 데이터 (volume_spike, tf_score 등)
-        coin_ret_24h: 코인 24h 수익률 (%)
-        btc_ret_24h: BTC 24h 수익률 (%) — 내부 폴백 RS 계산용
-        rsi_macd: RSI/MACD 캐시 데이터
+        s: market snapshot
+        contrarian_score: counter-trend score (0-3)
+        contrarian_data: counter-trend scanner data (volume_spike, tf_score, etc.)
+        coin_ret_24h: coin 24h return (%)
+        btc_ret_24h: BTC 24h return (%) -- for the internal fallback RS calculation
+        rsi_macd: cached RSI/MACD data
 
     Returns:
-        최종 점수 (높을수록 좋음)
+        Final score (higher is better)
     """
     base_score = _score_contrarian(s, rsi_macd=rsi_macd)
 
@@ -772,18 +772,18 @@ def _score_contrarian_live(
     if ai_score and ai_score > 0.7:
         bonus += (ai_score - 0.5) * 30.0
 
-    # 내부 폴백 RS: BTC 대비 코인 역행성 (음수 = BTC보다 약세 = CONTRARIAN 선호)
+    # Internal fallback RS: coin's counter-move vs BTC (negative = weaker than BTC = preferred by CONTRARIAN)
     rs_actual = coin_ret_24h - btc_ret_24h
     if rs_actual < -5.0:
-        bonus += 15.0   # 강한 역행 → 최적
+        bonus += 15.0   # strong counter-move -> optimal
     elif rs_actual < -2.0:
-        bonus += 8.0    # 중간 역행
+        bonus += 8.0    # moderate counter-move
     elif rs_actual < 0:
-        bonus += 3.0    # 약한 역행
+        bonus += 3.0    # mild counter-move
     elif rs_actual > 5.0:
-        bonus -= 10.0   # BTC 대비 강세 → CONTRARIAN 부적합
+        bonus -= 10.0   # stronger than BTC -> unsuitable for CONTRARIAN
 
-    # ── [2026-03-18] contrarian_data 세부 필드 스코어링 ──
+    # -- [2026-03-18] Detailed scoring of contrarian_data fields --
     _vr = float(contrarian_data.get("volume_ratio") or 0.0)
     if _vr >= 3.0:
         bonus += 15.0
@@ -838,9 +838,9 @@ def _score_contrarian_live(
     return base_score + bonus
 
 # ============================================================
-# Multi-Stage Confidence Scoring (전략별 다단계 신뢰도)
-# [2026-03-08] SNIPER compute_scope_score 6-stage 패턴을 전 전략 확대
-# 각 조건이 독립 점수 → 합산 → 0~100 스케일 confidence
+# Multi-Stage Confidence Scoring (per-strategy multi-stage confidence)
+# [2026-03-08] Extended SNIPER's 6-stage compute_scope_score pattern to all strategies
+# Each condition is an independent score -> summed -> confidence scaled to 0~100
 # ============================================================
 
 def _confidence_pingpong(
@@ -848,37 +848,37 @@ def _confidence_pingpong(
     ai_features: Dict[str, float],
     rsi_macd: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """PINGPONG 다단계 신뢰도: 빠른 회전 적합성 (max 90).
+    """PINGPONG multi-stage confidence: fast-rotation suitability (max 90).
 
-    핵심: 높은 유동성 + 좁은 스프레드 + 적정 변동성 + 활발한 거래.
+    Key: high liquidity + tight spread + reasonable volatility + active trading.
     """
     conf = 0.0
     stages: Dict[str, float] = {}
 
-    # Stage 1: 유동성 (거래대금 50억 이상 = 만점, max 20)
-    vol_b = s.vol24_usdt / 1e9  # 십억 단위
-    s1 = min(20.0, max(0.0, vol_b * 4.0))  # 5B → 20
+    # Stage 1: Liquidity (turnover 5B+ = full marks, max 20)
+    vol_b = s.vol24_usdt / 1e9  # in billions
+    s1 = min(20.0, max(0.0, vol_b * 4.0))  # 5B -> 20
     stages["liquidity"] = round(s1, 1)
     conf += s1
 
-    # Stage 2: 스프레드 (5bps 이하 = 만점, max 20)
+    # Stage 2: Spread (5bps or less = full marks, max 20)
     sp = max(0.0, s.spread_bps)
-    s2 = max(0.0, 20.0 - sp * 0.8)  # 0bps→20, 25bps→0
+    s2 = max(0.0, 20.0 - sp * 0.8)  # 0bps->20, 25bps->0
     stages["spread"] = round(s2, 1)
     conf += s2
 
-    # Stage 3: 호가 깊이 (양쪽 $50K 이상 = 만점, max 15)
+    # Stage 3: Order-book depth ($50K+ on both sides = full marks, max 15)
     min_depth = min(s.depth_ask_usdt, s.depth_bid_usdt)
-    s3 = min(15.0, max(0.0, min_depth / 1e7 * 3.0))  # 50M → 15
+    s3 = min(15.0, max(0.0, min_depth / 1e7 * 3.0))  # 50M -> 15
     stages["depth"] = round(s3, 1)
     conf += s3
 
-    # Stage 4: 변동성 범위 TP 달성 가능성 (range 3~7% = 최적, max 15)
+    # Stage 4: Volatility-range TP feasibility (range 3~7% = optimal, max 15)
     range_pct = s.range_ratio_24h * 100.0
     if 3.0 <= range_pct <= 7.0:
         s4 = 15.0
     elif 1.5 <= range_pct < 3.0:
-        s4 = range_pct * 5.0  # 1.5%→7.5, 3%→15
+        s4 = range_pct * 5.0  # 1.5%->7.5, 3%->15
     elif range_pct > 7.0:
         s4 = max(5.0, 15.0 - (range_pct - 7.0) * 2.0)
     else:
@@ -886,7 +886,7 @@ def _confidence_pingpong(
     stages["volatility_range"] = round(s4, 1)
     conf += s4
 
-    # Stage 5: RSI 중립대 (40~60 = 최적 진입, max 10)
+    # Stage 5: RSI neutral band (40~60 = optimal entry, max 10)
     rsi = float(rsi_macd.get("rsi", 50.0))
     if 40.0 <= rsi <= 60.0:
         s5 = 10.0
@@ -897,9 +897,9 @@ def _confidence_pingpong(
     stages["rsi_neutral"] = round(s5, 1)
     conf += s5
 
-    # Stage 6: 거래 활동성 (최근 체결 20건 이상, max 10)
+    # Stage 6: Trade activity (20+ recent fills, max 10)
     trades = float(s.recent_trades or 0)
-    s6 = min(10.0, max(0.0, trades * 0.5))  # 20 → 10
+    s6 = min(10.0, max(0.0, trades * 0.5))  # 20 -> 10
     stages["trade_activity"] = round(s6, 1)
     conf += s6
 
@@ -915,20 +915,20 @@ def _confidence_autoloop(
     ai_features: Dict[str, float],
     rsi_macd: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """AUTOLOOP 다단계 신뢰도: 중속 회전 적합성 (max 90).
+    """AUTOLOOP multi-stage confidence: medium-speed rotation suitability (max 90).
 
-    핵심: 유동성 + 적정 변동 범위(1~5%) + 추세 중립 + 스프레드 허용범위 넓음.
+    Key: liquidity + reasonable move range (1~5%) + trend-neutral + wide spread tolerance.
     """
     conf = 0.0
     stages: Dict[str, float] = {}
 
-    # Stage 1: 유동성 (거래대금, max 20)
+    # Stage 1: Liquidity (turnover, max 20)
     vol_b = s.vol24_usdt / 1e9
     s1 = min(20.0, max(0.0, vol_b * 4.0))
     stages["liquidity"] = round(s1, 1)
     conf += s1
 
-    # Stage 2: 변동 범위 (1~5% 최적, max 20)
+    # Stage 2: Move range (1~5% optimal, max 20)
     range_pct = s.range_ratio_24h * 100.0
     if 1.0 <= range_pct <= 5.0:
         s2 = 20.0
@@ -941,13 +941,13 @@ def _confidence_autoloop(
     stages["range_optimal"] = round(s2, 1)
     conf += s2
 
-    # Stage 3: 스프레드 (AUTOLOOP은 30bps까지 허용, max 15)
+    # Stage 3: Spread (AUTOLOOP tolerates up to 30bps, max 15)
     sp = max(0.0, s.spread_bps)
-    s3 = max(0.0, 15.0 - sp * 0.5)  # 0→15, 30→0
+    s3 = max(0.0, 15.0 - sp * 0.5)  # 0->15, 30->0
     stages["spread"] = round(s3, 1)
     conf += s3
 
-    # Stage 4: 추세 중립 (|trend| < 0.3 = 최적, max 15)
+    # Stage 4: Trend-neutral (|trend| < 0.3 = optimal, max 15)
     trend = float(ai_features.get("trend", 0.0))
     abs_trend = abs(trend)
     if abs_trend < 0.15:
@@ -961,7 +961,7 @@ def _confidence_autoloop(
     stages["trend_neutral"] = round(s4, 1)
     conf += s4
 
-    # Stage 5: RSI 사이클 여지 (35~65 = 사이클 가능, max 10)
+    # Stage 5: RSI cycle room (35~65 = cycling possible, max 10)
     rsi = float(rsi_macd.get("rsi", 50.0))
     if 35.0 <= rsi <= 65.0:
         s5 = 10.0
@@ -972,7 +972,7 @@ def _confidence_autoloop(
     stages["rsi_cycle_room"] = round(s5, 1)
     conf += s5
 
-    # Stage 6: 호가 깊이 (max 10)
+    # Stage 6: Order-book depth (max 10)
     min_depth = min(s.depth_ask_usdt, s.depth_bid_usdt)
     s6 = min(10.0, max(0.0, min_depth / 1e7 * 2.5))
     stages["depth"] = round(s6, 1)
@@ -990,14 +990,14 @@ def _confidence_ladder(
     ai_features: Dict[str, float],
     rsi_macd: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """LADDER 다단계 신뢰도: 그리드/DCA 적합성 (max 90).
+    """LADDER multi-stage confidence: grid/DCA suitability (max 90).
 
-    핵심: 횡보 + 적정 변동성(ATR 2~6%) + 고점 미근접 + 안정적 거래량.
+    Key: sideways + reasonable volatility (ATR 2~6%) + not near highs + stable volume.
     """
     conf = 0.0
     stages: Dict[str, float] = {}
 
-    # Stage 1: 횡보 (|trend| < 0.15 = 최적, max 22)
+    # Stage 1: Sideways (|trend| < 0.15 = optimal, max 22)
     trend = float(ai_features.get("trend", 0.0))
     abs_trend = abs(trend)
     if abs_trend < 0.1:
@@ -1011,12 +1011,12 @@ def _confidence_ladder(
     stages["sideways"] = round(s1, 1)
     conf += s1
 
-    # Stage 2: 적정 변동성 ATR 2~6% (max 20)
+    # Stage 2: Reasonable volatility ATR 2~6% (max 20)
     vol_pct = s.atr_pct if s.atr_pct > 0 else float(ai_features.get("volatility", 0.0))
     if 2.0 <= vol_pct <= 6.0:
         s2 = 20.0
     elif 1.0 <= vol_pct < 2.0:
-        s2 = vol_pct * 10.0  # 1%→10, 2%→20
+        s2 = vol_pct * 10.0  # 1%->10, 2%->20
     elif vol_pct > 6.0:
         s2 = max(5.0, 20.0 - (vol_pct - 6.0) * 3.0)
     else:
@@ -1024,13 +1024,13 @@ def _confidence_ladder(
     stages["volatility_grid"] = round(s2, 1)
     conf += s2
 
-    # Stage 3: 유동성 (max 15)
+    # Stage 3: Liquidity (max 15)
     vol_b = s.vol24_usdt / 1e9
     s3 = min(15.0, max(0.0, vol_b * 5.0))
     stages["liquidity"] = round(s3, 1)
     conf += s3
 
-    # Stage 4: BB 밴드폭 (2~10% = 그리드 최적, max 13)
+    # Stage 4: BB bandwidth (2~10% = grid-optimal, max 13)
     if s.bb_width_pct > 0:
         if 2.0 <= s.bb_width_pct <= 10.0:
             s4 = 13.0
@@ -1043,13 +1043,13 @@ def _confidence_ladder(
     stages["bb_bandwidth"] = round(s4, 1)
     conf += s4
 
-    # Stage 5: 스프레드 (max 10)
+    # Stage 5: Spread (max 10)
     sp = max(0.0, s.spread_bps)
     s5 = max(0.0, 10.0 - sp * 0.4)
     stages["spread"] = round(s5, 1)
     conf += s5
 
-    # Stage 6: 모멘텀 안정 (|momentum| < 0.5 = 안정, max 10)
+    # Stage 6: Momentum stability (|momentum| < 0.5 = stable, max 10)
     mom = float(ai_features.get("momentum", 0.0))
     abs_mom = abs(mom)
     if abs_mom < 0.3:
@@ -1073,14 +1073,14 @@ def _confidence_lightning(
     ai_features: Dict[str, float],
     rsi_macd: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """LIGHTNING 다단계 신뢰도: 변동성 돌파 적합성 (max 90).
+    """LIGHTNING multi-stage confidence: volatility-breakout suitability (max 90).
 
-    핵심: 강한 모멘텀 + 거래량 급증 + 상승 추세 + ATR 적정 + BB 돌파 준비.
+    Key: strong momentum + volume surge + uptrend + reasonable ATR + BB breakout-ready.
     """
     conf = 0.0
     stages: Dict[str, float] = {}
 
-    # Stage 1: 모멘텀 가속 (momentum > 1.0 = 강한 상승, max 22)
+    # Stage 1: Momentum acceleration (momentum > 1.0 = strong rise, max 22)
     mom = float(ai_features.get("momentum", 0.0))
     if mom > 2.0:
         s1 = 22.0
@@ -1091,11 +1091,11 @@ def _confidence_lightning(
     elif mom > 0:
         s1 = mom * 5.0
     else:
-        s1 = max(0.0, 5.0 + mom * 5.0)  # 음수 모멘텀 감점
+        s1 = max(0.0, 5.0 + mom * 5.0)  # negative-momentum penalty
     stages["momentum_acceleration"] = round(min(22.0, s1), 1)
     conf += stages["momentum_acceleration"]
 
-    # Stage 2: 거래량 급증 (volume_surge > 1.0 = 돌파 진위, max 20)
+    # Stage 2: Volume surge (volume_surge > 1.0 = breakout authenticity, max 20)
     surge = float(ai_features.get("volume_surge", 0.0))
     if surge > 1.5:
         s2 = 20.0
@@ -1108,7 +1108,7 @@ def _confidence_lightning(
     stages["volume_surge"] = round(min(20.0, s2), 1)
     conf += stages["volume_surge"]
 
-    # Stage 3: 상승 추세 (trend > 0 = 방향성, max 18)
+    # Stage 3: Uptrend (trend > 0 = directionality, max 18)
     trend = float(ai_features.get("trend", 0.0))
     if trend > 0.3:
         s3 = 18.0
@@ -1121,7 +1121,7 @@ def _confidence_lightning(
     stages["uptrend"] = round(min(18.0, s3), 1)
     conf += stages["uptrend"]
 
-    # Stage 4: ATR 적정 (1.5~5%, max 12)
+    # Stage 4: Reasonable ATR (1.5~5%, max 12)
     vol_pct = s.atr_pct if s.atr_pct > 0 else float(ai_features.get("volatility", 0.0))
     if 1.5 <= vol_pct <= 5.0:
         s4 = 12.0
@@ -1132,7 +1132,7 @@ def _confidence_lightning(
     stages["atr_sweetspot"] = round(s4, 1)
     conf += s4
 
-    # Stage 5: BB 돌파 준비 (중간~상단, max 10)
+    # Stage 5: BB breakout-ready (mid~upper, max 10)
     bb_score = 0.0
     if s.bb_lower > 0 and s.bb_upper > s.bb_lower and s.price > 0:
         bb_range = s.bb_upper - s.bb_lower
@@ -1146,7 +1146,7 @@ def _confidence_lightning(
     stages["bb_breakout_ready"] = round(bb_score, 1)
     conf += bb_score
 
-    # Stage 6: MACD 상승 전환 (max 8)
+    # Stage 6: MACD upward turn (max 8)
     macd_hist = float(rsi_macd.get("macd_histogram", 0.0))
     macd_trend = rsi_macd.get("macd_trend", "neutral")
     if macd_trend == "bullish":
@@ -1172,14 +1172,14 @@ def _confidence_gazua(
     coin_ret_24h: float = 0.0,
     btc_ret_24h: float = 0.0,
 ) -> Dict[str, Any]:
-    """GAZUA 다단계 신뢰도: 장기 상승 보유 적합성 (max 90).
+    """GAZUA multi-stage confidence: long-term uptrend-hold suitability (max 90).
 
-    핵심: 강한 상승 모멘텀 + BTC 대비 상대강도 + 추세 방향 + 유동성.
+    Key: strong upward momentum + relative strength vs BTC + trend direction + liquidity.
     """
     conf = 0.0
     stages: Dict[str, float] = {}
 
-    # Stage 1: 상승 추세 (trend > 0.2 = 확실한 상승, max 22)
+    # Stage 1: Uptrend (trend > 0.2 = clear rise, max 22)
     trend = float(ai_features.get("trend", 0.0))
     if trend > 0.5:
         s1 = 22.0
@@ -1192,7 +1192,7 @@ def _confidence_gazua(
     stages["uptrend"] = round(min(22.0, s1), 1)
     conf += stages["uptrend"]
 
-    # Stage 2: BTC 상대강도 RS (코인수익-BTC수익, max 20)
+    # Stage 2: Relative strength vs BTC, RS (coin return - BTC return, max 20)
     rs = coin_ret_24h - btc_ret_24h
     if rs > 5.0:
         s2 = 20.0
@@ -1207,7 +1207,7 @@ def _confidence_gazua(
     stages["rs_vs_btc"] = round(s2, 1)
     conf += s2
 
-    # Stage 3: 모멘텀 (momentum > 0.5 = 매수세 확인, max 18)
+    # Stage 3: Momentum (momentum > 0.5 = buy-side confirmation, max 18)
     mom = float(ai_features.get("momentum", 0.0))
     if mom > 1.5:
         s3 = 18.0
@@ -1220,13 +1220,13 @@ def _confidence_gazua(
     stages["momentum"] = round(min(18.0, s3), 1)
     conf += stages["momentum"]
 
-    # Stage 4: 유동성 (장기 보유 시 청산 가능성, max 12)
+    # Stage 4: Liquidity (exit feasibility on long-term holds, max 12)
     vol_b = s.vol24_usdt / 1e9
     s4 = min(12.0, max(0.0, vol_b * 3.0))
     stages["liquidity"] = round(s4, 1)
     conf += s4
 
-    # Stage 5: MACD 상승 (bullish = 추세 확인, max 10)
+    # Stage 5: MACD rising (bullish = trend confirmation, max 10)
     macd_trend = rsi_macd.get("macd_trend", "neutral")
     macd_hist = float(rsi_macd.get("macd_histogram", 0.0))
     if macd_trend == "bullish" and macd_hist > 0:
@@ -1238,7 +1238,7 @@ def _confidence_gazua(
     stages["macd_bullish"] = round(s5, 1)
     conf += s5
 
-    # Stage 6: 거래량 급증 (매수세 동반 확인, max 8)
+    # Stage 6: Volume surge (confirms accompanying buy-side, max 8)
     surge = float(ai_features.get("volume_surge", 0.0))
     if surge > 1.0:
         s6 = 8.0
@@ -1262,19 +1262,19 @@ def _confidence_contrarian(
     rsi_macd: Dict[str, Any],
     contrarian_score: int = 0,
 ) -> Dict[str, Any]:
-    """CONTRARIAN 다단계 신뢰도: 역발상 적합성 (max 90).
+    """CONTRARIAN multi-stage confidence: contrarian suitability (max 90).
 
-    핵심: 시장 하락 중 역행 + RSI 과매도 + 유동성 충분 + 추세 반전 신호.
+    Key: counter-move during a market drop + RSI oversold + sufficient liquidity + trend-reversal signal.
     """
     conf = 0.0
     stages: Dict[str, float] = {}
 
-    # Stage 1: Contrarian Score (외부 스캐너 기반, max 25)
+    # Stage 1: Contrarian Score (from external scanner, max 25)
     s1 = min(25.0, max(0.0, float(contrarian_score) * 8.0))
     stages["contrarian_signal"] = round(s1, 1)
     conf += s1
 
-    # Stage 2: RSI 과매도 (< 40 = 반전 기회, max 20)
+    # Stage 2: RSI oversold (< 40 = reversal opportunity, max 20)
     rsi = float(rsi_macd.get("rsi", 50.0))
     if rsi < 30:
         s2 = 20.0
@@ -1287,17 +1287,17 @@ def _confidence_contrarian(
     stages["rsi_oversold"] = round(s2, 1)
     conf += s2
 
-    # Stage 3: 유동성 (역행 매매 시 슬리피지 방지, max 15)
+    # Stage 3: Liquidity (avoid slippage on counter-trend trades, max 15)
     vol_b = s.vol24_usdt / 1e9
     s3 = min(15.0, max(0.0, vol_b * 5.0))
     stages["liquidity"] = round(s3, 1)
     conf += s3
 
-    # Stage 4: 하락 추세에서 반전 (trend < 0 + momentum > 0 = 반등, max 15)
+    # Stage 4: Reversal within a downtrend (trend < 0 + momentum > 0 = bounce, max 15)
     trend = float(ai_features.get("trend", 0.0))
     mom = float(ai_features.get("momentum", 0.0))
     if trend < -0.1 and mom > 0.3:
-        s4 = 15.0  # 하락 중 반등 모멘텀
+        s4 = 15.0  # bounce momentum during a decline
     elif trend < -0.1 and mom > 0:
         s4 = 8.0
     elif trend < 0:
@@ -1307,13 +1307,13 @@ def _confidence_contrarian(
     stages["reversal_signal"] = round(s4, 1)
     conf += s4
 
-    # Stage 5: 스프레드 (max 8)
+    # Stage 5: Spread (max 8)
     sp = max(0.0, s.spread_bps)
     s5 = max(0.0, 8.0 - sp * 0.32)
     stages["spread"] = round(s5, 1)
     conf += s5
 
-    # Stage 6: MACD 반전 (bearish→neutral or histogram 상승, max 7)
+    # Stage 6: MACD reversal (bearish->neutral or rising histogram, max 7)
     macd_hist = float(rsi_macd.get("macd_histogram", 0.0))
     if macd_hist > 0:
         s6 = 7.0
@@ -1336,12 +1336,12 @@ def _confidence_contrarian(
 # ============================================================
 
 def _score_ladder_ai(s: MarketSnapshot, ai_features: Dict[str, float]) -> float:
-    """LADDER ICAG v3 적합성 점수 (AI 피처 + ATR/BB 기반).
+    """LADDER ICAG v3 suitability score (AI features + ATR/BB based).
 
-    선호 조건 (ICAG 그리드 트레이딩):
-    - 적정 변동성 (ATR 2~6% 또는 AI volatility 1.5~5%) → 그리드 간격에 최적
-    - 횡보 또는 약한 하락 (|trend| < 0.3) → 평균회귀 기회
-    - 강한 상승/하락 → 감점 (그리드 트레이딩 부적합)
+    Preferred conditions (ICAG grid trading):
+    - Reasonable volatility (ATR 2~6% or AI volatility 1.5~5%) -> optimal grid spacing
+    - Sideways or mild decline (|trend| < 0.3) -> mean-reversion opportunity
+    - Strong rise/fall -> penalized (unsuitable for grid trading)
     """
     base_score = _score_ladder(s)
 
@@ -1351,38 +1351,38 @@ def _score_ladder_ai(s: MarketSnapshot, ai_features: Dict[str, float]) -> float:
 
     ai_bonus = 0.0
 
-    # 적정 변동성 선호 (bell curve: 1.5~5% sweet spot)
+    # Prefer reasonable volatility (bell curve: 1.5~5% sweet spot)
     if volatility < 0.5:
-        ai_bonus -= 5.0                     # 너무 조용 → 기회 없음
+        ai_bonus -= 5.0                     # too quiet -> no opportunity
     elif volatility <= 5.0:
         ai_bonus += min(15.0, volatility * 4.0)  # sweet spot
     else:
-        ai_bonus += max(0.0, 15.0 - (volatility - 5.0) * 2.0)  # 과열 → 감소
+        ai_bonus += max(0.0, 15.0 - (volatility - 5.0) * 2.0)  # overheated -> decay
 
-    # 횡보/약한 하락 선호 (ICAG 평균회귀 핵심)
+    # Prefer sideways / mild decline (core of ICAG mean reversion)
     abs_trend = abs(trend)
-    # [2026-03-08] Guard: trend=0 AND volatility=0은 데이터 미확인 → 보너스 차단
+    # [2026-03-08] Guard: trend=0 AND volatility=0 means data unavailable -> block the bonus
     if abs_trend == 0.0 and volatility == 0.0:
-        pass                                # 데이터 없음 → 보너스 없음
+        pass                                # no data -> no bonus
     elif abs_trend < 0.15:
-        ai_bonus += 10.0                    # 횡보 → 최고
+        ai_bonus += 10.0                    # sideways -> best
     elif abs_trend < 0.3:
-        ai_bonus += 5.0                     # 약한 추세 → 양호
+        ai_bonus += 5.0                     # mild trend -> good
     elif abs_trend < 0.5:
-        pass                                # 중간 추세 → 보통
+        pass                                # moderate trend -> neutral
     else:
-        ai_bonus -= 8.0 * abs_trend         # 강한 추세 → 감점
+        ai_bonus -= 8.0 * abs_trend         # strong trend -> penalty
 
-    # 약한 하락은 약간의 보너스 (DCA 진입 기회)
+    # Mild decline gets a small bonus (DCA entry opportunity)
     if -0.4 < trend < -0.1:
         ai_bonus += 3.0
 
     return base_score + ai_bonus
 
 def _score_lightning_ai(s: MarketSnapshot, ai_features: Dict[str, float], *, price_change_pct: float = 0.0) -> float:
-    """LIGHTNING v2 AI 피처 기반 스코어링.
+    """LIGHTNING v2 scoring based on AI features.
 
-    [2026-02-23] 모멘텀 가속도 + 거래량 서지 + 추세 방향 반영.
+    [2026-02-23] Factors in momentum acceleration + volume surge + trend direction.
     """
     base_score = _score_lightning(s, ai_features=ai_features)
 
@@ -1393,36 +1393,36 @@ def _score_lightning_ai(s: MarketSnapshot, ai_features: Dict[str, float], *, pri
 
     ai_bonus = 0.0
 
-    # 모멘텀 가속도: 상승 가속 시 강한 보너스
+    # Momentum acceleration: strong bonus when the rise is accelerating
     if momentum > 1.0 and trend > 0:
         ai_bonus += min(25.0, momentum * 8.0)
     elif momentum > 1.0:
         ai_bonus += min(15.0, momentum * 5.0)
 
-    # 거래량 서지: 돌파 진위 판별 핵심
+    # Volume surge: key to judging breakout authenticity
     if volume_surge > 1.0:
         ai_bonus += min(20.0, volume_surge * 12.0)
     elif volume_surge > 0.5:
         ai_bonus += min(10.0, volume_surge * 8.0)
 
-    # 적정 변동성 보너스 (과열 감점)
+    # Reasonable-volatility bonus (penalize overheating)
     if 1.5 <= volatility <= 5.0:
         ai_bonus += min(10.0, volatility * 2.5)
     elif volatility > 6.0:
         ai_bonus -= min(8.0, (volatility - 6.0) * 2.0)
 
-    # 하락 모멘텀 감점
+    # Downward-momentum penalty
     if momentum < -1.0:
         ai_bonus -= min(15.0, abs(momentum) * 5.0)
-    # 강한 하락 추세 감점
+    # Strong-downtrend penalty
     if trend < -3.0:
         ai_bonus -= min(10.0, abs(trend) * 2.0)
 
-    # 2026-03-10: 고래 활동 가감점 (LIGHTNING = 변동성 전략, 고래 활동 자체가 기회)
+    # 2026-03-10: Whale-activity adjustment (LIGHTNING = volatility strategy, whale activity itself is opportunity)
     try:
         _wd = get_whale_detector()
-        # volume_surge를 spike_ratio로 활용 (2배 이상이면 고래 의심)
-        _vs = volume_surge + 1.0  # volume_surge=1.0 → spike_ratio=2.0
+        # Use volume_surge as spike_ratio (2x or more = suspect a whale)
+        _vs = volume_surge + 1.0  # volume_surge=1.0 -> spike_ratio=2.0
         _pc = price_change_pct if price_change_pct != 0.0 else trend * 1.5
         _wi = _wd.detect(_vs, 1.0, _pc, market=s.market)
         ai_bonus += _wd.get_strategy_score_bonus(_wi, "LIGHTNING")
@@ -1438,17 +1438,17 @@ def _score_gazua_ai(
     coin_ret_24h: float = 0.0,
     btc_ret_24h: float = 0.0,
 ) -> float:
-    """GAZUA V2 전략 적합성 점수 (모멘텀 + BTC상대강도 + AI).
+    """GAZUA V2 strategy suitability score (momentum + relative strength vs BTC + AI).
 
-    V2 핵심: 강한 상승 모멘텀 + 독자 매수세(RS) + AI 신뢰도 기반 선별.
-    RS는 코인 24h 수익률 − BTC 24h 수익률로 실계산 (양수=BTC 대비 강세).
+    V2 key: strong upward momentum + independent buy-side (RS) + AI-confidence-based selection.
+    RS is computed from coin 24h return - BTC 24h return (positive = stronger than BTC).
     """
     base_score = _score_gazua(s, ai_features=ai_features)
 
     momentum = float(ai_features.get("momentum", 0.0))
     volume_surge = float(ai_features.get("volume_surge", 0.0))
 
-    # 1. 모멘텀 배율
+    # 1. Momentum multiplier
     if momentum > 1.0:
         momentum_mult = 1.20
     elif momentum > 0.5:
@@ -1460,10 +1460,10 @@ def _score_gazua_ai(
     else:
         momentum_mult = 0.75
 
-    # 2. 거래량 보너스
+    # 2. Volume bonus
     vol_bonus = min(max(0.0, volume_surge * 0.10), 0.15)
 
-    # 3. BTC 실제 상대강도 (코인 24h 수익률 − BTC 24h 수익률)
+    # 3. Real relative strength vs BTC (coin 24h return - BTC 24h return)
     rs_actual = coin_ret_24h - btc_ret_24h
     if rs_actual > 5.0:
         rs_mult = 1.15
@@ -1484,7 +1484,7 @@ def _score_gazua_ai(
     else:
         ai_mult = 0.80
 
-    # 2026-03-10: 고래 활동 가감점 (GAZUA = 고래 매수 시 장기 호재)
+    # 2026-03-10: Whale-activity adjustment (GAZUA = whale buying is a long-term positive)
     _gz_whale = 0.0
     try:
         _wd = get_whale_detector()

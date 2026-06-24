@@ -1,9 +1,9 @@
 # ============================================================
 # File: app/manager/sniper_position_store.py
-# SNIPER 포지션 영속화 관리자
+# SNIPER position persistence manager
 # ------------------------------------------------------------
-# 서버 재시작 시에도 활성 SNIPER 포지션을 유지합니다.
-# [2026-01-31] 다중 SNIPER 지원: 동일 마켓에 여러 SNIPER 인스턴스 허용
+# Keeps active SNIPER positions across server restarts.
+# [2026-01-31] Multi-SNIPER support: allow multiple SNIPER instances per market
 # ============================================================
 
 import json
@@ -21,26 +21,26 @@ SNIPER_POSITIONS_PATH = "runtime/sniper_positions.json"
 
 
 def generate_sniper_id(market: str) -> str:
-    """고유 SNIPER ID 생성.
-    
-    형식: {market}_sniper_{8자리 uuid}
-    예: BTCUSDT_sniper_a1b2c3d4
+    """Generate a unique SNIPER ID.
+
+    Format: {market}_sniper_{8-char uuid}
+    Example: BTCUSDT_sniper_a1b2c3d4
     """
     return f"{market}_sniper_{uuid.uuid4().hex[:8]}"
 
 
 def extract_market_from_id(sniper_id: str) -> Optional[str]:
-    """SNIPER ID에서 마켓 코드 추출.
-    
-    예: BTCUSDT_sniper_a1b2c3d4 -> BTCUSDT
+    """Extract the market code from a SNIPER ID.
+
+    Example: BTCUSDT_sniper_a1b2c3d4 -> BTCUSDT
     """
     if "_sniper_" in sniper_id:
         return sniper_id.split("_sniper_")[0]
-    return sniper_id  # Legacy: sniper_id가 market 자체인 경우
+    return sniper_id  # Legacy: sniper_id is the market itself
 
 
 class SniperPositionStore:
-    """SNIPER 포지션 저장소 (다중 포지션 지원)."""
+    """SNIPER position store (multi-position support)."""
 
     def __init__(self):
         self._positions: Dict[str, Dict[str, Any]] = {}
@@ -48,7 +48,7 @@ class SniperPositionStore:
         self._load()
 
     def _load(self):
-        """파일에서 포지션 로드."""
+        """Load positions from file."""
         try:
             if os.path.exists(SNIPER_POSITIONS_PATH):
                 with open(SNIPER_POSITIONS_PATH, "r", encoding="utf-8") as f:
@@ -59,7 +59,7 @@ class SniperPositionStore:
             self._positions = {}
 
     def _save(self):
-        """포지션을 파일에 저장 (원자적 쓰기 - 크래시 시 깨진 JSON 방지)."""
+        """Save positions to file (atomic write - avoids corrupt JSON on crash)."""
         from app.core.io_utils import safe_write_json
         try:
             safe_write_json(SNIPER_POSITIONS_PATH, self._positions)
@@ -67,17 +67,17 @@ class SniperPositionStore:
             logger.warning("[SNIPER] Failed to save positions: %s", e)
 
     def save_position(self, sniper_id: str, data: Dict[str, Any]):
-        """포지션 저장 (ID 기반).
-        
+        """Save a position (ID-based).
+
         Args:
-            sniper_id: 고유 SNIPER ID (예: BTCUSDT_sniper_a1b2c3d4) 또는 market (legacy)
-            data: 포지션 데이터
+            sniper_id: unique SNIPER ID (e.g. BTCUSDT_sniper_a1b2c3d4) or market (legacy)
+            data: position data
         """
         with self._lock:
-            # 마켓 정보 자동 추가
+            # Auto-add market info
             market = extract_market_from_id(sniper_id)
-            # [FIX] 동일 마켓 레거시 키(market 자체) 중복 방지
-            # 새 형식(market_sniper_xxx) 저장 시 레거시 키가 남아있으면 제거
+            # [FIX] Avoid duplicate legacy key (market itself) for the same market
+            # When saving the new format (market_sniper_xxx), remove any leftover legacy key
             if "_sniper_" in sniper_id and market in self._positions and market != sniper_id:
                 del self._positions[market]
                 logger.info("[SNIPER] Cleaned legacy key %s (replaced by %s)", market, sniper_id)
@@ -91,32 +91,32 @@ class SniperPositionStore:
             logger.info("[SNIPER] Saved position %s", sniper_id)
 
     def get_position(self, sniper_id: str) -> Optional[Dict[str, Any]]:
-        """포지션 조회 (ID 기반)."""
+        """Get a position (ID-based)."""
         with self._lock:
             return self._positions.get(sniper_id)
 
     def get_positions_by_market(self, market: str) -> List[Dict[str, Any]]:
-        """특정 마켓의 모든 SNIPER 포지션 조회.
-        
+        """Get all SNIPER positions for a specific market.
+
         Args:
-            market: 마켓 코드 (예: BTCUSDT)
-            
+            market: market code (e.g. BTCUSDT)
+
         Returns:
-            해당 마켓의 모든 SNIPER 포지션 리스트
+            list of all SNIPER positions for that market
         """
         with self._lock:
             result = []
             for sniper_id, data in self._positions.items():
-                # 새 형식: sniper_id에서 market 추출
+                # New format: extract market from sniper_id
                 if sniper_id.startswith(f"{market}_sniper_"):
                     result.append({"sniper_id": sniper_id, **data})
-                # Legacy 형식: sniper_id가 market 자체인 경우
+                # Legacy format: sniper_id is the market itself
                 elif sniper_id == market:
                     result.append({"sniper_id": sniper_id, **data})
             return result
 
     def remove_position(self, sniper_id: str):
-        """포지션 제거 (ID 기반)."""
+        """Remove a position (ID-based)."""
         with self._lock:
             if sniper_id in self._positions:
                 del self._positions[sniper_id]
@@ -126,10 +126,10 @@ class SniperPositionStore:
             return False
 
     def remove_positions_by_market(self, market: str) -> int:
-        """특정 마켓의 모든 SNIPER 포지션 제거.
-        
+        """Remove all SNIPER positions for a specific market.
+
         Returns:
-            제거된 포지션 개수
+            number of positions removed
         """
         with self._lock:
             to_remove = []
@@ -147,12 +147,12 @@ class SniperPositionStore:
             return len(to_remove)
 
     def get_all(self) -> Dict[str, Dict[str, Any]]:
-        """모든 포지션 조회."""
+        """Get all positions."""
         with self._lock:
             return dict(self._positions)
 
     def get_all_as_list(self) -> List[Dict[str, Any]]:
-        """모든 포지션을 리스트로 조회 (ID 포함)."""
+        """Get all positions as a list (including ID)."""
         with self._lock:
             return [
                 {"sniper_id": k, **v}
@@ -160,11 +160,11 @@ class SniperPositionStore:
             ]
 
     def restore_to_system(self, system) -> int:
-        """시스템에 포지션 복구. 복구된 개수 반환.
-        
-        다중 SNIPER 지원: 동일 마켓에 여러 포지션이 있을 수 있으므로
-        마켓 단위로 그룹화하여 복구합니다.
-        SNIPERS(precision_scope) 슬롯은 target 수를 초과하지 않도록 제한합니다.
+        """Restore positions into the system. Returns the number restored.
+
+        Multi-SNIPER support: since a market may have multiple positions,
+        restore is grouped by market.
+        SNIPERS(precision_scope) slots are capped so they do not exceed the target count.
         """
         restored = 0
         restored_markets = set()
@@ -173,12 +173,12 @@ class SniperPositionStore:
         scope_restored_count = 0
         
         with self._lock:
-            # [FIX] 레거시/신규 중복 키 사전 정리 — 같은 마켓이 2슬롯 차지 방지
+            # [FIX] Pre-clean duplicate legacy/new keys — avoid one market taking 2 slots
             _legacy_to_remove = []
             for sid in list(self._positions.keys()):
                 market_of_sid = (self._positions[sid].get("market")
                                  or extract_market_from_id(sid))
-                if "_sniper_" not in sid:  # legacy 키 (마켓명 자체)
+                if "_sniper_" not in sid:  # legacy key (market name itself)
                     new_key_exists = any(
                         k != sid and "_sniper_" in k
                         and (self._positions[k].get("market") or extract_market_from_id(k)) == market_of_sid
@@ -193,14 +193,14 @@ class SniperPositionStore:
                 self._save()
 
             for sniper_id, data in self._positions.items():
-                is_scope = False  # [FIX #3] try 밖에서 초기화 — 예외 시 NameError 방지
+                is_scope = False  # [FIX #3] init outside try — avoid NameError on exception
                 try:
-                    # 마켓 추출 (새 형식 또는 legacy)
+                    # Extract market (new format or legacy)
                     market = data.get("market") or extract_market_from_id(sniper_id)
 
-                    # SNIPERS(scope) 슬롯 target 수 제한: 보유 포지션은 항상 복구
-                    # [FIX #1] profile=="SNIPERS" OR source=="precision_scope" 어느 한쪽이면 scope
-                    # strategy_recommender 경로는 source 없이 profile만 설정하므로 OR 필요
+                    # Cap SNIPERS(scope) slots to target count: held positions are always restored
+                    # [FIX #1] scope if profile=="SNIPERS" OR source=="precision_scope"
+                    # the strategy_recommender path sets only profile (no source), so OR is needed
                     params = data.get("params", {}) or {}
                     is_scope = (str(params.get("profile") or "").strip().upper() == "SNIPERS"
                                 or str(params.get("source") or "").strip().lower() == "precision_scope")
@@ -212,7 +212,7 @@ class SniperPositionStore:
                                 _pos = getattr(_ctx, "position", None) or {}
                                 has_qty = float(_pos.get("qty", 0) or 0) > 0
                         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                            logger.warning("[SNIPER_STORE] strategy_recommender 경로 OR 판정: %s", exc, exc_info=True)
+                            logger.warning("[SNIPER_STORE] strategy_recommender path OR check: %s", exc, exc_info=True)
                         if not has_qty and scope_restored_count >= scope_target:
                             logger.info("[SNIPER] Skip restore %s — scope target %d reached", market, scope_target)
                             continue
@@ -221,8 +221,8 @@ class SniperPositionStore:
                     if not ctx:
                         ctx = system.coordinator.ensure_market(market)
 
-                    # 전략 모드 복구 (마켓 당 한 번만)
-                    # LADDER 전략이 이미 설정된 마켓은 SNIPER로 덮어쓰지 않음
+                    # Restore strategy mode (once per market)
+                    # Markets already set to the LADDER strategy are not overwritten with SNIPER
                     if market not in restored_markets:
                         existing_mode = ""
                         try:
@@ -231,14 +231,14 @@ class SniperPositionStore:
                             if isinstance(sc, dict) and bool(sc.get("enabled")):
                                 existing_mode = str(sc.get("mode") or "").upper()
                         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-                            logger.warning("[SNIPER_STORE] LADDER 전략 확인 중 오류: %s", exc, exc_info=True)
+                            logger.warning("[SNIPER_STORE] error while checking LADDER strategy: %s", exc, exc_info=True)
                         if not existing_mode:
                             try:
                                 sm = str(getattr(ctx, "strategy_mode", "") or "").strip().upper()
                                 if sm:
                                     existing_mode = sm
                             except (KeyError, AttributeError, TypeError) as exc:
-                                logger.warning("[SNIPER_STORE] strategy_mode 조회 오류: %s", exc, exc_info=True)
+                                logger.warning("[SNIPER_STORE] strategy_mode lookup error: %s", exc, exc_info=True)
                         if existing_mode and existing_mode != "SNIPER":
                             logger.info("[SNIPER] Skip restore %s — existing strategy %s", market, existing_mode)
                             restored_markets.add(market)
@@ -251,7 +251,7 @@ class SniperPositionStore:
                                     if lcfg.get("enabled"):
                                         existing_mode = "LADDER"
                             except (KeyError, AttributeError, TypeError) as exc:
-                                logger.warning("[SNIPER_STORE] ladder_manager 조회 오류: %s", exc, exc_info=True)
+                                logger.warning("[SNIPER_STORE] ladder_manager lookup error: %s", exc, exc_info=True)
                         if existing_mode == "LADDER":
                             logger.info("[SNIPER] Skip restore %s — already LADDER", market)
                             restored_markets.add(market)
@@ -266,7 +266,7 @@ class SniperPositionStore:
                         })
                         ctx.strategy_mode = "SNIPER"
 
-                        # 상태 복구
+                        # Restore state
                         from app.manager.oma_market_registry import MarketState
                         system.oma_set_market(
                             market=market,
@@ -275,11 +275,11 @@ class SniperPositionStore:
                         )
                         restored_markets.add(market)
 
-                    # 예산 복구 (idempotent): 누적 합산 금지
+                    # Restore budget (idempotent): no cumulative summation
                     if data.get("budget_usdt") and hasattr(system, 'oma_registry'):
                         stored_budget = float(data.get("budget_usdt") or 0.0)
                         current_budget = float(system.oma_registry.get_budget_usdt(market) or 0.0)
-                        # 현재 상태 유지하면서 예산만 업데이트
+                        # Keep current state, update budget only
                         current_state = system.oma_registry.get_state(market) or MarketState.ACTIVE
                         if current_budget <= 0.0:
                             system.oma_registry.set_state(
@@ -289,7 +289,7 @@ class SniperPositionStore:
                                 budget_usdt=stored_budget,
                             )
                         elif stored_budget > 0.0 and current_budget > (stored_budget * 1.5):
-                            # 과거 합산 복구 버그로 부풀려진 예산을 정상화
+                            # Normalize budget inflated by the old cumulative-restore bug
                             system.oma_registry.set_state(
                                 market,
                                 current_state,
@@ -306,5 +306,5 @@ class SniperPositionStore:
         return restored
 
 
-# 싱글톤 인스턴스
+# Singleton instance
 sniper_store = SniperPositionStore()

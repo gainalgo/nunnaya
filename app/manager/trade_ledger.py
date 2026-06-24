@@ -2,9 +2,9 @@
 # File: app/manager/trade_ledger.py
 # Autocoin OS v3-H — Trade Ledger (JSONL, Append-Only)
 # ------------------------------------------------------------
-# - 한 줄 = 한 JSON(record)
-# - append-only (수정/삭제 금지)
-# - 크래시/재부팅 이후 '무슨 일이 있었는가'를 복원할 근거
+# - One line = one JSON (record)
+# - append-only (no edits/deletes)
+# - Basis for reconstructing 'what happened' after a crash/reboot
 # ============================================================
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ class TradeLedger:
         self._max_bytes = int(max_bytes if max_bytes is not None else cfg.max_bytes)
         self._keep = int(keep if keep is not None else cfg.keep)
 
-        # LEDGER_BAK_DIR 환경변수로 bak 저장 위치 분리 가능 (기본: 원장과 같은 디렉토리)
+        # LEDGER_BAK_DIR env var can separate the bak storage location (default: same directory as the ledger)
         _bak_env = os.environ.get("LEDGER_BAK_DIR", "").strip()
         self._bak_dir: Optional[str] = _bak_env if _bak_env else None
 
@@ -121,7 +121,7 @@ class TradeLedger:
     # Rotation
     # --------------------------------------------------------
     def _bak_path(self, ts: str) -> str:
-        """bak 파일 경로: LEDGER_BAK_DIR 설정 시 해당 디렉토리, 아니면 원장과 같은 위치."""
+        """bak file path: use LEDGER_BAK_DIR directory if set, otherwise the same location as the ledger."""
         base = os.path.basename(self._path)
         bak_name = f"{base}.{ts}.bak"
         d = self._bak_dir if self._bak_dir else (os.path.dirname(self._path) or ".")
@@ -137,7 +137,7 @@ class TradeLedger:
                 os.replace(self._path, bak)
                 self._cleanup_old_backups()
         except (OSError, TypeError, ValueError) as exc:
-            # 원장 로깅은 trading path를 죽이지 않도록 'best-effort'
+            # Ledger logging is 'best-effort' so it never kills the trading path
             logger.warning("[LEDGER] _rotate_if_needed: %s", exc, exc_info=True)
             return
 
@@ -175,7 +175,7 @@ class TradeLedger:
         # 1. Collect files: current + backups (newest first)
         files = [self._path]
         base = os.path.basename(self._path)
-        # bak 탐색 디렉토리: LEDGER_BAK_DIR 설정 시 해당 디렉토리도 포함
+        # bak scan directories: also include the LEDGER_BAK_DIR directory if set
         bak_dirs = set()
         bak_dirs.add(os.path.dirname(self._path) or ".")
         if self._bak_dir:

@@ -1,50 +1,50 @@
 # ============================================================
-# Upbit FOCUS guard_score — 진입 확신 점수 (G1: ADX + 추세 confidence)
+# Upbit FOCUS guard_score — entry conviction score (G1: ADX + trend confidence)
 # ------------------------------------------------------------
-# Bybit guard_score(focus_manager._compute_guard_score_modifiers) 의 Upbit-native 이식.
-# ★ "점수=차트와 맞아야" (feedback_score_must_match_chart) — 좋은 자리일수록 +.
-# ★ 65-80 sweet / 80+ 후행 비대칭(저널분석) → blind ADX floor 금지, 균형 점수 + total_cap(G4).
+# Upbit-native port of Bybit guard_score (focus_manager._compute_guard_score_modifiers).
+# ★ "score must match the chart" (feedback_score_must_match_chart) — the better the setup, the higher the +.
+# ★ 65-80 sweet / 80+ lagging asymmetry (journal analysis) → no blind ADX floor, balanced score + total_cap(G4).
 #
-# 단계 (DESIGN_spot_guard_score_port_20260617.md):
-#   G1(여기) — ADX strong/weak + trend conf high/low. 표시·관측용(threshold=0 이면 게이트 X).
-#   G2~ — PA완성/Frame/Anchor/BTC정렬/Vol/RSI. G4 — total_cap + threshold 게이트.
+# Stages (DESIGN_spot_guard_score_port_20260617.md):
+#   G1(here) — ADX strong/weak + trend conf high/low. Display/observation only (threshold=0 means no gate).
+#   G2~ — PA completion/Frame/Anchor/BTC alignment/Vol/RSI. G4 — total_cap + threshold gate.
 #
-# 순수 함수 — I/O·상태 없음. (총점, 내역 리스트) 반환.
+# Pure function — no I/O or state. Returns (total, breakdown list).
 # ============================================================
 from __future__ import annotations
 
 from typing import List, Tuple
 
-# ── G1 컴포넌트 상수 (Bybit guard_score 기본값 — focus_manager.py:1327~) ──
-_ADX_STRONG_THR = 30.0    # ADX ≥ 30 = 강추세
-_ADX_WEAK_THR = 20.0      # ADX < 20 = 약추세(횡보)
+# ── G1 component constants (Bybit guard_score defaults — focus_manager.py:1327~) ──
+_ADX_STRONG_THR = 30.0    # ADX ≥ 30 = strong trend
+_ADX_WEAK_THR = 20.0      # ADX < 20 = weak trend (ranging)
 _ADX_STRONG_PTS = 10.0
 _ADX_WEAK_PTS = -5.0
-_TREND_HIGH_CONF = 0.75   # 추세 confidence ≥ 0.75 = 뚜렷
-_TREND_LOW_CONF = 0.50    # < 0.50 = 모호
+_TREND_HIGH_CONF = 0.75   # trend confidence ≥ 0.75 = clear
+_TREND_LOW_CONF = 0.50    # < 0.50 = ambiguous
 _TREND_HIGH_PTS = 10.0
 _TREND_LOW_PTS = -5.0
-# ── G2 컴포넌트 (PA 완성 ⭐ + Frame 정렬, Bybit guard_score 가중치 동일) ──
-_PA_OK_PTS = 30.0         # 정렬된 PA 패턴 완성 (⭐ 부모님 핵심 — 좋은 자리)
-_PA_NONE_PTS = -10.0      # PA 없음 또는 역방향
+# ── G2 components (PA completion ⭐ + Frame alignment, same weights as Bybit guard_score) ──
+_PA_OK_PTS = 30.0         # aligned PA pattern completion (⭐ owner's key point — good setup)
+_PA_NONE_PTS = -10.0      # no PA or opposite direction
 _PA_MIN_CONF = 0.5
-_FRAME_ALIGNED_PTS = 15.0  # 추세 방향 일치 (UPTREND + LONG)
-_FRAME_NEUTRAL_PTS = 5.0   # SIDEWAYS (중립 자리)
-_FRAME_OPPOSITE_PTS = -20.0  # DOWNTREND (역행 — 보통 상류 차단, 방어적)
-# ── G3 컴포넌트 (BTC 정렬 + Anchor 눌림목 근접) ──
-_BTC_ALIGNED_PTS = 15.0    # BTC UP + LONG = 순풍
-_BTC_OPPOSITE_PTS = -15.0  # BTC DOWN = 역풍
-_ANCHOR_PTS = 20.0         # 눌림목 — 가장 가까운 SUPPORT 에 근접(사이클 시작점, 좋은 진입)
-_ANCHOR_PROX_ATR = 1.0     # SUPPORT 까지 거리 ≤ 1×ATR = 근접
-# ── G5 컴포넌트 (Vol 동반 + RSI 과매도 반등 — 미세 가점) ──
-_VOL_BIG_PTS = 10.0        # 거래량 평균 대비 큼 + 상승봉 = 매수세 동반
+_FRAME_ALIGNED_PTS = 15.0  # trend direction matches (UPTREND + LONG)
+_FRAME_NEUTRAL_PTS = 5.0   # SIDEWAYS (neutral setup)
+_FRAME_OPPOSITE_PTS = -20.0  # DOWNTREND (counter-trend — usually blocked upstream, defensive)
+# ── G3 components (BTC alignment + Anchor pullback proximity) ──
+_BTC_ALIGNED_PTS = 15.0    # BTC UP + LONG = tailwind
+_BTC_OPPOSITE_PTS = -15.0  # BTC DOWN = headwind
+_ANCHOR_PTS = 20.0         # pullback — close to nearest SUPPORT (cycle start, good entry)
+_ANCHOR_PROX_ATR = 1.0     # distance to SUPPORT ≤ 1×ATR = close
+# ── G5 components (Vol confirmation + RSI oversold bounce — minor bonus) ──
+_VOL_BIG_PTS = 10.0        # volume large vs average + up bar = buying confirmation
 _VOL_MULT = 2.0
-_RSI_PTS = 10.0            # 5/primary RSI 과매도(<30) + 상승 변곡 = 반등 시작(LONG)
+_RSI_PTS = 10.0            # 5/primary RSI oversold (<30) + upturn = bounce start (LONG)
 _RSI_OVERSOLD = 30.0
 
-# ── 672 canonical guard_score 가중치 (선물 FocusConfig 와 동일 이름·기본값) ──
-#   Ch2 (2026-06-18): 옛 하드코딩 상수를 SpotGazuaConfig 672 필드로 config-drive.
-#   기본값 = 위 상수와 동일(=선물 672 기본) → cfg 미주입/미변경 시 동작 0변경. UI 조정 시 즉시 반영.
+# ── 672 canonical guard_score weights (same names/defaults as futures FocusConfig) ──
+#   Ch2 (2026-06-18): old hardcoded constants config-driven via SpotGazuaConfig 672 fields.
+#   Defaults = same as constants above (=futures 672 defaults) → no behavior change if cfg not injected/changed. Reflected instantly on UI adjustment.
 _DEFAULT_GS_WEIGHTS = {
     "guard_score_adx_strong": _ADX_STRONG_PTS,
     "guard_score_adx_weak": _ADX_WEAK_PTS,
@@ -64,8 +64,8 @@ _DEFAULT_GS_WEIGHTS = {
 
 
 def gs_weights_from_config(cfg) -> dict:
-    """SpotGazuaConfig(672) 에서 guard_score_* 가중치 추출. cfg None/필드없음 → 기본 상수(=선물 672 기본).
-    값이 선물 672 기본과 동일하면 동작 0변경, 부모님이 UI 로 조정 시 즉시 반영."""
+    """Extract guard_score_* weights from SpotGazuaConfig(672). cfg None/field missing → default constants (=futures 672 defaults).
+    If values equal the futures 672 defaults, no behavior change; reflected instantly when the owner adjusts via UI."""
     if cfg is None:
         return dict(_DEFAULT_GS_WEIGHTS)
     return {k: float(getattr(cfg, k, v)) for k, v in _DEFAULT_GS_WEIGHTS.items()}
@@ -88,18 +88,18 @@ def compute_guard_score(
     total_cap: float = 0.0,
     weights: dict = None,
 ) -> Tuple[float, List[str]]:
-    """guard_score = G1(ADX+추세conf) + G2(PA완성 ⭐ + Frame) + G3(BTC정렬 + Anchor) + G5(Vol + RSI). (총점, 내역).
+    """guard_score = G1(ADX+trend conf) + G2(PA completion ⭐ + Frame) + G3(BTC alignment + Anchor) + G5(Vol + RSI). (total, breakdown).
 
-    ★ floor 아님 — 가산 점수(좋은 자리 확신). total_cap>0 이면 ±cap 클램프(80+ 억제, G4 준비).
-    데이터 부족/계산 실패 시 해당 컴포넌트만 건너뜀(0점, fail-open).
+    ★ Not a floor — additive score (good-setup conviction). If total_cap>0, clamp to ±cap (suppress 80+, prepares G4).
+    On insufficient data / calculation failure, skip only that component (0 points, fail-open).
 
-    ★ SIDEWAYS-ADX 보정 (2026-06-17 부모): 구조가 SIDEWAYS 면 ADX 강추세 가점 *면제*.
-      횡보 합의 구간에서 ADX 가 스윙 잔상으로 ≥30 찍혀 점수가 차트(횡보)와 어긋나는 것 교정.
-      (방향 없는 ADX 는 진짜 추세 아님. 약추세 감점은 유지 — 횡보는 깎여야.)
+    ★ SIDEWAYS-ADX correction (2026-06-17 owner): if structure is SIDEWAYS, *waive* the ADX strong-trend bonus.
+      Corrects the case where ADX reads ≥30 from swing residue in a ranging consensus zone, making the score diverge from the chart (ranging).
+      (Directionless ADX is not a real trend. Keep the weak-trend penalty — ranging should be docked.)
 
-    Args (G2): pa_direction/pa_confidence = GreenPen 최우선 PA 신호(현물 long_only → LONG 정렬만 +).
+    Args (G2): pa_direction/pa_confidence = GreenPen top-priority PA signal (spot long_only → only LONG alignment gets +).
     """
-    # ── 672 config-drive: weights 주입 시 해당 가중치로 덮음(미주입=기본 상수). 로컬 섀도잉 → 본문 무수정 ──
+    # ── 672 config-drive: when weights injected, override those weights (none injected = default constants). Local shadowing → body unchanged ──
     _W = _DEFAULT_GS_WEIGHTS if not weights else {**_DEFAULT_GS_WEIGHTS, **weights}
     _ADX_STRONG_PTS = _W["guard_score_adx_strong"]
     _ADX_WEAK_PTS = _W["guard_score_adx_weak"]
@@ -119,7 +119,7 @@ def compute_guard_score(
     bd: List[str] = []
     _is_sideways = str(trend or "").upper() == "SIDEWAYS"
 
-    # ── ADX (강추세 +/약추세 -) ──
+    # ── ADX (strong trend +/weak trend -) ──
     try:
         from app.strategy import indicators
         a = indicators.adx(highs, lows, closes)
@@ -127,7 +127,7 @@ def compute_guard_score(
             adx = float(a.get("adx", 0) or 0)
             if adx >= _ADX_STRONG_THR:
                 if _is_sideways:
-                    bd.append(f"ADX·0({adx:.0f}, 횡보=가점면제)")   # 구조 횡보 → 강추세 가점 면제
+                    bd.append(f"ADX·0({adx:.0f}, 횡보=가점면제)")   # structure ranging → waive strong-trend bonus
                 else:
                     total += _ADX_STRONG_PTS
                     bd.append(f"ADX+{_ADX_STRONG_PTS:.0f}({adx:.0f})")
@@ -139,7 +139,7 @@ def compute_guard_score(
     except Exception:
         pass
 
-    # ── 추세 confidence (뚜렷 +/모호 -) ──
+    # ── trend confidence (clear +/ambiguous -) ──
     tc = float(trend_conf or 0)
     if tc >= _TREND_HIGH_CONF:
         total += _TREND_HIGH_PTS
@@ -150,38 +150,38 @@ def compute_guard_score(
     else:
         bd.append(f"Trend·0({tc:.2f})")
 
-    # ── PA 완성 (G2 ⭐) — 정렬된(LONG) PA 패턴 = 좋은 자리 ──
+    # ── PA completion (G2 ⭐) — aligned (LONG) PA pattern = good setup ──
     pad = str(pa_direction or "").upper()
     if pad == "LONG" and float(pa_confidence or 0) >= _PA_MIN_CONF:
         total += _PA_OK_PTS
         bd.append(f"PA+{_PA_OK_PTS:.0f}({float(pa_confidence):.2f})")
-    elif pad in ("", "SHORT"):   # PA 없음 또는 역방향(현물 long_only)
+    elif pad in ("", "SHORT"):   # no PA or opposite direction (spot long_only)
         total += _PA_NONE_PTS
         bd.append(f"PA{_PA_NONE_PTS:.0f}")
-    # (LONG 인데 conf 낮음 → 0, 중립)
+    # (LONG but low conf → 0, neutral)
 
-    # ── Frame 정렬 (G2) — 추세 방향 일치 ──
+    # ── Frame alignment (G2) — trend direction matches ──
     tu = str(trend or "").upper()
     if tu == "UPTREND":
         total += _FRAME_ALIGNED_PTS
-        bd.append(f"Frame+{_FRAME_ALIGNED_PTS:.0f}(정렬)")
+        bd.append(f"Frame+{_FRAME_ALIGNED_PTS:.0f}(aligned)")
     elif tu == "SIDEWAYS":
         total += _FRAME_NEUTRAL_PTS
-        bd.append(f"Frame+{_FRAME_NEUTRAL_PTS:.0f}(중립)")
+        bd.append(f"Frame+{_FRAME_NEUTRAL_PTS:.0f}(neutral)")
     elif tu == "DOWNTREND":
         total += _FRAME_OPPOSITE_PTS
-        bd.append(f"Frame{_FRAME_OPPOSITE_PTS:.0f}(역행)")
+        bd.append(f"Frame{_FRAME_OPPOSITE_PTS:.0f}(counter)")
 
-    # ── BTC 정렬 (G3) — BTC 순풍/역풍 (현물 long_only) ──
+    # ── BTC alignment (G3) — BTC tailwind/headwind (spot long_only) ──
     bdir = str(btc_direction or "").upper()
     if bdir == "UP":
         total += _BTC_ALIGNED_PTS
-        bd.append(f"BTC+{_BTC_ALIGNED_PTS:.0f}(순풍)")
+        bd.append(f"BTC+{_BTC_ALIGNED_PTS:.0f}(tailwind)")
     elif bdir == "DOWN":
         total += _BTC_OPPOSITE_PTS
-        bd.append(f"BTC{_BTC_OPPOSITE_PTS:.0f}(역풍)")
+        bd.append(f"BTC{_BTC_OPPOSITE_PTS:.0f}(headwind)")
 
-    # ── Anchor 눌림목 (G3) — 가장 가까운 SUPPORT 에 근접 = 사이클 시작점(좋은 진입) ──
+    # ── Anchor pullback (G3) — close to nearest SUPPORT = cycle start (good entry) ──
     if zones and price > 0 and atr > 0:
         try:
             supports_below = [
@@ -191,15 +191,15 @@ def compute_guard_score(
                 and float(z.get("price_high", 0) or 0) <= price
             ]
             if supports_below:
-                nearest = max(supports_below)         # 현재가 바로 아래 가장 가까운 지지
+                nearest = max(supports_below)         # nearest support just below current price
                 prox_atr = (price - nearest) / atr
                 if prox_atr <= _ANCHOR_PROX_ATR:
                     total += _ANCHOR_PTS
-                    bd.append(f"Anchor+{_ANCHOR_PTS:.0f}(지지 {prox_atr:.1f}ATR)")
+                    bd.append(f"Anchor+{_ANCHOR_PTS:.0f}(support {prox_atr:.1f}ATR)")
         except Exception:
             pass
 
-    # ── Vol 동반 (G5) — 거래량 평균 2x+ & 상승봉 = 매수세 동반 ──
+    # ── Vol confirmation (G5) — volume 2x+ average & up bar = buying confirmation ──
     if volumes and len(volumes) >= 5:
         try:
             cur_v = float(volumes[-1] or 0)
@@ -212,7 +212,7 @@ def compute_guard_score(
         except Exception:
             pass
 
-    # ── RSI 과매도 반등 (G5) — RSI<30 + 상승 변곡 = 반등 시작(LONG 변곡) ──
+    # ── RSI oversold bounce (G5) — RSI<30 + upturn = bounce start (LONG upturn) ──
     try:
         from app.strategy import indicators
         _r = indicators.rsi_with_prev(closes)

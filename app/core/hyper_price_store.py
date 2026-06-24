@@ -2,10 +2,10 @@
 # File: app/core/hyper_price_store.py
 # ------------------------------------------------------------
 # HyperPriceStore
-# - 시장별 최신 가격을 저장하고 엔진에 제공하는 중앙 저장소
-# - PriceFeed가 가격을 업데이트하고
-#   Engine / System / Coordinator가 가격을 조회한다.
-# - exchange namespace 지원 (멀티 거래소 동시 운영 대비)
+# - Central store that holds the latest price per market and serves it to the engine
+# - PriceFeed updates prices and
+#   Engine / System / Coordinator query them.
+# - exchange namespace support (for running multiple exchanges concurrently)
 # ============================================================
 
 from __future__ import annotations
@@ -35,12 +35,12 @@ def _parse_key(key: str) -> Tuple[str, str]:
 
 class HyperPriceStore:
     """
-    시장별 최신 가격을 저장하는 저장소.
-    Thread-safe 보장을 위해 Lock 사용.
-    exchange namespace 지원으로 멀티 거래소 동시 운영 가능.
+    Store that holds the latest price per market.
+    Uses a Lock to guarantee thread safety.
+    exchange namespace support enables running multiple exchanges concurrently.
     """
 
-    # [MIGRATED 2026-01-23] 가격 히스토리 최대 보관 개수
+    # [MIGRATED 2026-01-23] Max number of price history entries to keep
     MAX_HISTORY = 200
 
     def __init__(self, default_exchange: str = DEFAULT_EXCHANGE):
@@ -58,7 +58,7 @@ class HyperPriceStore:
         self._last_update_ts: float = 0.0
 
     # --------------------------------------------------------
-    # 가격 저장
+    # Store price
     # --------------------------------------------------------
     def set_price(
         self, market: str, price: float, *, exchange: Optional[str] = None
@@ -69,7 +69,7 @@ class HyperPriceStore:
             self._prices[key] = price
             self._price_ts[key] = time.time()
             self._last_update_ts = time.time()
-            # [MIGRATED 2026-01-23] 가격 히스토리 저장
+            # [MIGRATED 2026-01-23] Store price history
             if key not in self._price_history:
                 self._price_history[key] = []
             self._price_history[key].append(price)
@@ -85,7 +85,7 @@ class HyperPriceStore:
             self._volumes[key] = volume
 
     # --------------------------------------------------------
-    # 가격 조회
+    # Query price
     # --------------------------------------------------------
     def get_price(
         self, market: str, *, exchange: Optional[str] = None,
@@ -112,24 +112,24 @@ class HyperPriceStore:
             return self._volumes.get(key)
 
     def get_last_update_ts(self) -> float:
-        """마지막 가격 업데이트 시각 (Unix timestamp)."""
+        """Time of the last price update (Unix timestamp)."""
         with self._lock:
             return self._last_update_ts
 
-    # [MIGRATED 2026-01-23] 가격 히스토리 조회
+    # [MIGRATED 2026-01-23] Query price history
     def get_prices(
         self, market: str, count: int = 60, *, exchange: Optional[str] = None
     ) -> List[float]:
-        """최근 N개의 가격 히스토리 반환.
+        """Return the most recent N price history entries.
 
         Args:
-            market: 마켓 심볼 (예: "BTCUSDT")
-            count: 가져올 가격 개수
-            exchange: 거래소 (기본값: default_exchange)
+            market: market symbol (e.g. "BTCUSDT")
+            count: number of prices to fetch
+            exchange: exchange (default: default_exchange)
 
         Returns:
-            가격 리스트 (오래된 것부터 최신 순)
-            데이터 부족 시 가용한 만큼 반환, 없으면 빈 리스트
+            price list (oldest to newest)
+            If data is insufficient, returns as many as available; empty list if none
         """
         ex = exchange or self._default_exchange
         key = _make_key(ex, market)
@@ -140,7 +140,7 @@ class HyperPriceStore:
             return list(history[-count:])
 
     # --------------------------------------------------------
-    # 여러 가격 조회
+    # Query multiple prices
     # --------------------------------------------------------
     def get_all(self, *, exchange: Optional[str] = None) -> Dict[str, float]:
         """Get all prices, optionally filtered by exchange."""
@@ -157,7 +157,7 @@ class HyperPriceStore:
             }
 
     # --------------------------------------------------------
-    # 상태 출력
+    # Status output
     # --------------------------------------------------------
     def status(self, *, exchange: Optional[str] = None) -> Dict[str, Any]:
         with self._lock:
@@ -314,7 +314,7 @@ class HyperOrderbookStore:
 
 
 # ------------------------------------------------------------
-# 글로벌 인스턴스 (Global singletons for backward compatibility)
+# Global instances (Global singletons for backward compatibility)
 # ------------------------------------------------------------
 price_store = HyperPriceStore()
 orderbook_store = HyperOrderbookStore()

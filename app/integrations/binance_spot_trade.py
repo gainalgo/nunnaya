@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Binance SPOT 트레이드 클라이언트 — SpotGazuaManager 의 client 인터페이스를 Binance 현물로 어댑트.
+"""Binance SPOT trade client — adapts the SpotGazuaManager client interface to Binance spot.
 
-BybitSpotTradeClient 미러. 매수/매도/잔고/주문/캔들은 BinanceTradeClient(category="spot") 가
-제공 → 상속. 빠진 공개 시장조회(시장목록/티커/현재가/호가)·헬퍼만 채운다.
+Mirrors BybitSpotTradeClient. Buy/sell/balance/orders/candles are provided by
+BinanceTradeClient(category="spot") → inherited. Only the missing public market
+queries (market list / ticker / current price / orderbook) and helpers are filled in.
 
-quote = USDT, 심볼 = "BTCUSDT". 한국식 투자유의(market_warning) 없음 → fail-open.
+quote = USDT, symbol = "BTCUSDT". No Korean-style investment warning (market_warning) → fail-open.
 """
 from __future__ import annotations
 
@@ -36,9 +37,9 @@ def binance_base_currency(symbol: str) -> str:
 
 
 class BinanceSpotTradeClient(BinanceTradeClient):
-    """Binance 현물(spot). SpotGazuaManager 호환 — BinanceTradeClient(category="spot") 상속."""
+    """Binance spot. SpotGazuaManager compatible — inherits BinanceTradeClient(category="spot")."""
 
-    MIN_ORDER_KRW = MIN_ORDER_USDT  # 매니저가 이름으로 읽음 (단위=USDT)
+    MIN_ORDER_KRW = MIN_ORDER_USDT  # manager reads it by this name (unit = USDT)
 
     def __init__(self, api_key: str = "", api_secret: str = "", *, timeout: float = 10.0):
         super().__init__(api_key or None, api_secret or None, timeout=timeout, category="spot")
@@ -53,7 +54,7 @@ class BinanceSpotTradeClient(BinanceTradeClient):
         resp.raise_for_status()
         return resp.json()
 
-    # ── 시장 목록 (USDT 현물 전체) — Upbit shape 미러 ────────────────────
+    # ── Market list (all USDT spot) — mirrors Upbit shape ────────────────
     def get_all_markets(self) -> List[Dict[str, Any]]:
         ts0, cached = self._mkt_cache
         if cached and (time.time() - ts0) < 300.0:
@@ -78,7 +79,7 @@ class BinanceSpotTradeClient(BinanceTradeClient):
     def get_market_warnings(self, *, ttl: float = 300.0) -> Dict[str, Dict[str, Any]]:
         return {}  # fail-open
 
-    # ── 티커 / 현재가 — Upbit shape 미러 ────────────────────────────────
+    # ── Ticker / current price — mirrors Upbit shape ────────────────────
     def get_tickers(self, markets: List[str]) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         try:
@@ -109,7 +110,7 @@ class BinanceSpotTradeClient(BinanceTradeClient):
             logger.warning("[BinanceSpot] get_price %s failed: %s", market, e)
             return 0.0
 
-    # ── 호가창 — Upbit shape 미러 ───────────────────────────────────────
+    # ── Orderbook — mirrors Upbit shape ─────────────────────────────────
     def get_orderbook(self, market: str, *, depth: int = 15) -> Dict[str, Any]:
         sym = self._normalize_symbol(market)
         bids: List[Dict[str, float]] = []
@@ -125,7 +126,7 @@ class BinanceSpotTradeClient(BinanceTradeClient):
             logger.warning("[BinanceSpot] get_orderbook %s failed: %s", market, e)
         return {"market": sym, "bids": bids, "asks": asks, "ts": 0}
 
-    # ── 미체결 주문 (Upbit open_orders 인터페이스) ──────────────────────
+    # ── Open orders (Upbit open_orders interface) ───────────────────────
     def open_orders(self, market: str, *, side: Optional[str] = None) -> List[Dict[str, Any]]:
         orders = self.list_wait_orders(market=market)
         if side:

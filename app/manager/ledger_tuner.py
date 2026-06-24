@@ -2,10 +2,10 @@
 # File: app/manager/ledger_tuner.py
 # Autocoin OS v3-H — Ledger Tuning Analyzer (empirical tuning)
 # ------------------------------------------------------------
-# - JSONL 원장(trade_ledger.jsonl) 기반으로 실측 통계를 산출한다.
-# - 안전장치가 '진입의 방벽'이 되지 않도록,
-#   과도한 false-positive를 줄이는 방향(보수적/완만한 추천)을 기본으로 한다.
-# - 환경변수 자체를 자동 변경하지 않는다(권장값만 산출).
+# - Computes empirical statistics from the JSONL ledger (trade_ledger.jsonl).
+# - Defaults to a conservative/gentle recommendation direction that reduces
+#   excessive false-positives, so safety guards don't become an 'entry barrier'.
+# - Never changes environment variables automatically (only produces suggested values).
 # ============================================================
 
 from __future__ import annotations
@@ -101,7 +101,7 @@ def _safe_int_env(key: str, default: Optional[int] = None) -> Optional[int]:
         return default
 
 def _collect_ledger_files(path: str) -> List[str]:
-    """현재 ledger + rotation backup(.bak)를 포함한 파일 리스트."""
+    """List of files including the current ledger + rotation backups (.bak)."""
     path = str(path)
     out: List[str] = []
 
@@ -359,9 +359,9 @@ def build_tuning_report(inp: TuningInput) -> Dict[str, Any]:
         notes.append("latency samples insufficient: keep current OMA_ORDER_TIMEOUT_* or defaults")
 
     # retries
-    # 기본 철학:
-    # - buy(entry): 과도한 재시도는 '진입 방벽'보다는 '중복 위험'을 키울 수 있어 2를 기본
-    # - sell(exit): 미청산은 치명적이므로 필요하면 3까지(다만 무한은 금지)
+    # Core philosophy:
+    # - buy(entry): excessive retries can amplify 'duplicate risk' more than acting as an 'entry barrier', so default to 2
+    # - sell(exit): a failed close is fatal, so go up to 3 if needed (but never unlimited)
     exit_unresolved = int(cnt.get("exit_unresolved") or 0)
     timeout_cnt = int(cnt.get("timeout") or 0)
     final_cnt = int(cnt.get("final") or (cnt.get("fill_buy", 0) + cnt.get("fill_sell", 0)))

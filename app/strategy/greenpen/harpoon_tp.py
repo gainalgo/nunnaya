@@ -1,8 +1,8 @@
 """
-Harpoon (작살) — Scalp TP/SL Calculator
+Harpoon — Scalp TP/SL Calculator
 
-FOCUS의 H4 ATR을 기반으로 초단타 TP/SL을 계산한다.
-일반 cycle_tp.py 대비 훨씬 좁은 밴드 (ATR × 0.1~0.2).
+Computes ultra-short-term TP/SL based on FOCUS's H4 ATR.
+Much tighter bands than the regular cycle_tp.py (ATR × 0.1~0.2).
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ def compute_scalp_targets(
     *,
     tp_atr_mult: float = 0.15,
     sl_atr_mult: float = 0.10,
-    min_tp_pct: float = 0.015,   # TP 최소 0.015% (수수료 커버)
-    min_sl_pct: float = 0.010,   # SL 최소 0.01%
+    min_tp_pct: float = 0.015,   # TP minimum 0.015% (covers fees)
+    min_sl_pct: float = 0.010,   # SL minimum 0.01%
 ) -> ScalpTargets:
     """
     Compute scalp TP/SL from ATR.
@@ -66,7 +66,7 @@ def compute_scalp_targets(
     tp_dist = atr * tp_atr_mult
     sl_dist = atr * sl_atr_mult
 
-    # Enforce minimums (수수료 + 슬리피지 보호)
+    # Enforce minimums (fee + slippage protection)
     min_tp_abs = entry_price * (min_tp_pct / 100.0)
     min_sl_abs = entry_price * (min_sl_pct / 100.0)
     tp_dist = max(tp_dist, min_tp_abs)

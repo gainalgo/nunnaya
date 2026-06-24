@@ -2,15 +2,15 @@
 # File: app/api/reserved_router.py
 # Autocoin OS v3-H — Reserved Queue API (+ Autopilot)
 # ------------------------------------------------------------
-# - Bybit public 데이터 기반 후보 자동 선별
-# - Reserved Queue 조회/승인/거절
-# - (옵션) 야간 자동 운용(Autopilot):
-#     - 거래/체결이 너무 뜸한 ACTIVE 코인 자동 WATCH 강등
-#     - Bybit 재스캔 → 후보 자동 승인(WATCH/ACTIVE) 반복
+# - Auto-select candidates based on Bybit public data
+# - Reserved Queue list/approve/reject
+# - (optional) Overnight autopilot:
+#     - Auto-demote ACTIVE coins with too few trades/fills to WATCH
+#     - Bybit rescan -> auto-approve candidates (WATCH/ACTIVE) on a loop
 #
-# 원칙:
-# - 이 라우터는 주문/체결/실거래 트리거를 절대 수행하지 않는다.
-# - 승인(Approve)은 OMA Registry의 상태/예산/전략 모드만 조정한다.
+# Principles:
+# - This router never triggers orders/fills/real trades.
+# - Approve only adjusts the state/budget/strategy mode in the OMA Registry.
 # ============================================================
 
 from __future__ import annotations
@@ -152,7 +152,7 @@ def _normalize_strategy_tp_sl_settings(raw: Any) -> Dict[str, Any]:
         }
     out["per_strategy"] = per_out
 
-    # ★ 1-2: 레짐 배율 + 수수료 키 패스스루 (엔진이 사용하지만 UI 정규화 대상 아님)
+    # ★ 1-2: pass through regime multiplier + fee keys (used by the engine but not subject to UI normalization)
     for passthrough_key in ("regime_tp_multiplier", "regime_sl_multiplier", "fee_aware_tp", "fee_rate"):
         if passthrough_key in raw:
             out[passthrough_key] = raw[passthrough_key]
@@ -315,7 +315,7 @@ def _apply_strategy_tp_sl_to_contexts(system: Any, policy: Dict[str, Any]) -> No
 
 
 def _get_longhold_target_pct(system: Any) -> float:
-    """LongHold 목표 수익률 로드"""
+    """Load LongHold target profit percentage."""
     try:
         ladder_mgr = getattr(system, "ladder_manager", None)
         if ladder_mgr:
@@ -327,7 +327,7 @@ def _get_longhold_target_pct(system: Any) -> float:
 
 
 def _get_longhold_check_interval(system: Any) -> float:
-    """LongHold 체크 주기 로드"""
+    """Load LongHold check interval."""
     try:
         ladder_mgr = getattr(system, "ladder_manager", None)
         if ladder_mgr:
@@ -339,7 +339,7 @@ def _get_longhold_check_interval(system: Any) -> float:
 
 
 def _get_longhold_stop_loss_pct(system: Any) -> float:
-    """LongHold 손절 기준 로드"""
+    """Load LongHold stop-loss threshold."""
     try:
         ladder_mgr = getattr(system, "ladder_manager", None)
         if ladder_mgr:
@@ -402,7 +402,7 @@ def _settings_snapshot(system: Any) -> Dict[str, Any]:
             "idle_demote_min": int(_get("autopilot_idle_demote_min", 180) or 0),
             "idle_demote_overrides": dict(_get("autopilot_idle_demote_overrides", {}) or {}),
             
-            # [2026-02-01] 24시간 무거래 → LongHold 자동 전환
+            # [2026-02-01] 24h no-trade -> auto-switch to LongHold
             "idle_to_longhold_enabled": bool(_get("autopilot_idle_to_longhold_enabled", True)),
             "idle_to_longhold_hours": int(_get("autopilot_idle_to_longhold_hours", 24) or 24),
             
@@ -425,7 +425,7 @@ def _settings_snapshot(system: Any) -> Dict[str, Any]:
             "signal_miss_window_min": int(_get("autopilot_signal_miss_window_min", 30) or 0),
             "signal_miss_min_attempts": int(_get("autopilot_signal_miss_min_attempts", 6) or 0),
 
-            # 전략별 AutoApprove
+            # Per-strategy AutoApprove
             "auto_approve_pingpong": bool(_get("autopilot_auto_approve_pingpong", False)),
             "auto_approve_autoloop": bool(_get("autopilot_auto_approve_autoloop", False)),
             "auto_approve_ladder": bool(_get("autopilot_auto_approve_ladder", False)),
@@ -435,7 +435,7 @@ def _settings_snapshot(system: Any) -> Dict[str, Any]:
             "auto_approve_sniper": bool(_get("autopilot_auto_approve_sniper", False)),
             "auto_approve_whale": bool(_get("autopilot_auto_approve_whale", False)),
 
-            # 전략별 최소 신뢰도 %
+            # Per-strategy minimum confidence %
             "auto_approve_min_confidence_pingpong": float(_get("autopilot_min_confidence_pingpong", 60.0)),
             "auto_approve_min_confidence_autoloop": float(_get("autopilot_min_confidence_autoloop", 60.0)),
             "auto_approve_min_confidence_ladder": float(_get("autopilot_min_confidence_ladder", 60.0)),
@@ -446,24 +446,24 @@ def _settings_snapshot(system: Any) -> Dict[str, Any]:
             "auto_approve_min_confidence_whale": float(_get("autopilot_min_confidence_whale", 65.0)),
             "auto_engine_start": bool(_get("auto_engine_start", False)),
 
-            # [2026-02-04] LongHold 목표 달성 시 자동 매도
+            # [2026-02-04] Auto-sell when LongHold target is reached
             "longhold_auto_sell": bool(_get("longhold_auto_sell", True)),
             "longhold_target_pct": float(_get_longhold_target_pct(system)),
             "longhold_check_interval_min": float(_get_longhold_check_interval(system)),
             "longhold_stop_loss_pct": float(_get_longhold_stop_loss_pct(system)),
             
-            # [2026-02-04] Global Profit Take: 모든 ACTIVE 코인 강제 매도
+            # [2026-02-04] Global Profit Take: force-sell all ACTIVE coins
             "global_profit_take": bool(_get("global_profit_take", False)),
             "global_profit_pct": float(_get("global_profit_pct", 5.0)),
             "global_profit_interval_min": float(_get("global_profit_interval_min", 10.0)),
             "global_min_sl_pct": float(_get("global_min_sl_pct", -2.5)),
-            # [2026-03-23] 수익 자동 락인 (④)
+            # [2026-03-23] Auto profit lock (④)
             "profit_lock_enabled": bool(_get("profit_lock_enabled", False)),
             "profit_lock_trigger_pct": float(_get("profit_lock_trigger_pct", 10.0)),
             "profit_lock_sell_ratio": float(_get("profit_lock_sell_ratio", 0.3)),
             "profit_lock_cooldown_h": float(_get("profit_lock_cooldown_sec", 3600.0)) / 3600.0,
         },
-        # [2026-02-04] 백테스트 가중치 (0.0~1.0)
+        # [2026-02-04] Backtest weights (0.0~1.0)
         "backtest_weights": {
             "pingpong": float(_get("backtest_weight_pingpong", 0.10)),
             "autoloop": float(_get("backtest_weight_autoloop", 0.15)),
@@ -473,9 +473,9 @@ def _settings_snapshot(system: Any) -> Dict[str, Any]:
             "contrarian": float(_get("backtest_weight_contrarian", 0.20)),
             "sniper": float(_get("backtest_weight_sniper", 0.30)),
         },
-        # [2026-03-02] SNIPER DCA 설정
+        # [2026-03-02] SNIPER DCA settings
         "sniper_dca": {
-            # [2026-05-30] SNIPER DCA 보수화 (AUTOLOOP 4️⃣ 패턴 일관): add 0.5→0.4, depth 1.0→2.0
+            # [2026-05-30] Make SNIPER DCA more conservative (consistent with AUTOLOOP 4️⃣ pattern): add 0.5->0.4, depth 1.0->2.0
             "dca_step_pct": float(_get("sniper_dca_step_pct", 0.2)),
             "dca_add_ratio": float(_get("sniper_dca_add_ratio", 0.4)),
             "dca_max_depth_pct": float(_get("sniper_dca_max_depth_pct", 2.0)),
@@ -578,7 +578,7 @@ def _apply_settings(system: Any, patch: Dict[str, Any]) -> Dict[str, Any]:
         if wh_n is not None:
             setattr(system, "reserved_whale_n", max(0, min(20, int(wh_n))))
 
-    # [2026-05-30] Per-strategy ON/OFF toggle (auto_slot 모드와 무관 적용 — 부모님이 언제든 끄고 켤 수 있게)
+    # [2026-05-30] Per-strategy ON/OFF toggle (applied regardless of auto_slot mode -- so the owner can toggle anytime)
     _pp_en = _b(patch.get("pingpong_enabled"), None)
     _al_en = _b(patch.get("autoloop_enabled"), None)
     _ld_en = _b(patch.get("ladder_enabled"), None)
@@ -712,7 +712,7 @@ def _apply_settings(system: Any, patch: Dict[str, Any]) -> Dict[str, Any]:
     if idm is not None:
         setattr(system, "autopilot_idle_demote_min", max(0, int(idm)))
     
-    # [2026-02-01] 24시간 무거래 → LongHold 자동 전환
+    # [2026-02-01] 24h no-trade -> auto-switch to LongHold
     itl_en = _b(ap.get("idle_to_longhold_enabled"), None)
     itl_hrs = _i(ap.get("idle_to_longhold_hours"), None)
     if itl_en is not None:
@@ -773,7 +773,7 @@ def _apply_settings(system: Any, patch: Dict[str, Any]) -> Dict[str, Any]:
     if sma is not None:
         setattr(system, "autopilot_signal_miss_min_attempts", max(1, int(sma)))
 
-    # 전략별 AutoApprove
+    # Per-strategy AutoApprove
     aa_pp = _b(ap.get("auto_approve_pingpong"), None)
     aa_al = _b(ap.get("auto_approve_autoloop"), None)
     aa_ld = _b(ap.get("auto_approve_ladder"), None)
@@ -799,8 +799,8 @@ def _apply_settings(system: Any, patch: Dict[str, Any]) -> Dict[str, Any]:
     if aa_wh is not None:
         setattr(system, "autopilot_auto_approve_whale", bool(aa_wh))
 
-    # 전략별 최소 신뢰도 %
-    # [FIX 2026-03-23] "whale" 추가 — 재시작 시 confidence가 기본값으로 리셋되던 버그
+    # Per-strategy minimum confidence %
+    # [FIX 2026-03-23] Added "whale" -- bug where confidence reset to default on restart
     for _skey in ("pingpong", "autoloop", "ladder", "lightning", "gazua", "contrarian", "sniper", "whale"):
         _mc_val = _f(ap.get(f"auto_approve_min_confidence_{_skey}"), None)
         if _mc_val is not None:
@@ -812,14 +812,14 @@ def _apply_settings(system: Any, patch: Dict[str, Any]) -> Dict[str, Any]:
     if aes is not None:
         setattr(system, "auto_engine_start", bool(aes))
     
-    # [2026-02-04] LongHold 목표 달성 시 자동 매도
+    # [2026-02-04] Auto-sell when LongHold target is reached
     lhas = _b(ap.get("longhold_auto_sell"), None)
     lh_target = _f(ap.get("longhold_target_pct"), None)
     lh_interval = _f(ap.get("longhold_check_interval_min"), None)
     lh_sl = _f(ap.get("longhold_stop_loss_pct"), None)
 
     if lhas is not None or lh_target is not None or lh_interval is not None or lh_sl is not None:
-        # longhold_config.json의 defaults에 저장
+        # Save into the defaults of longhold_config.json
         try:
             ladder_mgr = getattr(system, "ladder_manager", None)
             if ladder_mgr:
@@ -837,7 +837,7 @@ def _apply_settings(system: Any, patch: Dict[str, Any]) -> Dict[str, Any]:
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
             logger.warning("Failed to save LongHold config defaults", exc_info=True)
     
-    # [2026-02-04] Global Profit Take 설정
+    # [2026-02-04] Global Profit Take settings
     gpt_enabled = _b(ap.get("global_profit_take"), None)
     gpt_pct = _f(ap.get("global_profit_pct"), None)
     gpt_interval = _f(ap.get("global_profit_interval_min"), None)
@@ -873,7 +873,7 @@ def _apply_settings(system: Any, patch: Dict[str, Any]) -> Dict[str, Any]:
         except (KeyError, AttributeError, TypeError) as exc:
             logger.warning("Failed to apply global min SL to current contexts", exc_info=True)
     
-    # [2026-02-04] 백테스트 가중치
+    # [2026-02-04] Backtest weights
     bw = patch.get("backtest_weights")
     if isinstance(bw, dict):
         for strategy_key, value in [
@@ -892,7 +892,7 @@ def _apply_settings(system: Any, patch: Dict[str, Any]) -> Dict[str, Any]:
                 except (TypeError, ValueError) as exc:
                     logger.warning("Failed to set backtest weight for strategy", exc_info=True)
 
-    # [2026-03-23] 수익 자동 락인 (④ Profit Lock)
+    # [2026-03-23] Auto profit lock (④ Profit Lock)
     pl_enabled = _b(ap.get("profit_lock_enabled"), None)
     if pl_enabled is not None:
         setattr(system, "profit_lock_enabled", bool(pl_enabled))
@@ -906,7 +906,7 @@ def _apply_settings(system: Any, patch: Dict[str, Any]) -> Dict[str, Any]:
     if pl_cooldown_h is not None:
         setattr(system, "profit_lock_cooldown_sec", max(60.0, float(pl_cooldown_h) * 3600.0))
 
-    # [2026-03-02] SNIPER DCA 설정 (flat keys from UI form)
+    # [2026-03-02] SNIPER DCA settings (flat keys from UI form)
     dca_step = _f(patch.get("sniper_dca_step_pct"), None)
     if dca_step is not None:
         v = max(0.1, min(5.0, dca_step))
@@ -968,7 +968,7 @@ def get_settings(request: Request) -> Dict[str, Any]:
     return {"ok": True, "settings": _settings_snapshot(system)}
 
 
-# ── [2026-06-01] 전략별 튜닝 오버라이드 (PINGPONG/AUTOLOOP/WHALE 등) — slot-fill 시 market_controls 가 읽어 적용 ──
+# ── [2026-06-01] Per-strategy tuning overrides (PINGPONG/AUTOLOOP/WHALE etc.) — read and applied by market_controls during slot-fill ──
 _PLUGIN_PARAMS_PATH = os.path.join("runtime", "strategy_plugin_params.json")
 
 
@@ -1001,7 +1001,7 @@ def set_plugin_params(request: Request, data: str = Query(..., description="JSON
         cur = {}
     if not isinstance(cur, dict):
         cur = {}
-    for k, v in incoming.items():   # top-level per-strategy merge (한 전략 저장이 다른 전략 안 지움)
+    for k, v in incoming.items():   # top-level per-strategy merge (saving one strategy does not wipe others)
         if isinstance(v, dict):
             cur[str(k).upper()] = v
     try:
@@ -1011,7 +1011,7 @@ def set_plugin_params(request: Request, data: str = Query(..., description="JSON
     except OSError as e:
         return {"ok": False, "error": str(e)}
     try:
-        request.app.state.system._plugin_params_override = cur   # 재시작 없이 다음 slot-fill 반영
+        request.app.state.system._plugin_params_override = cur   # reflected in the next slot-fill without restart
     except (AttributeError, TypeError):
         logger.warning("set_plugin_params: cache update failed", exc_info=True)
     return {"ok": True, "params": cur}
@@ -1036,7 +1036,7 @@ def set_settings(
     sniper_n: Optional[int] = Query(None, ge=0, le=10, description="Number of SNIPER candidates"),
     snipers_n: Optional[int] = Query(None, ge=0, le=20, description="Number of SNIPER(s) scope slots"),
     whale_n: Optional[int] = Query(None, ge=0, le=20, description="Number of WHALE candidates"),
-    # [2026-05-30] Per-strategy ON/OFF toggle (router signature — POST 받기 위해 필수)
+    # [2026-05-30] Per-strategy ON/OFF toggle (router signature -- required to accept the POST)
     pingpong_enabled: Optional[bool] = Query(None),
     autoloop_enabled: Optional[bool] = Query(None),
     ladder_enabled: Optional[bool] = Query(None),
@@ -1069,7 +1069,7 @@ def set_settings(
     autopilot_idle_demote_min: Optional[int] = Query(None, ge=0, le=24 * 60),
     autopilot_idle_demote_overrides: Optional[str] = Query(None), # JSON string
     
-    # [2026-02-01] 24시간 무거래 → LongHold 자동 전환
+    # [2026-02-01] 24h no-trade -> auto-switch to LongHold
     autopilot_idle_to_longhold_enabled: Optional[bool] = Query(None),
     autopilot_idle_to_longhold_hours: Optional[int] = Query(None, ge=1, le=168),
     
@@ -1101,7 +1101,7 @@ def set_settings(
     autopilot_signal_miss_window_min: Optional[int] = Query(None, ge=0, le=24 * 60),
     autopilot_signal_miss_min_attempts: Optional[int] = Query(None, ge=0, le=999),
 
-    # 전략별 AutoApprove
+    # Per-strategy AutoApprove
     auto_approve_pingpong: Optional[bool] = Query(None),
     auto_approve_autoloop: Optional[bool] = Query(None),
     auto_approve_ladder: Optional[bool] = Query(None),
@@ -1111,7 +1111,7 @@ def set_settings(
     auto_approve_sniper: Optional[bool] = Query(None),
     auto_approve_whale: Optional[bool] = Query(None),
 
-    # 전략별 최소 신뢰도 %
+    # Per-strategy minimum confidence %
     auto_approve_min_confidence_pingpong: Optional[float] = Query(None, ge=0, le=100),
     auto_approve_min_confidence_autoloop: Optional[float] = Query(None, ge=0, le=100),
     auto_approve_min_confidence_ladder: Optional[float] = Query(None, ge=0, le=100),
@@ -1124,19 +1124,19 @@ def set_settings(
     # [2026-02-02] Auto Engine Start on Boot
     auto_engine_start: Optional[bool] = Query(None),
     
-    # [2026-02-04] LongHold 목표 달성 시 자동 매도
+    # [2026-02-04] Auto-sell when LongHold target is reached
     longhold_auto_sell: Optional[bool] = Query(None),
     longhold_target_pct: Optional[float] = Query(None),
     longhold_check_interval_min: Optional[float] = Query(None),
     longhold_stop_loss_pct: Optional[float] = Query(None),
     
-    # [2026-02-04] Global Profit Take: 모든 ACTIVE 코인 강제 매도
+    # [2026-02-04] Global Profit Take: force-sell all ACTIVE coins
     global_profit_take: Optional[bool] = Query(None),
     global_profit_pct: Optional[float] = Query(None),
     global_profit_interval_min: Optional[float] = Query(None),
     global_min_sl_pct: Optional[float] = Query(None),
     
-    # [2026-02-04] 백테스트 가중치 (0.0~1.0)
+    # [2026-02-04] Backtest weights (0.0~1.0)
     backtest_weight_pingpong: Optional[float] = Query(None, ge=0.0, le=1.0),
     backtest_weight_autoloop: Optional[float] = Query(None, ge=0.0, le=1.0),
     backtest_weight_ladder: Optional[float] = Query(None, ge=0.0, le=1.0),
@@ -1150,8 +1150,8 @@ def set_settings(
     sniper_dca_step_pct: Optional[float] = Query(None, ge=0.1, le=5.0, description="SNIPER DCA step %"),
     sniper_dca_add_ratio: Optional[float] = Query(None, ge=0.1, le=2.0, description="SNIPER DCA add ratio"),
     sniper_dca_max_depth_pct: Optional[float] = Query(None, ge=0.2, le=10.0, description="SNIPER DCA max depth %"),
-    # [2026-06-01] 수익 자동 락인 — GET snapshot(461~) 엔 있으나 POST 미노출이던 누락 보완.
-    # _apply_settings(896~) 가 이미 ap 에서 읽어 적용하므로, 시그니처+patch 만 연결하면 됨 (중복 X).
+    # [2026-06-01] Auto profit lock -- present in the GET snapshot (461+) but was missing from the POST surface.
+    # _apply_settings (896+) already reads and applies from ap, so we just need to wire up the signature + patch (no duplication).
     profit_lock_enabled: Optional[bool] = Query(None),
     profit_lock_trigger_pct: Optional[float] = Query(None, ge=1.0, le=100.0),
     profit_lock_sell_ratio: Optional[float] = Query(None, ge=0.05, le=0.95),
@@ -1194,7 +1194,7 @@ def set_settings(
         "sniper_n": sniper_n,
         "snipers_n": snipers_n,
         "whale_n": whale_n,
-        # [2026-05-30] Per-strategy ON/OFF toggle (patch dict — _apply_settings 에 전달)
+        # [2026-05-30] Per-strategy ON/OFF toggle (patch dict -- passed to _apply_settings)
         "pingpong_enabled": pingpong_enabled,
         "autoloop_enabled": autoloop_enabled,
         "ladder_enabled": ladder_enabled,
@@ -1224,7 +1224,7 @@ def set_settings(
             "idle_demote_min": idm_val,
             "idle_demote_overrides": ido_dict,
             
-            # [2026-02-01] 24시간 무거래 → LongHold 자동 전환
+            # [2026-02-01] 24h no-trade -> auto-switch to LongHold
             "idle_to_longhold_enabled": autopilot_idle_to_longhold_enabled,
             "idle_to_longhold_hours": autopilot_idle_to_longhold_hours,
             
@@ -1254,7 +1254,7 @@ def set_settings(
             "auto_approve_sniper": auto_approve_sniper,
             "auto_approve_whale": auto_approve_whale,
 
-            # 전략별 최소 신뢰도 %
+            # Per-strategy minimum confidence %
             "auto_approve_min_confidence_pingpong": auto_approve_min_confidence_pingpong,
             "auto_approve_min_confidence_autoloop": auto_approve_min_confidence_autoloop,
             "auto_approve_min_confidence_ladder": auto_approve_min_confidence_ladder,
@@ -1267,7 +1267,7 @@ def set_settings(
             # [2026-02-02] Auto Engine Start on Boot
             "auto_engine_start": auto_engine_start,
             
-            # [2026-02-04] LongHold 목표 달성 시 자동 매도
+            # [2026-02-04] Auto-sell when LongHold target is reached
             "longhold_auto_sell": longhold_auto_sell,
             "longhold_target_pct": longhold_target_pct,
             "longhold_check_interval_min": longhold_check_interval_min,
@@ -1278,13 +1278,13 @@ def set_settings(
             "global_profit_pct": global_profit_pct,
             "global_profit_interval_min": global_profit_interval_min,
             "global_min_sl_pct": global_min_sl_pct,
-            # [2026-06-01] 수익 자동 락인 (④) — _apply_settings:896 가 ap 에서 읽어 system attr 에 적용
+            # [2026-06-01] Auto profit lock (④) -- _apply_settings:896 reads from ap and applies to system attrs
             "profit_lock_enabled": profit_lock_enabled,
             "profit_lock_trigger_pct": profit_lock_trigger_pct,
             "profit_lock_sell_ratio": profit_lock_sell_ratio,
             "profit_lock_cooldown_h": profit_lock_cooldown_h,
         },
-        # [2026-02-04] 백테스트 가중치
+        # [2026-02-04] Backtest weights
         "backtest_weights": {
             "pingpong": backtest_weight_pingpong,
             "autoloop": backtest_weight_autoloop,
@@ -1314,8 +1314,8 @@ def set_settings(
 def list_reserved() -> Dict[str, Any]:
     """
     Get the current reserved queue snapshot including all pending candidates.
-    2026-01-30: RSI/MACD 갱신 제거 - 속도 최적화
-    필요시 별도 API로 요청하거나, background job에서 갱신
+    2026-01-30: Removed RSI/MACD refresh - speed optimization
+    If needed, request via a separate API or refresh in a background job
     """
     snap = reserved_queue.snapshot()
     return {"ok": True, **snap}
@@ -1544,12 +1544,12 @@ def approve_reserved(
         return {"ok": False, "error": "oma_set_failed", "message": str(e), "item": it}
 
     # 2) Persist intended strategy mode on the market context
-    # 추천 파라미터(TP/SL, step_pct 등)를 엔진 컨트롤에 적용
+    # Apply recommended params (TP/SL, step_pct, etc.) to the engine controls
     recommended_params = it.get("recommended_params") or {}
     applied_params = {}
     try:
         applied_controls = apply_engine_controls(system, market, strategy, recommended_params)
-        # 실제 적용된 파라미터 추출
+        # Extract the params that were actually applied
         strat_params = applied_controls.get("strategy", {}).get("params", {})
         if strat_params:
             applied_params = {
@@ -1562,10 +1562,10 @@ def approve_reserved(
                 "rsi_sell": strat_params.get("rsi_sell"),
                 "manual_exit": strat_params.get("manual_exit"),
             }
-            # None 값 제거
+            # Drop None values
             applied_params = {k: v for k, v in applied_params.items() if v is not None}
     except (KeyError, AttributeError, TypeError) as exc:
-        logger.warning("[RESERVED_API] None 값 제거: %s", exc, exc_info=True)
+        logger.warning("[RESERVED_API] drop None values: %s", exc, exc_info=True)
 
     # Log approval (best-effort)
     try:
@@ -1619,7 +1619,7 @@ async def autopilot_run(
     """
     system = request.app.state.system
 
-    # [FIX] AutopilotManager가 있으면 그쪽 step() 사용 (중복 실행 방지)
+    # [FIX] If an AutopilotManager exists, use its step() (prevents duplicate execution)
     autopilot_mgr = getattr(system, "autopilot_manager", None)
     if autopilot_mgr is not None and hasattr(autopilot_mgr, "step"):
         try:
@@ -1629,7 +1629,7 @@ async def autopilot_run(
             try:
                 system.ledger.append("AUTOPILOT_RUN_ERROR", error=str(e))
             except (AttributeError, TypeError, ValueError) as exc:
-                logger.warning("[RESERVED_API] [FIX] AutopilotManager가 있으면 그쪽 step() 사용 (중복 실행 방지): %s", exc, exc_info=True)
+                logger.warning("[RESERVED_API] [FIX] use AutopilotManager.step() if present (prevent duplicate execution): %s", exc, exc_info=True)
             return {"ok": False, "error": "autopilot_failed", "message": str(e), "settings": _settings_snapshot(system)}
     
     # Fallback: Some deployments may not include autopilot yet.
@@ -1650,13 +1650,13 @@ async def autopilot_run(
 
 @router.post(
     "/enqueue",
-    summary="추천 코인을 reserved_queue 앞줄에 수동 등록 (autopilot 우선 검토)",
+    summary="Manually enqueue a recommended coin at the front of reserved_queue (autopilot reviews it first)",
     responses={200: {"description": "Enqueued"}},
 )
 def reserved_enqueue(request: Request, item: Dict[str, Any]) -> Dict[str, Any]:
-    """추천 코인을 reserved_queue 앞줄(우선)에 등록 → autopilot 이 해당 전략(PINGPONG/AUTOLOOP 등) 로직으로 검토·진입.
+    """Enqueue a recommended coin at the front (priority) of reserved_queue -> autopilot reviews and enters it using that strategy's (PINGPONG/AUTOLOOP, etc.) logic.
 
-    ★ 반자동: autopilot 의 AI·conviction 게이트는 그대로 적용 (무조건 진입 아님 — 네가 고른 코인이 줄 앞에 서고, 품질 통과 시 그 로직으로 진입).
+    ★ Semi-automatic: autopilot's AI/conviction gates still apply (not an unconditional entry -- your chosen coin goes to the front of the line and is entered via that logic only if it passes quality checks).
     """
     try:
         if not isinstance(item, dict) or not item:
@@ -1669,14 +1669,14 @@ def reserved_enqueue(request: Request, item: Dict[str, Any]) -> Dict[str, Any]:
         it["market"] = market
         it["strategy"] = strategy
         it["recommended_strategy"] = strategy
-        # confidence 게이트용 — 추천 아이템엔 confidence 키가 없을 수 있어 adjusted/ai_score 로 매핑
+        # for the confidence gate -- recommended items may lack a confidence key, so map from adjusted/ai_score
         if not it.get("confidence"):
             try:
                 it["confidence"] = float(it.get("ai_adjusted_score") or it.get("ai_score") or 0.0)
             except (TypeError, ValueError):
                 it["confidence"] = 0.0
         it["manual_enqueue"] = True
-        rid = reserved_queue.push(it, front=True)   # front=True → 우선순위(줄 앞)
+        rid = reserved_queue.push(it, front=True)   # front=True -> priority (front of the line)
         try:
             request.app.state.system.ledger.append("RESERVED_MANUAL_ENQUEUE", market=market, strategy=strategy, rid=rid)
         except (AttributeError, TypeError, ValueError):

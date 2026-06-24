@@ -7,18 +7,18 @@ Enriches reserved queue items with multi-metric rank_score using
 5m candle data for market microstructure analysis.
 
 PINGPONG rank_score (tight spread, oscillation, depth focus):
-  spread_tightness  30%  — 좁은 스프레드 선호
-  oscillation_freq  25%  — 가격 진동 빈도 (횡보 적합)
-  book_depth        20%  — 호가 두께
-  trade_velocity    15%  — 거래 빈도
-  vol_consistency   10%  — 거래량 안정성
+  spread_tightness  30%  — prefers tight spreads
+  oscillation_freq  25%  — price oscillation frequency (suits ranging markets)
+  book_depth        20%  — order book depth
+  trade_velocity    15%  — trade frequency
+  vol_consistency   10%  — volume stability
 
 AUTOLOOP rank_score (range, cycle clarity, trend focus):
-  range_ratio       30%  — 고저 진폭 (넓을수록 유리)
-  cycle_clarity     25%  — 지지/저항 반복 패턴 명확도
-  vol_trend         20%  — 거래량 증가 추세
-  swing_regularity  15%  — 변동 주기 규칙성
-  mean_reversion    10%  — 평균 회귀 강도 (BB 기반)
+  range_ratio       30%  — high/low amplitude (wider is better)
+  cycle_clarity     25%  — clarity of support/resistance repetition patterns
+  vol_trend         20%  — rising volume trend
+  swing_regularity  15%  — regularity of swing cycles
+  mean_reversion    10%  — mean-reversion strength (BB based)
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 # Candle cache: market -> (candles, fetch_ts)
 _candle_cache: Dict[str, Tuple[List[Dict[str, Any]], float]] = {}
-_CANDLE_CACHE_TTL = 300.0  # 5분
+_CANDLE_CACHE_TTL = 300.0  # 5min
 _STAGE2_LIMIT = 20
 
 def _sf(x: Any, default: float = 0.0) -> float:
@@ -115,7 +115,7 @@ def _fetch_candles_5m(
 # Metric Computations
 # ────────────────────────────────────────────
 def _oscillation_freq(closes: List[float]) -> float:
-    """방향 전환 빈도 (0‑1). 높을수록 횡보 적합."""
+    """Direction-change frequency (0‑1). Higher suits ranging markets."""
     if len(closes) < 3:
         return 0.0
     changes = 0
@@ -127,7 +127,7 @@ def _oscillation_freq(closes: List[float]) -> float:
     return changes / max(1, len(closes) - 2)
 
 def _vol_consistency(volumes: List[float]) -> float:
-    """거래량 안정성 (0‑1). 높을수록 안정적."""
+    """Volume stability (0‑1). Higher is more stable."""
     if len(volumes) < 3:
         return 0.5
     mean_v = sum(volumes) / len(volumes)
@@ -138,7 +138,7 @@ def _vol_consistency(volumes: List[float]) -> float:
     return max(0.0, min(1.0, 1.0 - cv))
 
 def _cycle_clarity(closes: List[float]) -> float:
-    """반복 패턴 명확도 — 디트렌드 자기상관 (0‑1)."""
+    """Repetition-pattern clarity — detrended autocorrelation (0‑1)."""
     n = len(closes)
     if n < 12:
         return 0.0
@@ -160,7 +160,7 @@ def _cycle_clarity(closes: List[float]) -> float:
     return max(0.0, min(1.0, abs(cov / var_d)))
 
 def _vol_trend(volumes: List[float]) -> float:
-    """거래량 추세 — 선형 회귀 기울기 정규화 (0‑1)."""
+    """Volume trend — normalized linear-regression slope (0‑1)."""
     n = len(volumes)
     if n < 5:
         return 0.5
@@ -177,7 +177,7 @@ def _vol_trend(volumes: List[float]) -> float:
     return max(0.0, min(1.0, 0.5 + rel_slope * 10.0))
 
 def _swing_regularity(closes: List[float]) -> float:
-    """변동 주기 규칙성 — 극값 간격 일관성 (0‑1)."""
+    """Swing-cycle regularity — consistency of extrema intervals (0‑1)."""
     if len(closes) < 10:
         return 0.0
     extrema_idx: List[int] = []
@@ -196,7 +196,7 @@ def _swing_regularity(closes: List[float]) -> float:
     return max(0.0, min(1.0, 1.0 - cv))
 
 def _mean_reversion(closes: List[float]) -> float:
-    """평균 회귀 강도 — 중심선 교차 빈도 (0‑1)."""
+    """Mean-reversion strength — midline crossing frequency (0‑1)."""
     if len(closes) < 20:
         return 0.0
     window = closes[-20:]
@@ -213,7 +213,7 @@ def _mean_reversion(closes: List[float]) -> float:
 # Percentile Normalization
 # ────────────────────────────────────────────
 def _percentile_normalize(values: List[float]) -> List[float]:
-    """값 → 백분위 순위 (0‑1). 동점은 평균 순위 배정."""
+    """Values → percentile rank (0‑1). Ties get the average rank."""
     n = len(values)
     if n <= 1:
         return [0.5] * n
@@ -221,7 +221,7 @@ def _percentile_normalize(values: List[float]) -> List[float]:
     raw_ranks = [0.0] * n
     for rank, idx in enumerate(sorted_idx):
         raw_ranks[idx] = float(rank)
-    # 동점 처리: 같은 값이면 평균 순위
+    # Tie handling: equal values get the average rank
     from itertools import groupby
     groups: Dict[float, List[int]] = {}
     for i, v in enumerate(values):
@@ -240,7 +240,7 @@ def _percentile_normalize(values: List[float]) -> List[float]:
 def _extract_candle_data(
     candles: List[Dict[str, Any]],
 ) -> Tuple[List[float], List[float], List[float], List[float]]:
-    """Bybit 캔들(최신 먼저) → 시간순 close/high/low/volume."""
+    """Bybit candles (newest first) → chronological close/high/low/volume."""
     ordered = list(reversed(candles))
     closes = [_sf(c.get("trade_price"), 0.0) for c in ordered if c.get("trade_price")]
     highs = [_sf(c.get("high_price"), 0.0) for c in ordered if c.get("high_price")]
@@ -380,14 +380,14 @@ def _apply_autoloop_ranks(
 # Public API
 # ────────────────────────────────────────────
 def enrich_pp_al_rank_scores(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """PINGPONG/AUTOLOOP 아이템에 고급 rank_score 추가.
+    """Add advanced rank_score to PINGPONG/AUTOLOOP items.
 
-    autopilot_manager가 scan 후 reserved_queue.replace() 전에 호출.
-    다른 전략 아이템은 그대로 통과.
+    Called by autopilot_manager after scan, before reserved_queue.replace().
+    Items of other strategies pass through unchanged.
 
     Two-Stage:
-      Stage 1: build_reserved_candidates에서 이미 필터링됨
-      Stage 2: 상위 후보에 대해 5m 캔들 fetch → 고급 메트릭 계산
+      Stage 1: already filtered in build_reserved_candidates
+      Stage 2: fetch 5m candles for top candidates → compute advanced metrics
     """
     pp_items: List[Dict[str, Any]] = []
     al_items: List[Dict[str, Any]] = []

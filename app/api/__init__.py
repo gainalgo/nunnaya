@@ -3,7 +3,7 @@
 # API Package Init
 # ============================================================
 
-# (비어 있어도 되는 파일이지만, 명확하게 표시)
+# (This file may be empty, but kept explicit for clarity)
 """
 Autocoin Step-H API Routers Package
 """

@@ -2,7 +2,7 @@
 # File: app/backtest/strategy_simulator.py
 # Autocoin OS v3-H — Strategy Simulator for Backtesting
 # ------------------------------------------------------------
-# 각 전략별 매매 시그널 생성 (간소화된 로직)
+# Generate trade signals per strategy (simplified logic)
 # ============================================================
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class StrategySimulator:
-    """전략 시뮬레이터 (백테스팅용) - 간소화된 독립 로직"""
+    """Strategy simulator (for backtesting) - simplified standalone logic"""
     
     def __init__(self, strategy_name: str):
         self.strategy_name = strategy_name.upper()
@@ -29,14 +29,14 @@ class StrategySimulator:
         candles: List[Dict[str, Any]],
         current_idx: int
     ) -> Optional[Dict[str, Any]]:
-        """진입 시그널 생성
-        
+        """Generate entry signal
+
         Args:
-            candles: 캔들 데이터 (과거부터 정렬)
-            current_idx: 현재 캔들 인덱스
-        
+            candles: candle data (sorted oldest to newest)
+            current_idx: current candle index
+
         Returns:
-            진입 시그널 정보 또는 None
+            Entry signal info or None
             {
                 "entry_price": float,
                 "tp_pct": float,
@@ -44,21 +44,21 @@ class StrategySimulator:
                 "reason": str
             }
         """
-        if current_idx < 20:  # 최소 20개 캔들 필요 (지표 계산용)
+        if current_idx < 20:  # need at least 20 candles (for indicator calc)
             return None
-        
-        # 현재까지의 캔들로 컨텍스트 구성
+
+        # Build context from candles up to now
         recent_candles = candles[max(0, current_idx - 100):current_idx + 1]
         current_candle = candles[current_idx]
-        
+
         try:
-            # 가격 및 지표 계산
+            # Price and indicator calculation
             close_prices = [c["trade_price"] for c in recent_candles]
             volumes = [c["candle_acc_trade_volume"] for c in recent_candles]
-            
+
             current_price = current_candle["trade_price"]
-            
-            # 전략별 진입 조건 체크 (간단 버전)
+
+            # Check entry conditions per strategy (simple version)
             if self.strategy_name == "PINGPONG":
                 return self._check_pingpong_entry(close_prices, current_price)
             elif self.strategy_name == "AUTOLOOP":
@@ -80,14 +80,14 @@ class StrategySimulator:
         return None
     
     def _check_pingpong_entry(self, prices: List[float], current_price: float) -> Optional[Dict]:
-        """PINGPONG 진입 조건 (단순 버전)"""
+        """PINGPONG entry condition (simple version)"""
         if len(prices) < 20:
             return None
-        
-        # 20일 평균
+
+        # 20-period average
         ma20 = sum(prices[-20:]) / 20
-        
-        # 가격이 평균 아래 2% → 진입
+
+        # Price 2% below average → enter
         if current_price < ma20 * 0.98:
             return {
                 "entry_price": current_price,
@@ -99,16 +99,16 @@ class StrategySimulator:
         return None
     
     def _check_autoloop_entry(self, prices: List[float], current_price: float) -> Optional[Dict]:
-        """AUTOLOOP 진입 조건"""
+        """AUTOLOOP entry condition"""
         if len(prices) < 30:
             return None
-        
-        # 변동성 체크
+
+        # Volatility check
         recent_high = max(prices[-30:])
         recent_low = min(prices[-30:])
         volatility = (recent_high - recent_low) / recent_low * 100
-        
-        # 변동성 10% 이상 + 중간 가격대
+
+        # Volatility >= 10% + mid price range
         mid_price = (recent_high + recent_low) / 2
         
         if volatility >= 10 and abs(current_price - mid_price) / mid_price < 0.05:
@@ -122,15 +122,15 @@ class StrategySimulator:
         return None
     
     def _check_ladder_entry(self, prices: List[float], current_price: float) -> Optional[Dict]:
-        """LADDER 진입 조건 (하락 추세)"""
+        """LADDER entry condition (downtrend)"""
         if len(prices) < 20:
             return None
-        
-        # 최근 10일 하락 추세
+
+        # Recent 10-period downtrend
         ma10_old = sum(prices[-20:-10]) / 10
         ma10_new = sum(prices[-10:]) / 10
-        
-        if ma10_new < ma10_old * 0.95:  # 5% 하락
+
+        if ma10_new < ma10_old * 0.95:  # 5% drop
             return {
                 "entry_price": current_price,
                 "tp_pct": 10.0,
@@ -141,14 +141,14 @@ class StrategySimulator:
         return None
     
     def _check_lightning_entry(self, prices: List[float], volumes: List[float], current_price: float) -> Optional[Dict]:
-        """LIGHTNING 진입 조건 (급등)"""
+        """LIGHTNING entry condition (surge)"""
         if len(prices) < 10:
             return None
-        
-        # 최근 5분봉 급등 체크 (2% 이상)
+
+        # Check recent 5-bar surge (>= 2%)
         price_change = (prices[-1] - prices[-5]) / prices[-5] * 100
-        
-        # 거래량 급증
+
+        # Volume spike
         avg_volume = sum(volumes[-20:-5]) / 15 if len(volumes) >= 20 else sum(volumes) / len(volumes)
         current_volume = volumes[-1]
         
@@ -163,14 +163,14 @@ class StrategySimulator:
         return None
     
     def _check_gazua_entry(self, prices: List[float], current_price: float) -> Optional[Dict]:
-        """GAZUA 진입 조건 (강한 상승)"""
+        """GAZUA entry condition (strong uptrend)"""
         if len(prices) < 30:
             return None
-        
-        # 최근 20일 상승 추세
+
+        # Recent 20-period uptrend
         ma20 = sum(prices[-20:]) / 20
-        
-        if current_price > ma20 * 1.1:  # 평균 대비 10% 상승
+
+        if current_price > ma20 * 1.1:  # 10% above average
             return {
                 "entry_price": current_price,
                 "tp_pct": 25.0,
@@ -181,11 +181,11 @@ class StrategySimulator:
         return None
     
     def _check_contrarian_entry(self, prices: List[float], current_price: float) -> Optional[Dict]:
-        """CONTRARIAN 진입 조건 (과매도)"""
+        """CONTRARIAN entry condition (oversold)"""
         if len(prices) < 30:
             return None
-        
-        # RSI 계산 (간단 버전)
+
+        # RSI calculation (simple version)
         changes = [prices[i] - prices[i-1] for i in range(1, len(prices))]
         gains = [max(c, 0) for c in changes[-14:]]
         losses = [abs(min(c, 0)) for c in changes[-14:]]
@@ -199,26 +199,26 @@ class StrategySimulator:
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
         
-        # RSI < 30 (과매도)
+        # RSI < 30 (oversold)
         if rsi < 30:
             return {
                 "entry_price": current_price,
                 "tp_pct": 15.0,
-                "sl_pct": -70.0,  # 극한 SL
+                "sl_pct": -70.0,  # extreme SL
                 "reason": "oversold"
             }
         
         return None
     
     def _check_sniper_entry(self, prices: List[float], current_price: float) -> Optional[Dict]:
-        """SNIPER 진입 조건 (급등 초기)"""
+        """SNIPER entry condition (early surge)"""
         if len(prices) < 20:
             return None
-        
-        # 최근 3분봉 급등 (1.5% 이상)
+
+        # Recent 3-bar surge (>= 1.5%)
         price_change = (prices[-1] - prices[-3]) / prices[-3] * 100
-        
-        # EMA 위에 있음
+
+        # Above EMA
         ema20 = self._calc_ema(prices, 20)
         
         if price_change >= 1.5 and current_price > ema20:
@@ -232,7 +232,7 @@ class StrategySimulator:
         return None
     
     def _calc_ema(self, prices: List[float], period: int) -> float:
-        """EMA 계산"""
+        """EMA calculation"""
         if len(prices) < period:
             return sum(prices) / len(prices)
         

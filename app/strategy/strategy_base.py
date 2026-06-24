@@ -8,7 +8,7 @@ Signal = Literal["buy", "sell", "hold", "reserve"]
 
 @dataclass
 class Decision:
-    """전략 판단의 공통 결과 구조."""
+    """Common result structure for strategy decisions."""
 
     signal: Signal = "hold"
     reason: str = ""
@@ -16,7 +16,7 @@ class Decision:
 
 
 class StrategyPlugin:
-    """전략 플러그인 기본 클래스."""
+    """Base class for strategy plugins."""
 
     name: str = "base"
 

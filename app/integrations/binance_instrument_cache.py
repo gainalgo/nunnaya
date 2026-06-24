@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Binance Instrument Cache — 심볼별 거래 규칙 캐시 (spot / linear(USDT-M 선물) 분리).
+"""Binance Instrument Cache — per-symbol trading rules cache (spot / linear(USDT-M futures) split).
 
-Bybit 의 BybitInstrumentCache 미러. exchangeInfo 의 filters 를 파싱해
-tickSize / stepSize / minQty / minNotional 을 제공한다. 키 불필요(public).
+Mirror of Bybit's BybitInstrumentCache. Parses the filters in exchangeInfo to
+provide tickSize / stepSize / minQty / minNotional. No API key required (public).
 """
 from __future__ import annotations
 

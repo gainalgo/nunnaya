@@ -2,10 +2,10 @@
 # File: app/manager/ai_position_sizing.py
 # Autocoin OS v3-H — AI Confidence-Based Position Sizing
 # ------------------------------------------------------------
-# 목적:
-# - AI 예측 신뢰도에 따른 포지션 크기 조정
-# - 신뢰도 높으면 예산 증액
-# - 신뢰도 낮으면 예산 감액
+# Purpose:
+# - Adjust position size based on AI prediction confidence
+# - Higher confidence -> larger budget
+# - Lower confidence -> smaller budget
 # ============================================================
 
 from __future__ import annotations
@@ -16,27 +16,27 @@ from typing import Any, Dict, Optional, Tuple
 
 @dataclass
 class AISignal:
-    """AI 신호 데이터."""
+    """AI signal data."""
     market: str
-    
-    # 핵심 예측
-    prediction: float = 0.5      # 0.0 = 강한 하락, 1.0 = 강한 상승
-    confidence: float = 0.5      # 0.0 = 불확실, 1.0 = 확실
-    
-    # 보조 지표
+
+    # Core prediction
+    prediction: float = 0.5      # 0.0 = strong down, 1.0 = strong up
+    confidence: float = 0.5      # 0.0 = uncertain, 1.0 = certain
+
+    # Auxiliary indicators
     momentum: float = 0.0
     volatility: float = 0.0
     trend: float = 0.0
     rsi: float = 50.0
-    
-    # 메타
+
+    # Meta
     model_version: str = ""
     timestamp: float = 0.0
 
 
 @dataclass
 class SizingDecision:
-    """포지션 사이징 결정."""
+    """Position sizing decision."""
     market: str
     base_budget: float
     adjusted_budget: float
@@ -47,13 +47,13 @@ class SizingDecision:
 
 
 class AIPositionSizer:
-    """AI 신뢰도 기반 포지션 사이저.
-    
-    신뢰도 티어:
-    - HIGH (>0.8): +30% 예산
-    - MEDIUM (0.6-0.8): 기본 예산
-    - LOW (0.4-0.6): -20% 예산
-    - VERY_LOW (<0.4): -40% 예산 또는 진입 거부
+    """AI confidence-based position sizer.
+
+    Confidence tiers:
+    - HIGH (>0.8): +30% budget
+    - MEDIUM (0.6-0.8): base budget
+    - LOW (0.4-0.6): -20% budget
+    - VERY_LOW (<0.4): -40% budget or entry rejection
     """
 
     def __init__(
@@ -69,7 +69,7 @@ class AIPositionSizer:
         
         min_confidence_for_entry: float = 0.35,
         
-        # 추가 보정 요소
+        # Additional correction factors
         volatility_penalty_threshold: float = 0.05,
         momentum_boost_threshold: float = 0.5,
     ):
@@ -91,10 +91,10 @@ class AIPositionSizer:
         signal: AISignal,
         base_budget: float,
     ) -> SizingDecision:
-        """포지션 사이징 계산."""
+        """Calculate position sizing."""
         conf = signal.confidence
-        
-        # 티어 결정
+
+        # Determine tier
         if conf >= self.high_conf:
             tier = "high"
             base_mult = self.high_mult
@@ -108,17 +108,17 @@ class AIPositionSizer:
             tier = "very_low"
             base_mult = self.very_low_mult
         
-        # 보정 요소 적용
+        # Apply correction factors
         adjustments = []
         final_mult = base_mult
-        
-        # 1. 변동성 페널티
+
+        # 1. Volatility penalty
         if signal.volatility > self.volatility_penalty:
             vol_penalty = min(0.2, (signal.volatility - self.volatility_penalty) * 2)
             final_mult -= vol_penalty
             adjustments.append(f"vol_penalty:-{vol_penalty:.2f}")
         
-        # 2. 모멘텀 부스트 (같은 방향이면)
+        # 2. Momentum boost (when in the same direction)
         if signal.prediction > 0.5 and signal.momentum > self.momentum_boost:
             mom_boost = min(0.15, (signal.momentum - self.momentum_boost) * 0.3)
             final_mult += mom_boost
@@ -128,21 +128,21 @@ class AIPositionSizer:
             final_mult += mom_boost
             adjustments.append(f"momentum_boost:+{mom_boost:.2f}")
         
-        # 3. RSI 극단값 조정
+        # 3. RSI extreme adjustment
         if signal.rsi < 25 or signal.rsi > 75:
-            # 과매수/과매도 → 약간 보수적
+            # Overbought/oversold -> slightly conservative
             final_mult *= 0.9
             adjustments.append(f"rsi_extreme:{signal.rsi:.0f}")
-        
-        # 최소/최대 제한
+
+        # Min/max clamp
         final_mult = max(0.3, min(1.5, final_mult))
-        
+
         adjusted_budget = base_budget * final_mult
-        # [FIX 2026-01-23] round() → floor() + 최소주문 보장
-        # round()는 소수점 이하를 0으로 만들 수 있음
-        MIN_ORDER_USDT = 5.0  # Bybit 최소 주문 금액
-        adjusted_budget = int(adjusted_budget * 100) / 100  # USDT 0.01 단위
-        adjusted_budget = max(MIN_ORDER_USDT, adjusted_budget)  # 최소주문 보장
+        # [FIX 2026-01-23] round() -> floor() + guarantee minimum order
+        # round() can drop the value to zero below the decimal point
+        MIN_ORDER_USDT = 5.0  # Bybit minimum order amount
+        adjusted_budget = int(adjusted_budget * 100) / 100  # USDT 0.01 unit
+        adjusted_budget = max(MIN_ORDER_USDT, adjusted_budget)  # guarantee minimum order
         
         reason_parts = [f"conf:{conf:.2f}", f"tier:{tier}", f"mult:{final_mult:.2f}"]
         if adjustments:
@@ -167,17 +167,17 @@ class AIPositionSizer:
         )
 
     def should_enter(self, signal: AISignal) -> Tuple[bool, str]:
-        """진입 여부 결정."""
+        """Decide whether to enter."""
         if signal.confidence < self.min_confidence:
             return (False, f"low_confidence:{signal.confidence:.2f}<{self.min_confidence}")
-        
-        # 예측 방향과 현재 상태 일치 여부
+
+        # Whether prediction direction matches current state
         if signal.prediction > 0.5:
-            # 상승 예측
+            # Up prediction
             if signal.momentum < -0.5:
                 return (False, "prediction_momentum_conflict:up_pred_but_strong_down_mom")
         else:
-            # 하락 예측
+            # Down prediction
             if signal.momentum > 0.5:
                 return (False, "prediction_momentum_conflict:down_pred_but_strong_up_mom")
         
@@ -187,8 +187,8 @@ class AIPositionSizer:
         self,
         signal: AISignal,
     ) -> Tuple[str, float, str]:
-        """신호 기반 전략 추천.
-        
+        """Recommend a strategy based on the signal.
+
         Returns:
             (strategy, confidence, reason)
         """
@@ -197,19 +197,19 @@ class AIPositionSizer:
         vol = signal.volatility
         mom = signal.momentum
         
-        # 높은 신뢰도 + 강한 상승 예측 → LIGHTNING
+        # High confidence + strong up prediction -> LIGHTNING
         if conf > 0.75 and pred > 0.7 and mom > 0.3:
             return ("LIGHTNING", conf, "high_conf_bullish")
-        
-        # 높은 신뢰도 + 강한 하락 예측 + 높은 변동성 → LADDER
+
+        # High confidence + strong down prediction + high volatility -> LADDER
         if conf > 0.7 and pred < 0.4 and vol > 0.03:
             return ("LADDER", conf, "high_conf_bearish_volatile")
-        
-        # 중간 신뢰도 + 상승 예측 → GAZUA
+
+        # Medium confidence + up prediction -> GAZUA
         if conf > 0.6 and pred > 0.6:
             return ("GAZUA", conf * 0.9, "medium_conf_bullish")
-        
-        # 기본 → PINGPONG
+
+        # Default -> PINGPONG
         return ("PINGPONG", 0.7, "default_neutral")
 
 
@@ -220,8 +220,8 @@ def calculate_dynamic_budget(
     volatility: float = 0.0,
     momentum: float = 0.0,
 ) -> Tuple[float, str]:
-    """간단한 동적 예산 계산 함수.
-    
+    """Simple dynamic budget calculation function.
+
     Returns:
         (adjusted_budget, reason)
     """

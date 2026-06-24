@@ -1,7 +1,7 @@
 # ============================================================
 # File: app/strategy/strategy_types.py
 # ------------------------------------------------------------
-# 전략 계층 전체가 공유하는 데이터 구조 정의
+# Shared data structures used across the entire strategy layer
 # StrategySignal / StrategyPolicy / StrategyBrainOutput
 # ============================================================
 
@@ -10,11 +10,11 @@ from typing import Dict, Any
 
 
 # ------------------------------------------------------------
-# 매매 신호 구조
+# Trade signal structure
 # ------------------------------------------------------------
 class StrategySignal:
     """
-    최종 매매 신호 객체.
+    Final trade signal object.
     signal: "buy", "sell", "hold"
     """
 
@@ -26,13 +26,13 @@ class StrategySignal:
 
 
 # ------------------------------------------------------------
-# 정책 구조 (단순 Dict 래퍼)
+# Policy structure (simple dict wrapper)
 # ------------------------------------------------------------
 class StrategyPolicy(dict):
     """
-    전략 정책을 나타내는 구조.
-    사실상 Dict 기반으로 동작하지만
-    타입 안전성과 미묘한 구조 확장을 위해 클래스 래핑.
+    Structure representing a strategy policy.
+    Effectively operates as a dict, but is wrapped in a class
+    for type safety and finer-grained structural extension.
     """
 
     def to_dict(self) -> Dict[str, Any]:
@@ -40,12 +40,12 @@ class StrategyPolicy(dict):
 
 
 # ------------------------------------------------------------
-# 두뇌 출력 구조 (기술적 분석 결과)
+# Brain output structure (technical analysis result)
 # ------------------------------------------------------------
 class StrategyBrainOutput:
     """
-    Brain 단계에서 계산되는 모든 기술적 지표 값 저장.
-    Judge / Risk / Optimizer에서 모두 참조한다.
+    Stores all technical indicator values computed in the Brain stage.
+    Referenced by Judge / Risk / Optimizer alike.
     """
 
     def __init__(
@@ -71,7 +71,7 @@ class StrategyBrainOutput:
         self.momentum = momentum
 
     # --------------------------------------------------------
-    # dict 변환
+    # dict conversion
     # --------------------------------------------------------
     def to_dict(self) -> Dict[str, Any]:
         return {

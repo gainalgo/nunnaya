@@ -9,10 +9,10 @@ from typing import Dict, Any
 
 class HyperPolicyAdapter:
     """
-    서로 다른 구조의 정책들을 HyperEngine이 사용할 수 있도록
-    하나의 표준 형태로 변환하는 정책 변환 엔진.
+    Policy translation engine that converts policies of differing structures
+    into a single standard form usable by HyperEngine.
 
-    표준 정책 구조:
+    Standard policy structure:
     {
         "name": "nunnaya",
         "params": {
@@ -44,11 +44,11 @@ class HyperPolicyAdapter:
     }
 
     # -----------------------------------------------------------
-    # 정책 변환
+    # Policy translation
     # -----------------------------------------------------------
     def normalize(self, policy: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Manager/Strategy/Preset에서 온 정책을 표준 정책 형태로 변환.
+        Convert a policy from Manager/Strategy/Preset into the standard form.
         """
         if not policy:
             return self.DEFAULTS.copy()
@@ -70,12 +70,12 @@ class HyperPolicyAdapter:
         return normalized
 
     # -----------------------------------------------------------
-    # preset + user_policy + engine_policy 병합
+    # merge preset + user_policy + engine_policy
     # -----------------------------------------------------------
     def merge(self, *policies: Dict[str, Any]) -> Dict[str, Any]:
         """
-        여러 정책을 합쳐 하나의 표준 정책 생성.
-        Priority: 마지막 인자가 가장 높은 우선순위
+        Merge multiple policies into a single standard policy.
+        Priority: the last argument has the highest precedence.
         """
         merged = self.DEFAULTS.copy()
 

@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """Binance private REST client. HMAC-SHA256 (query-string) auth. TradeClient protocol.
 
-Bybit 의 BybitTradeClient 미러 — 같은 메서드 시그니처(place_order/get_balance/get_kline/
-accounts/market_buy/market_sell/cancel_order/wait_order...)를 구현해 매니저가 그대로
-교체 가능하도록 한다.
+Mirror of Bybit's BybitTradeClient — implements the same method signatures
+(place_order/get_balance/get_kline/accounts/market_buy/market_sell/cancel_order/wait_order...)
+so a manager can swap one for the other transparently.
 
 category:
   - "spot"   → Binance Spot   (api.binance.com /api/v3)
-  - "linear" → Binance USDT-M 선물 (fapi.binance.com /fapi/v1, /fapi/v2)
+  - "linear" → Binance USDT-M futures (fapi.binance.com /fapi/v1, /fapi/v2)
 """
 from __future__ import annotations
 
@@ -28,12 +28,13 @@ from app.integrations.binance_instrument_cache import BinanceInstrumentCache
 logger = logging.getLogger(__name__)
 _TRADE_RETRY_MAX = 4
 _TRADE_RETRY_BASE_SEC = 1.5
-# ★ [감사 medium#2] recvWindow env 설정 가능 — 서버 시계 드리프트>5s 시 -1021 로 전 signed
-#   호출이 막히는 환경 의존 위험. 기본 5000(Bybit 패리티), 필요시 BINANCE_RECV_WINDOW 로 상향(최대 60000).
+# ★ [audit medium#2] recvWindow is env-configurable — guards against an environment-dependent
+#   risk where server clock drift >5s makes every signed call fail with -1021. Default 5000
+#   (Bybit parity); raise via BINANCE_RECV_WINDOW if needed (max 60000).
 _RECV_WINDOW = str(min(max(int(os.getenv("BINANCE_RECV_WINDOW", "5000") or "5000"), 1000), 60000))
 _KLINE_CACHE_TTL = 30.0
 
-# Bybit/내부 interval(분 숫자/ D,W,M) → Binance interval 매핑.
+# Bybit/internal interval (minute number / D,W,M) → Binance interval mapping.
 _INTERVAL_MAP = {
     "1": "1m", "3": "3m", "5": "5m", "15": "15m", "30": "30m",
     "60": "1h", "120": "2h", "240": "4h", "360": "6h", "480": "8h",
@@ -129,8 +130,9 @@ class BinanceTradeClient:
                     raise BinanceAPIError(f"Non-JSON response: {resp.text[:200]}", status_code=resp.status_code)
 
                 # Binance error payloads: {"code": -xxxx, "msg": "..."}.
-                # ★ [감사 bug#10] 음수 code 만 에러로 판정 — 성공 응답이 {code:200,msg:"success"}
-                #   (예: positionSide/dual, leverage)인 엔드포인트를 오판하지 않게(endswith allowlist 폐기).
+                # ★ [audit bug#10] Treat only a negative code as an error — so endpoints whose
+                #   success response is {code:200,msg:"success"} (e.g. positionSide/dual, leverage)
+                #   are not misjudged (endswith allowlist dropped).
                 _code = body.get("code") if isinstance(body, dict) else None
                 if isinstance(_code, int) and _code < 0:
                     if _code in (-1003, -1015) or resp.status_code in (429, 418):
@@ -266,15 +268,18 @@ class BinanceTradeClient:
         if self._category == "linear" and (kw.get("reduce_only") or kw.get("reduceOnly")):
             params["reduceOnly"] = "true"
 
-        # ★ [감사 bug#8] 선물 시장가 POST 기본 응답=ACK(status=NEW, avgPrice=0) → 체결가 못 받음.
-        #   RESULT 로 요청하면 avgPrice/executedQty 채워 반환(추가 호출 0). 청산 저널 정확도 보호.
+        # ★ [audit bug#8] A futures market POST defaults to an ACK response (status=NEW, avgPrice=0)
+        #   → no fill price returned. Requesting RESULT returns it with avgPrice/executedQty filled
+        #   (0 extra calls). Protects exit-journal accuracy.
         if self._category == "linear" and b_type == "MARKET":
             params["newOrderRespType"] = "RESULT"
 
-        # ★ [감사 high#1] 멱등키(newClientOrderId) — _request 재시도(타임아웃/429)가 같은 주문을
-        #   재전송해도 Binance 가 동일 clientOrderId 를 중복 거부(-2010/-4015)해 *이중 체결*(실자금
-        #   손실)을 차단. place_order 에서 1회 생성 → 재시도 attempt 들이 같은 키 전송(_request 가
-        #   루프 밖 params 를 재사용하므로 키 불변). cancel(DELETE)엔 안 붙임. 규격: ^[A-Za-z0-9_-]{1,36}$
+        # ★ [audit high#1] Idempotency key (newClientOrderId) — even if a _request retry
+        #   (timeout/429) resends the same order, Binance rejects the duplicate clientOrderId
+        #   (-2010/-4015), blocking a *double fill* (real-funds loss). Generated once in
+        #   place_order → retry attempts send the same key (_request reuses the params dict
+        #   outside the loop, so the key stays constant). Not attached to cancel (DELETE).
+        #   Spec: ^[A-Za-z0-9_-]{1,36}$
         import uuid as _uuid
         params["newClientOrderId"] = "x-" + _uuid.uuid4().hex[:30]
 
@@ -322,7 +327,7 @@ class BinanceTradeClient:
         min_q = BinanceInstrumentCache.get_min_qty(symbol, category=self._category)
         if qty < min_q:
             raise BinanceAPIError(f"Qty {qty} < min {min_q} for {symbol}")
-        # Linear: market_sell = LONG 청산 의도 → reduce_only 강제 (SHORT 신규진입 사고 방지).
+        # Linear: market_sell means intent to close a LONG → force reduce_only (prevents an accidental new SHORT entry).
         if self._category == "linear":
             return self.place_order(market=market, side="Sell", ord_type="Market", volume=qty, reduce_only=True)
         return self.place_order(market=market, side="Sell", ord_type="Market", volume=qty)
@@ -497,7 +502,7 @@ class BinanceTradeClient:
             params["symbol"] = self._normalize_symbol(symbol)
         res = self._request("GET", "/fapi/v2/positionRisk", params=params, signed=True)
         rows = res if isinstance(res, list) else []
-        # 보유(amt!=0)만 반환
+        # Return only held positions (amt != 0)
         return [r for r in rows if abs(float(r.get("positionAmt", 0) or 0)) > 0]
 
     def switch_position_mode(self, symbol: str = "", mode: str = "MergedSingle"):
@@ -516,10 +521,10 @@ class BinanceTradeClient:
 
     def set_trading_stop(self, symbol: str, *, take_profit: Optional[float] = None,
                          stop_loss: Optional[float] = None, position_idx: int = 0):
-        """서버측 TP/SL — Binance 선물은 STOP_MARKET / TAKE_PROFIT_MARKET (closePosition) 별도 주문.
+        """Server-side TP/SL — on Binance futures these are separate STOP_MARKET / TAKE_PROFIT_MARKET (closePosition) orders.
 
-        한 포지션에 대해 청산 가격을 거래소에 박아 봇 생사 무관 체결되게 한다(Bybit set_trading_stop 미러).
-        반환: {"sl": <order|None>, "tp": <order|None>}.
+        Plants the exit prices for a position on the exchange so they fill regardless of whether the bot is alive (mirrors Bybit set_trading_stop).
+        Returns: {"sl": <order|None>, "tp": <order|None>}.
         """
         if self._category != "linear":
             raise BinanceAPIError("set_trading_stop is linear-only")
@@ -529,15 +534,16 @@ class BinanceTradeClient:
             raise BinanceAPIError(f"No open position for {sym}")
         amt = float(pos[0].get("positionAmt", 0) or 0)
         close_side = "SELL" if amt > 0 else "BUY"  # LONG → SELL stop, SHORT → BUY stop
-        # ★ [감사 bug#4] Bybit set_trading_stop 은 in-place 멱등 수정이지만 Binance 는 신규 주문.
-        #   취소 없이 매번 POST 하면 옛 STOP/TP 가 잔존(트레일 무효·옛 타깃 조기체결) + algo 주문
-        #   한도 도달 후 실패. → 재배치 전 이 심볼의 기존 STOP_MARKET/TAKE_PROFIT_MARKET(closePosition) 취소.
+        # ★ [audit bug#4] Bybit set_trading_stop is an in-place idempotent update, but on Binance
+        #   it is a new order. POSTing every time without cancelling leaves the old STOP/TP in place
+        #   (breaks trailing / old target fills early) and eventually fails once the algo-order limit
+        #   is reached. → Cancel this symbol's existing STOP_MARKET/TAKE_PROFIT_MARKET(closePosition) before re-placing.
         self._cancel_conditional_orders(sym)
         import uuid as _uuid
         out: Dict[str, Any] = {"sl": None, "tp": None}
         if stop_loss is not None:
             sp = self._adj_price(sym, stop_loss, close_side.lower())
-            # ★ [감사 high#1] 멱등키 — 재시도 타임아웃 시 SL 중복 생성 방지.
+            # ★ [audit high#1] Idempotency key — prevents duplicate SL creation on retry timeout.
             out["sl"] = self._request("POST", "/fapi/v1/order", signed=True, is_order=True, params={
                 "symbol": sym, "side": close_side, "type": "STOP_MARKET",
                 "stopPrice": str(sp), "closePosition": "true", "workingType": "MARK_PRICE",
@@ -551,14 +557,14 @@ class BinanceTradeClient:
         return out
 
     def _cancel_conditional_orders(self, sym: str):
-        """이 심볼의 기존 STOP_MARKET/TAKE_PROFIT_MARKET(closePosition) 조건부주문 취소 (set_trading_stop 재배치용).
-        진입 limit 주문 등은 건드리지 않도록 type 으로 선별. 실패는 무시(다음 배치가 덮음)."""
+        """Cancel this symbol's existing STOP_MARKET/TAKE_PROFIT_MARKET(closePosition) conditional orders (for set_trading_stop re-placement).
+        Filters by type so entry limit orders etc. are left untouched. Failures are ignored (the next placement overrides)."""
         try:
             opens = self._request("GET", "/fapi/v1/openOrders", params={"symbol": sym}, signed=True)
             for o in (opens if isinstance(opens, list) else []):
                 otype = str(o.get("type", "") or o.get("origType", ""))
-                # ★ [감사 low] closePosition=true 인 봇 SL/TP 만 회수 — 사용자가 건 조건부주문·
-                #   부분청산 reduceOnly STOP 은 보존(docstring 의도와 구현 일치).
+                # ★ [audit low] Reclaim only the bot's SL/TP with closePosition=true — preserve
+                #   user-placed conditional orders and partial-exit reduceOnly STOPs (implementation matches docstring intent).
                 _is_close = str(o.get("closePosition", "")).lower() == "true"
                 if otype in ("STOP_MARKET", "TAKE_PROFIT_MARKET") and _is_close:
                     try:
@@ -570,9 +576,9 @@ class BinanceTradeClient:
             logger.debug("[BinanceTrade] list openOrders for %s failed: %s", sym, exc)
 
     def get_kline(self, symbol: str, interval: str = "240", limit: int = 50):
-        """Fetch klines (public). 반환: [[openTime, o, h, l, c, volume, ...], ...] oldest first.
+        """Fetch klines (public). Returns: [[openTime, o, h, l, c, volume, ...], ...] oldest first.
 
-        interval 은 Bybit/내부 표기("240","1","D")와 Binance 표기("4h","1m","1d") 둘 다 허용.
+        interval accepts both Bybit/internal notation ("240","1","D") and Binance notation ("4h","1m","1d").
         """
         sym = self._normalize_symbol(symbol)
         iv = _INTERVAL_MAP.get(str(interval), str(interval))
@@ -590,14 +596,14 @@ class BinanceTradeClient:
             self._kline_cache[ck] = (time.time(), data)
         return data
 
-    # ── 거래소 추상화 (BybitTradeClient 미러 — FocusManager 가 client 경유로 소비) ──
-    #   반환 키를 Bybit 네이티브로 맞춰 FocusManager 소비코드 0변화.
+    # ── Exchange abstraction (mirrors BybitTradeClient — FocusManager consumes via the client) ──
+    #   Return keys match Bybit-native so FocusManager consumer code needs 0 changes.
     def _linear_last_price(self, symbol: str) -> float:
-        """Bybit 명칭 호환 alias (FocusManager._get_current_price fallback 등이 이 이름으로 호출)."""
+        """Bybit-name-compatible alias (FocusManager._get_current_price fallback etc. call by this name)."""
         return self._last_price(self._normalize_symbol(symbol))
 
     def get_market_tickers(self, *, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
-        """24h 티커 목록 — Bybit 네이티브 키(symbol/lastPrice/turnover24h/price24hPcnt/highPrice/lowPrice)로 매핑."""
+        """24h ticker list — mapped to Bybit-native keys (symbol/lastPrice/turnover24h/price24hPcnt/highPrice/lowPrice)."""
         path = self._path("/api/v3/ticker/24hr", "/fapi/v1/ticker/24hr")
         params = {"symbol": self._normalize_symbol(symbol)} if symbol else {}
         res = self._request("GET", path, params=params)
@@ -609,23 +615,23 @@ class BinanceTradeClient:
             out.append({
                 "symbol": str(t.get("symbol", "")),
                 "lastPrice": str(t.get("lastPrice", "0")),
-                "turnover24h": str(t.get("quoteVolume", "0")),       # Bybit turnover24h = quote 거래대금
-                "price24hPcnt": str(float(t.get("priceChangePercent", 0) or 0) / 100.0),  # Bybit=소수분율
-                "highPrice24h": str(t.get("highPrice", "0")),        # Bybit 키명(24h 접미사)에 맞춤
+                "turnover24h": str(t.get("quoteVolume", "0")),       # Bybit turnover24h = quote-denominated volume
+                "price24hPcnt": str(float(t.get("priceChangePercent", 0) or 0) / 100.0),  # Bybit = fractional ratio
+                "highPrice24h": str(t.get("highPrice", "0")),        # match Bybit key name (24h suffix)
                 "lowPrice24h": str(t.get("lowPrice", "0")),
                 "volume24h": str(t.get("volume", "0")),
             })
         return out
 
     def get_instrument_info(self, symbol: str) -> Dict[str, float]:
-        """심볼 거래규칙 (qty_step/min_qty/max_qty) — BinanceInstrumentCache 경유."""
+        """Symbol trading rules (qty_step/min_qty/max_qty) — via BinanceInstrumentCache."""
         sym = self._normalize_symbol(symbol)
         return {"qty_step": BinanceInstrumentCache.get_qty_step(sym, category=self._category),
                 "min_qty": BinanceInstrumentCache.get_min_qty(sym, category=self._category),
                 "max_qty": float((BinanceInstrumentCache.get(sym, category=self._category) or {}).get("max_qty", 0) or 0)}
 
     def get_available_margin(self) -> float:
-        """USDT-M 선물 가용 잔고(availableBalance). 실패 시 0.0."""
+        """USDT-M futures available balance (availableBalance). 0.0 on failure."""
         if self._category != "linear":
             return self.get_balance("USDT")
         try:
@@ -636,7 +642,7 @@ class BinanceTradeClient:
             return 0.0
 
     def list_open_positions(self, *, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
-        """보유 포지션 — Bybit 네이티브 키(symbol/size/side(Buy|Sell)/avgPrice)로 정규화."""
+        """Held positions — normalized to Bybit-native keys (symbol/size/side(Buy|Sell)/avgPrice)."""
         rows = self.get_positions(symbol=symbol)  # positionRisk: positionAmt/entryPrice
         out: List[Dict[str, Any]] = []
         for r in rows:
@@ -645,7 +651,7 @@ class BinanceTradeClient:
                         "size": str(abs(amt)),
                         "side": "Buy" if amt > 0 else "Sell",
                         "avgPrice": str(r.get("entryPrice", 0) or 0),
-                        # ★ [감사 bug#7] leverage 보존 — FocusManager 진입후 LEVERAGE MISMATCH 검증이
-                        #   bp.get('leverage') 를 읽음(Bybit row 엔 있음). 누락 시 검증 영구 skip.
+                        # ★ [audit bug#7] Preserve leverage — FocusManager's post-entry LEVERAGE MISMATCH
+                        #   check reads bp.get('leverage') (present in Bybit rows). If omitted, the check is permanently skipped.
                         "leverage": str(r.get("leverage", 0) or 0)})
         return out

@@ -1,12 +1,14 @@
 # ============================================================
-# Upbit FOCUS Entry Quality — 진입품질 게이트 (long_only, 격리·순수)
+# Upbit FOCUS Entry Quality — entry-quality gates (long_only, isolated & pure)
 # ------------------------------------------------------------
-# 부모님 진단(2026-06-16): Upbit 라이브 첫날 진입이 거침 — 천장/끝물 잡음.
-#   병은 *진입*(천장 추격), 청산은 증상. 컷을 더하지 말고 진입 room 을 본다.
-#   "headroom 을 페널티 아니라 게이트(room 없으면 진입 차단)" — feedback_bad_entry_not_fixed_by_cut.
+# Owner diagnosis (2026-06-16): on Upbit's first live day entries were reckless —
+#   chasing tops/exhaustion. The disease is *entry* (chasing tops); exits are the
+#   symptom. Don't add more cuts; look at entry room.
+#   "headroom is a gate, not a penalty (no room -> block entry)" — feedback_bad_entry_not_fixed_by_cut.
 #
-# 순수 함수만 — I/O·상태 없음. 각 게이트는 config 로 독립 ON/OFF, 기본 OFF=0변화.
-#   (DESIGN_upbit_v3_ribbon §②단계 진입품질 config 확장 — 라이브 복귀 게이트)
+# Pure functions only — no I/O or state. Each gate is independently ON/OFF via
+#   config, default OFF = zero change.
+#   (DESIGN_upbit_v3_ribbon §② entry-quality config expansion — live-return gate)
 # ============================================================
 from __future__ import annotations
 
@@ -19,22 +21,22 @@ def check_headroom(
     *,
     min_headroom_pct: float,
 ) -> Tuple[bool, str]:
-    """진입가 머리 위 가장 가까운 저항(RESISTANCE)까지의 여유(headroom) 게이트.
+    """Headroom gate: room up to the nearest overhead resistance (RESISTANCE).
 
-    여유 < min_headroom_pct → 천장 추격 = 진입 차단(게이트, 페널티 아님).
-    머리 위 저항 없음(깨끗) → 통과. min_headroom_pct<=0 → 게이트 OFF(항상 통과).
+    Room < min_headroom_pct -> chasing the top = block entry (a gate, not a penalty).
+    No overhead resistance (clear sky) -> pass. min_headroom_pct<=0 -> gate OFF (always pass).
 
     Args:
-        price: 현재가(진입 예정가).
-        zones: GreenPen 직렬화 zone 리스트 [{type, price_low, price_high, strength}, ...].
-        min_headroom_pct: 요구 최소 여유 %. 0 이하면 게이트 비활성.
+        price: current price (intended entry price).
+        zones: GreenPen-serialized zone list [{type, price_low, price_high, strength}, ...].
+        min_headroom_pct: required minimum room %. Gate disabled if <= 0.
 
     Returns:
-        (ok, reason). ok=False 면 차단.
+        (ok, reason). ok=False means blocked.
     """
     if min_headroom_pct <= 0 or price <= 0:
         return True, "headroom:off"
-    # 머리 위 저항 = price_low 가 현재가보다 위에 있는 RESISTANCE zone 중 가장 가까운 것
+    # overhead resistance = nearest RESISTANCE zone whose price_low is above the current price
     overhead = [
         float(z.get("price_low", 0) or 0)
         for z in (zones or [])
@@ -46,7 +48,7 @@ def check_headroom(
     nearest = min(overhead)
     headroom_pct = (nearest - price) / price * 100.0
     if headroom_pct < min_headroom_pct:
-        return False, f"headroom_block:{headroom_pct:.2f}%<{min_headroom_pct:.2f}% (저항 {nearest:.4f})"
+        return False, f"headroom_block:{headroom_pct:.2f}%<{min_headroom_pct:.2f}% (resistance {nearest:.4f})"
     return True, f"headroom_ok:{headroom_pct:.2f}%"
 
 
@@ -59,17 +61,19 @@ def check_overextension(
     range_pos_pct: float,
     min_move_pct: float,
 ) -> Tuple[bool, str]:
-    """끝물 추격 게이트 — 24H 범위 상단 + 큰 급등이면 진입 차단(소진된 추세 추격 방지).
+    """Exhaustion-chasing gate — block entry near the top of the 24H range after a
+    big surge (avoids chasing an exhausted trend).
 
-    Bybit `_check_overextension` 이식(2026-06-07 부모). ★단, **ADX 면제 없음** —
-    부모님 진단(feedback_bad_entry_not_fixed_by_cut): "ADX≥30 면제가 천장진입 누수의 공통 구멍".
-    펌프는 ADX 폭발 → 거기서 면제되던 게 80+ 천장 진입을 다 통과시킴. → 면제 제거가 핵심 fix.
+    Ported from Bybit `_check_overextension` (2026-06-07, owner). ★But **no ADX exemption** —
+    owner diagnosis (feedback_bad_entry_not_fixed_by_cut): "the ADX>=30 exemption is the common
+    leak for top entries". Pumps make ADX explode, so the exemption let every 80+ top entry
+    through. -> removing the exemption is the core fix.
 
-    LONG 전용(현물): pos = (last-lo)/(hi-lo) ≥ range_pos_pct  AND  |move| ≥ min_move_pct → 차단.
-    range_pos_pct<=0 → 게이트 OFF. 변동 작으면(<min_move) 끝물 아님 → 통과.
+    LONG only (spot): pos = (last-lo)/(hi-lo) >= range_pos_pct  AND  |move| >= min_move_pct -> block.
+    range_pos_pct<=0 -> gate OFF. If the move is small (<min_move) it's not exhaustion -> pass.
 
     Returns:
-        (ok, reason). ok=False 면 차단.
+        (ok, reason). ok=False means blocked.
     """
     if range_pos_pct <= 0:
         return True, "overext:off"
@@ -78,7 +82,7 @@ def check_overextension(
         return True, "overext:no_data"
     if abs(move_pct) < min_move_pct:
         return True, f"overext:small_move({move_pct:.1f}%)"
-    pos = (last - lo24) / rng   # 0=24H 저점, 1=24H 고점
+    pos = (last - lo24) / rng   # 0 = 24H low, 1 = 24H high
     if pos >= range_pos_pct:
         return False, f"overext_block:pos{pos*100:.0f}%≥{range_pos_pct*100:.0f}% move{move_pct:.1f}%"
     return True, f"overext_ok:pos{pos*100:.0f}%"
@@ -90,17 +94,19 @@ def check_blowoff(
     blowoff_move_pct: float,
     direction: str = "LONG",
 ) -> Tuple[bool, str]:
-    """Blow-off 끝물 — 24H |변동| 극단(≥임계) + *추격* 방향이면 진입 차단.
+    """Blow-off exhaustion — block entry when the 24H |move| is extreme (>=threshold)
+    and the direction is *chasing*.
 
-    Bybit `_check_blowoff` 이식(2026-06-13 부모 #1). overext의 ADX 면제 구멍 보완분 —
-    펌프는 ADX 폭발해 overext에서 면제되던 것을, 이건 *24H 이동폭 크기*로 직접 잡는다(ADX 무관).
-    범위 위치(pos) 요구 없음 = 급등 후 눌려도(범위 상단 아님) 파라볼릭 추격 위험은 잡음.
+    Ported from Bybit `_check_blowoff` (2026-06-13, owner #1). Complements the ADX-exemption
+    leak in overext — pumps explode ADX and slipped past overext, but this catches them directly
+    by the *24H move magnitude* (ADX-independent). No range-position (pos) requirement, so even
+    after a surge pulls back (not at the range top) it still catches parabolic chasing risk.
 
-    현물 long_only: LONG on +급등(chg>0) = 추격 → 차단. LONG on -급락(chg<0) = fade(저점 매수) →
-    면제(다른 게이트가 처리). blowoff_move_pct<=0 → OFF.
+    Spot long_only: LONG on a +surge (chg>0) = chasing -> block. LONG on a -drop (chg<0) =
+    fade (buy the dip) -> exempt (handled by other gates). blowoff_move_pct<=0 -> OFF.
 
     Returns:
-        (ok, reason). ok=False 면 차단.
+        (ok, reason). ok=False means blocked.
     """
     if blowoff_move_pct <= 0:
         return True, "blowoff:off"
@@ -110,7 +116,7 @@ def check_blowoff(
     chasing = (direction or "").upper() == "LONG" and move_pct > 0
     if not chasing:
         return True, f"blowoff:fade({move_pct:+.0f}%)"
-    return False, f"blowoff_block:24h{move_pct:+.0f}%≥{blowoff_move_pct:.0f}% 추격"
+    return False, f"blowoff_block:24h{move_pct:+.0f}%≥{blowoff_move_pct:.0f}% chasing"
 
 
 def atr_floored_sl_distance(
@@ -120,14 +126,16 @@ def atr_floored_sl_distance(
     *,
     atr_sl_floor_mult: float,
 ) -> float:
-    """고정 %SL 거리에 ATR 바닥을 깐다 — 잔챙이 코인 1분 노이즈 즉사 방지.
+    """Put an ATR floor under the fixed-% SL distance — prevents instant death from
+    1-minute noise on small/illiquid coins.
 
-    부모님 진단: "고정 1% SL 이 잔챙이 코인 1분 노이즈보다 좁아 0~2분 SL 연발".
-    SL 거리 = max(고정 %거리, atr_sl_floor_mult × ATR). SL 을 *넓히는* 방향만(좁히지 않음).
-    atr_sl_floor_mult<=0 → 비활성(고정 %거리 그대로).
+    Owner diagnosis: "a fixed 1% SL is narrower than the 1-minute noise of small coins,
+    causing back-to-back 0-2 minute SL hits". SL distance = max(fixed % distance,
+    atr_sl_floor_mult × ATR). Only ever *widens* the SL (never tightens it).
+    atr_sl_floor_mult<=0 -> disabled (fixed % distance as-is).
 
     Returns:
-        보정된 SL 거리(가격 단위). 호출자가 entry - dist 로 SL 가격 계산.
+        Adjusted SL distance (in price units). Caller computes SL price as entry - dist.
     """
     if atr_sl_floor_mult <= 0 or atr <= 0:
         return pct_sl_distance

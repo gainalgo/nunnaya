@@ -271,7 +271,7 @@
       if (!items.length) {
         return `
           <div class="lh-title">${escHtml(title)} <span class="muted">(${escHtml(meta)})</span></div>
-          <div class="empty">후보가 없습니다.</div>
+          <div class="empty">No candidates.</div>
         `;
       }
 
@@ -350,7 +350,7 @@
     });
 
     if (!list.length) {
-      box.innerHTML = `<div class="empty">등록된 LongHold 코인이 없습니다.</div>`;
+      box.innerHTML = `<div class="empty">No LongHold coins registered.</div>`;
       applyDupHighlights(new Set());
       return;
     }
@@ -391,7 +391,7 @@
       else { status = "HOLD"; statusCls = "pill"; }
 
       const conflict = omaSet.has(market);
-      const conflictTag = conflict ? pill("pill-warn", "CONFLICT", "OMA와 LongHold 중복. OMA쪽은 DISABLED 권장") : "";
+      const conflictTag = conflict ? pill("pill-warn", "CONFLICT", "Duplicate between OMA and LongHold. Recommend DISABLED on the OMA side") : "";
 
       const notiTxt = (lastNotiAgo === null) ? "—" : `${Math.floor(lastNotiAgo / 60)}m ago`;
 
@@ -530,7 +530,7 @@
 
   async function refreshCandidates() {
     const box = qs("lhCandidates");
-    if (box) box.innerHTML = `<div class="empty">스캔 중…</div>`;
+    if (box) box.innerHTML = `<div class="empty">Scanning…</div>`;
 
     try {
       const cg = await fetchJson(API.candidates("GAZUA", 3), { method: "GET" });
@@ -563,7 +563,7 @@
     const omaSet = getOmaManagedSet();
     if (omaSet.has(market)) {
       const ok = confirm(
-        `[중복 경고]\n${market} 는 이미 OMA 영역(Active/Watch/Recovery)에 존재합니다.\n\nLongHold는 원칙적으로 OMA와 배타 운용을 권장합니다.\n- OMA쪽: DISABLED 권장\n- LongHold쪽: 알림/관망\n\n그래도 LongHold에 등록/수정할까요?`
+        `[Duplicate Warning]\n${market} already exists in the OMA area (Active/Watch/Recovery).\n\nLongHold is, as a rule, recommended to run exclusively from OMA.\n- OMA side: DISABLED recommended\n- LongHold side: notify/observe\n\nRegister/update it in LongHold anyway?`
       );
       if (!ok) return;
     }

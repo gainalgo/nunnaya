@@ -47,10 +47,10 @@ class BybitHyperPriceFeed:
         self.clients.discard(ws)
 
     async def _broadcast(self, payload):
-        # ★ [2026-05-11] 클라이언트 WS 끊김(WebSocketDisconnect 1006)에 Bybit 피드까지 재연결되던 버그 격리.
-        #   브라우저 새로고침/탭 종료 시 WinError 10053 → ConnectionClosedError → WebSocketDisconnect.
-        #   이전엔 OSError 만 잡아서 WebSocketDisconnect 가 _handle_orderbook → _run 까지 전파 → Bybit 재연결.
-        #   해결: WebSocketDisconnect + 광범위 Exception 캐치 후 dead 마킹. 한 클라 죽음 ≠ 피드 전체 다운.
+        # ★ [2026-05-11] Isolate a bug where a client WS drop (WebSocketDisconnect 1006) forced the Bybit feed to reconnect too.
+        #   On browser refresh / tab close: WinError 10053 → ConnectionClosedError → WebSocketDisconnect.
+        #   Previously only OSError was caught, so WebSocketDisconnect propagated _handle_orderbook → _run → Bybit reconnect.
+        #   Fix: catch WebSocketDisconnect + broad Exception, then mark dead. One dead client ≠ whole feed down.
         dead = []
         for ws in list(self.clients):
             try:
@@ -88,7 +88,7 @@ class BybitHyperPriceFeed:
                     codes.update(watch)
             except (KeyError, AttributeError, TypeError) as exc:
                 logger.warning("[PRICEFEED] desired_codes list_watch fallback: %s", exc, exc_info=True)
-        # ★ FOCUS 포지션 + lock_market 강제 구독 (OMA에 없어도 가격 필수)
+        # ★ Force-subscribe FOCUS positions + lock_market (price required even if absent from OMA)
         try:
             codes.update(_focus_position_symbols())
         except Exception:
@@ -128,12 +128,12 @@ class BybitHyperPriceFeed:
                         await ws.send(json.dumps({"op": "subscribe", "args": args[i:i+10]}))
                     self._reconnect_delay = 1.0
                     last_ping = time.time()
-                    last_ticker_ts = time.time()  # ★ 좀비 연결 감지용
+                    last_ticker_ts = time.time()  # ★ for zombie-connection detection
                     while self.running:
                         if self._resubscribe_flag or self.desired_codes() != last_sig:
                             break
                         now = time.time()
-                        # ★ 좀비 연결 감지: 60초간 ticker 없으면 강제 재연결
+                        # ★ Zombie-connection detection: force reconnect if no ticker for 60s
                         if now - last_ticker_ts > 60.0:
                             logger.warning(
                                 "[PriceFeed] No ticker data for %.0fs — zombie connection, forcing reconnect",
@@ -151,16 +151,16 @@ class BybitHyperPriceFeed:
                             msg = await asyncio.wait_for(ws.recv(), timeout=1.0)
                         except asyncio.TimeoutError:
                             continue
-                        # ★ [2026-05-11] per-message try — 한 메시지 처리 실패가 피드 전체 재연결로 번지지 않게 격리.
-                        #   특히 클라이언트 broadcast 오류가 outer except 까지 도달하던 케이스 보강.
-                        #   ConnectionError/OSError 류는 위쪽 except 가 잡고 reconnect — 여기서 swallow X.
+                        # ★ [2026-05-11] per-message try — isolate so a single message-handling failure doesn't trigger a full feed reconnect.
+                        #   Specifically hardens the case where a client broadcast error reached the outer except.
+                        #   ConnectionError/OSError types are caught by the outer except and reconnect — do NOT swallow them here.
                         try:
                             await self._handle_message(msg)
                         except (ConnectionError, OSError, asyncio.TimeoutError):
                             raise  # let outer reconnect path handle real network drops
                         except Exception as exc:  # noqa: BLE001
                             logger.warning("[PRICEFEED] message handler error (continuing): %s", exc, exc_info=True)
-                        # ★ ticker 메시지 수신 시 타이머 리셋
+                        # ★ Reset the timer when a ticker message is received
                         if '"topic":"tickers.' in (msg if isinstance(msg, str) else ""):
                             last_ticker_ts = time.time()
             except (ConnectionError, OSError, asyncio.TimeoutError) as exc:
@@ -210,7 +210,7 @@ class BybitHyperPriceFeed:
                     vol = float(d.get("volume24h", "") or 0)
                     if vol > 0:
                         price_store.set_volume(market, vol)
-                    # [2026-04-19 형 검수 UI#1] 메시지 타입 명시 — /ws/prices 클라이언트가 필터 가능
+                    # [2026-04-19 review UI#1] explicit message type — lets /ws/prices clients filter
                     await self._broadcast({"type": "ticker", "market": market, "price": price, "volume": vol})
         except (ValueError, TypeError):
             logger.warning("[PriceFeed] ticker price parse error for %s", d.get("symbol", "?"), exc_info=True)
@@ -242,7 +242,7 @@ class BybitHyperPriceFeed:
                 continue
         if units:
             orderbook_store.set_orderbook(market, ts=time.time(), best_bid=best_bid, best_ask=best_ask, units=units)
-            # [2026-04-19 형 검수 UI#1] 메시지 타입 명시
+            # [2026-04-19 review UI#1] explicit message type
             await self._broadcast({"type": "orderbook", "market": market, "best_bid": best_bid, "best_ask": best_ask})
 
     async def start(self):
@@ -266,26 +266,26 @@ class BybitHyperPriceFeed:
 
 
 def _focus_position_symbols() -> Set[str]:
-    """FOCUS 포지션 + lock_market + selected_market 코인 목록.
-    runtime/focus_config.json 에서 직접 읽어 circular import 회피.
-    (FOCUS는 config+state를 focus_config.json 한 파일에 저장)"""
+    """List of FOCUS positions + lock_market + selected_market coins.
+    Read directly from runtime/focus_config.json to avoid a circular import.
+    (FOCUS stores config+state together in the single focus_config.json file.)"""
     symbols: Set[str] = set()
     try:
         import json as _json
         # focus_config.json = { "config": {..., "lock_market": ...}, "state": {"positions": [...], "selected_market": ...} }
         config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "runtime", "focus_config.json")
         if not os.path.exists(config_path):
-            # fallback: 프로젝트 루트 기준
+            # fallback: relative to project root
             config_path = os.path.join(os.getcwd(), "runtime", "focus_config.json")
         if os.path.exists(config_path):
             with open(config_path, "r", encoding="utf-8") as f:
                 data = _json.load(f)
-            # config 섹션에서 lock_market
+            # lock_market from the config section
             cfg = data.get("config", data)  # top-level fallback
             lm = cfg.get("lock_market", "")
             if lm:
                 symbols.add(lm)
-            # state 섹션에서 positions + selected_market
+            # positions + selected_market from the state section
             st = data.get("state", {})
             for pos in st.get("positions", []):
                 m = pos.get("market", "")

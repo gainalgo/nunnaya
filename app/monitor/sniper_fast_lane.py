@@ -49,7 +49,7 @@ def _env_float(key: str, default: float = 0.0) -> float:
 
 ENABLED          = _env_bool("SNIPER_FAST_LANE_ENABLED", False)
 DROP_THRESHOLD   = _env_float("SNIPER_FAST_LANE_DROP_PCT", -1.5)   # %
-# [FIX 2026-03-23] 기본값 55→65로 상향 (SNIPER autopilot confidence 65%와 통일)
+# [FIX 2026-03-23] default raised 55→65 (unified with SNIPER autopilot confidence 65%)
 SCORE_THRESHOLD  = _env_float("SNIPER_FAST_LANE_SCORE_MIN", 65.0)
 WARM_POOL_SIZE   = _env_int("SNIPER_FAST_LANE_POOL_SIZE", 30)
 POOL_REFRESH_SEC = _env_float("SNIPER_FAST_LANE_POOL_REFRESH_SEC", 600.0)
@@ -112,7 +112,7 @@ class SniperFastLane:
             import requests as _req
 
             # get all USDT tickers
-            # [FIX N6] 200여 마켓을 단일 호출에 전달 시 URL 길이 초과 방지 — 100단위 청크
+            # [FIX N6] avoid URL length overflow when passing 200+ markets in one call — chunk by 100
             all_markets = self._get_quote_markets()
             tickers: list = []
             for _chunk_start in range(0, len(all_markets), 100):
@@ -149,7 +149,7 @@ class SniperFastLane:
                 continue
             price = float(tk.get("trade_price") or 0)
             vol24 = float(tk.get("acc_trade_price_24h") or 0)
-            if price <= 0 or vol24 < 500_000:    # min 50만 USDT 24h 거래대금
+            if price <= 0 or vol24 < 500_000:    # min 500k USDT 24h turnover
                 continue
             # basic affinity: higher volume + moderate price
             scored.append((m, vol24, price))
@@ -212,7 +212,7 @@ class SniperFastLane:
             self._day_str = today
             self._stats = FastLaneStats(date_str=today)
             self._activated_today.clear()
-            self._cooldowns.clear()  # [FIX N5] 만료된 쿨다운 제거 (무한 누적 방지)
+            self._cooldowns.clear()  # [FIX N5] clear expired cooldowns (prevent unbounded growth)
 
         # budget check
         if self._stats.activations >= MAX_DAILY:
@@ -272,7 +272,7 @@ class SniperFastLane:
                 logger.info(f"[FastLane] insufficient budget ({budget:.0f} < {MIN_BUDGET_USDT:.0f})")
                 continue
 
-            # [FIX L2] emergency_stop / global entry block 확인 (이전엔 누락)
+            # [FIX L2] check emergency_stop / global entry block (previously missing)
             if getattr(system, "emergency_stop", False):
                 logger.info("[FastLane] emergency_stop active — aborting scan")
                 break
@@ -358,12 +358,12 @@ class SniperFastLane:
                 logger.warning("[sniper_fast_lane] %s: %s", '2. Set strategy to SNIPER + scope params', exc, exc_info=True)
 
             if ctx is None:
-                # [FIX #5] ctx가 없으면 전략 설정 불가 → 활성화 실패
+                # [FIX #5] without ctx the strategy can't be set → activation fails
                 logger.warning(f"[FastLane] ctx is None for {market}, activation aborted")
                 return False
 
             ctx.strategy = "SNIPER"
-            # [FIX 2026-03-05] controls["strategy"]는 dict → object attribute mutation 금지
+            # [FIX 2026-03-05] controls["strategy"] is a dict → no object attribute mutation
             _ctrl_dict = getattr(ctx, "controls", None)
             if isinstance(_ctrl_dict, dict):
                 _ctrl_dict.setdefault("strategy", {})
@@ -386,7 +386,7 @@ class SniperFastLane:
             try:
                 from app.notify.telegram import send_telegram
                 send_telegram(
-                    f"🎯 [FastLane] {market} ACTIVE 승격\n"
+                    f"🎯 [FastLane] {market} promoted to ACTIVE\n"
                     f"Score: {scope_result.get('rank_score',0):.1f}\n"
                     f"Price: {scope_result.get('price',0):,.0f}\n"
                     f"Budget: {budget:,.2f} USDT\n"
@@ -436,7 +436,7 @@ class SniperFastLane:
                 if isinstance(m, dict) and str(m.get("quoteCoin", "")) == Q.symbol
             ]
         except (KeyError, AttributeError, TypeError, ValueError):
-            logger.warning("[FastLane] known_markets 조회 실패", exc_info=True)
+            logger.warning("[FastLane] known_markets lookup failed", exc_info=True)
             return []
 
     def _get_active_markets(self, system: Any) -> Set[str]:
@@ -452,7 +452,7 @@ class SniperFastLane:
                 active.update(reg.list_prewarm() or [])
             return active
         except (KeyError, AttributeError, TypeError):
-            logger.warning("[FastLane] active_markets 조회 실패", exc_info=True)
+            logger.warning("[FastLane] active_markets lookup failed", exc_info=True)
             return set()
 
     def get_stats(self) -> Dict[str, Any]:

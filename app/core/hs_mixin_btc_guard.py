@@ -21,16 +21,16 @@ class BtcGuardMixin:
 
     async def _check_btc_guard_mode(self) -> None:
         """
-        [2026-02-06] BTC Guard Mode 주기적 체크
+        [2026-02-06] Periodic BTC Guard Mode check
 
-        BTC 하락 시:
+        On BTC decline:
         - btc_guard_mode = True
-        - CONTRARIAN 외 모든 auto_approve 비활성화
-        - 이전 상태는 _pre_guard_auto_approve에 저장
+        - disable all auto_approve except CONTRARIAN
+        - previous state saved in _pre_guard_auto_approve
 
-        BTC 회복 시:
+        On BTC recovery:
         - btc_guard_mode = False
-        - 저장된 auto_approve 상태 복원
+        - restore saved auto_approve state
         """
         if not self.btc_guard_enabled:
             return
@@ -101,10 +101,10 @@ class BtcGuardMixin:
             up_by_strength = signal.direction == "UP" and float(signal.strength) > strength_threshold
             up_by_pct = (btc_5m >= up_5m) or (btc_15m >= up_15m)
 
-            # 하락 신호 감지 → Guard 활성화
+            # Decline signal detected → activate Guard
             if down_by_strength or down_by_pct:
                 if not self.btc_guard_mode:
-                    # 이전 상태 저장
+                    # save previous state
                     self._pre_guard_auto_approve = {
                         "pingpong": self.autopilot_auto_approve_pingpong,
                         "autoloop": self.autopilot_auto_approve_autoloop,
@@ -114,11 +114,11 @@ class BtcGuardMixin:
                         "sniper": self.autopilot_auto_approve_sniper,
                     }
 
-                    # Recovery Boost가 켜져 있으면 먼저 해제
+                    # if Recovery Boost is on, deactivate it first
                     if self.recovery_boost_active:
                         self._deactivate_recovery_boost(reason="btc_guard_reactivated")
 
-                    # Guard 활성화 (CONTRARIAN 제외 모두 차단)
+                    # activate Guard (block all except CONTRARIAN)
                     self.btc_guard_mode = True
                     self.autopilot_auto_approve_pingpong = False
                     self.autopilot_auto_approve_autoloop = False
@@ -126,9 +126,9 @@ class BtcGuardMixin:
                     self.autopilot_auto_approve_lightning = False
                     self.autopilot_auto_approve_gazua = False
                     self.autopilot_auto_approve_sniper = False
-                    # CONTRARIAN은 그대로 유지
+                    # CONTRARIAN is kept as-is
 
-                    # [2026-02-06] Trailing Stop 타이트닝 (추가 하락 방지)
+                    # [2026-02-06] Tighten Trailing Stop (prevent further decline)
                     self._tighten_trailing_stops()
 
                     self.ledger.append(
@@ -142,10 +142,10 @@ class BtcGuardMixin:
                         down_15m_pct=down_15m,
                     )
 
-            # 회복 신호 감지 → Guard 해제
+            # Recovery signal detected → deactivate Guard
             elif up_by_strength or up_by_pct:
                 if self.btc_guard_mode:
-                    # 이전 상태 복원
+                    # restore previous state
                     self.autopilot_auto_approve_pingpong = self._pre_guard_auto_approve.get("pingpong", False)
                     self.autopilot_auto_approve_autoloop = self._pre_guard_auto_approve.get("autoloop", False)
                     self.autopilot_auto_approve_ladder = self._pre_guard_auto_approve.get("ladder", False)
@@ -156,10 +156,10 @@ class BtcGuardMixin:
                     self.btc_guard_mode = False
                     self._pre_guard_auto_approve = {}
 
-                    # [2026-02-06] Trailing Stop 복원
+                    # [2026-02-06] Restore Trailing Stop
                     self._restore_trailing_stops()
 
-                    # [2026-03-18] Recovery Boost — 반등 시 빠른 회수 + 추가 이윤
+                    # [2026-03-18] Recovery Boost — fast recovery + extra profit on rebound
                     self._activate_recovery_boost(btc_5m=btc_5m, btc_15m=btc_15m)
 
                     self.ledger.append(
@@ -179,11 +179,11 @@ class BtcGuardMixin:
 
     def _tighten_trailing_stops(self) -> None:
         """
-        [2026-02-06] BTC Guard 활성화 시 Trailing Stop 타이트닝
+        [2026-02-06] Tighten Trailing Stop when BTC Guard activates
 
-        목적: BTC 급락 시 추가 하락 방지
-        - 모든 ACTIVE 마켓의 Trailing Stop을 0.5배로 축소 (0.3% → 0.15%)
-        - 원래 값은 저장해두었다가 Guard 해제 시 복원
+        Purpose: prevent further decline during a BTC crash
+        - shrink Trailing Stop of all ACTIVE markets to 0.5x (0.3% → 0.15%)
+        - original values are saved and restored when Guard is deactivated
         """
         if not hasattr(self, '_pre_guard_trailing_stops'):
             self._pre_guard_trailing_stops = {}
@@ -254,9 +254,9 @@ class BtcGuardMixin:
 
     def _restore_trailing_stops(self) -> None:
         """
-        [2026-02-06] BTC Guard 해제 시 Trailing Stop 복원
+        [2026-02-06] Restore Trailing Stop when BTC Guard deactivates
 
-        저장된 원래 Trailing Stop 값으로 복원
+        Restore to the saved original Trailing Stop values
         """
         if not hasattr(self, '_pre_guard_trailing_stops'):
             return
@@ -309,7 +309,7 @@ class BtcGuardMixin:
                     logger.warning("[BTC_GUARD] restore trailing stop error for market: %s", exc, exc_info=True)
                     continue
 
-            # 저장된 상태 초기화
+            # reset saved state
             self._pre_guard_trailing_stops = {}
 
             if count > 0:
@@ -319,10 +319,10 @@ class BtcGuardMixin:
             self.ledger.append("BTC_GUARD_TRAILING_ERROR", error=str(e), phase="restore")
 
     def _activate_recovery_boost(self, btc_5m: float = 0.0, btc_15m: float = 0.0) -> None:
-        """하락 후 반등 감지 시 Recovery Boost 활성화.
+        """Activate Recovery Boost when a rebound is detected after a decline.
 
-        손실 포지션 → TP를 낮춰서 본전+α에서 빠르게 탈출 (간극 메우기)
-        이익 포지션 + 모멘텀 → TP를 올려서 추가 이윤 노리기
+        Losing position → lower TP to exit quickly at breakeven+α (fill the gap)
+        Winning position + momentum → raise TP to chase extra profit
         """
         if not self.recovery_boost_enabled or self.recovery_boost_active:
             return
@@ -401,7 +401,7 @@ class BtcGuardMixin:
             self.recovery_boost_active = False
 
     def _deactivate_recovery_boost(self, reason: str = "expired") -> None:
-        """Recovery Boost 해제 — 원래 TP 복원."""
+        """Deactivate Recovery Boost — restore original TP."""
         if not self.recovery_boost_active:
             return
         try:
@@ -439,7 +439,7 @@ class BtcGuardMixin:
             self._pre_boost_tp = {}
 
     def _check_recovery_boost_expiry(self) -> None:
-        """Recovery Boost 시간 만료 체크 — tick_loop에서 호출."""
+        """Check Recovery Boost time expiry — called from tick_loop."""
         if not self.recovery_boost_active:
             return
         try:

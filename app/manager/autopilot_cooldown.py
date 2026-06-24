@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class CooldownMixin:
-    """Cooldown 영속화 + 전략 손실 추적 Mixin.
+    """Cooldown persistence + per-strategy loss tracking Mixin.
 
     Expects in __init__:
         self.system, self.cooldown, self.cooldown_path,
@@ -159,7 +159,7 @@ class CooldownMixin:
     # Phase 3-B: Strategy Loss Cooldown
     # --------------------------------------------------------
     def record_strategy_trade_result(self, strategy: str, is_win: bool) -> None:
-        """전략별 거래 결과 기록. 3연패 시 30분 쿨다운 발동."""
+        """Record per-strategy trade result. Triggers a 30-min cooldown on a 3-loss streak."""
         strategy = str(strategy or "").strip().upper()
         if not strategy:
             return
@@ -179,7 +179,7 @@ class CooldownMixin:
                 logger.warning("[Cooldown] loss_cooldown_min parse failed", exc_info=True)
                 cooldown_min = 30
             if streak >= threshold:
-                # [2026-03-30] Adaptive Cooldown: streak 비례 스케일링
+                # [2026-03-30] Adaptive Cooldown: scale proportionally to streak
                 # streak=3 → 1.0x, streak=4 → 1.5x, streak=5 → 2.0x, streak=6+ → 2.5x (cap)
                 _scale = min(2.5, 1.0 + (streak - threshold) * 0.5)
                 _effective_min = int(cooldown_min * _scale)

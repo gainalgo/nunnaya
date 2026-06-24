@@ -1,7 +1,7 @@
 # ============================================================
-# Bybit 현물(spot) FOCUS Strategy API Router (USDT long_only)
+# Bybit spot FOCUS Strategy API Router (USDT long_only)
 # ------------------------------------------------------------
-# BybitSpotGazuaManager 제어용 REST 엔드포인트. upbit_gazua_router 미러(거래소만 Bybit 현물).
+# REST endpoints for controlling BybitSpotGazuaManager. Mirror of upbit_gazua_router (exchange = Bybit spot).
 # ============================================================
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/strategy/bybit_spot_gazua", tags=["BYBIT_SPOT_GA
 
 
 def _get_um(request: Request):
-    """Get BybitSpotGazuaManager from system (없으면 생성)."""
+    """Get BybitSpotGazuaManager from system (create if absent)."""
     system = request.app.state.system
     um = getattr(system, "bybit_spot_gazua_manager", None)
     if um is None:
@@ -39,7 +39,7 @@ def bybit_spot_focus_config_get(request: Request):
 
 @router.get("/config/defaults")
 def bybit_spot_focus_config_defaults():
-    """코드 기본값(SpotGazuaConfig dataclass) — v3 대시보드 ↺ 리셋 소스. focus 미러."""
+    """Code defaults (SpotGazuaConfig dataclass) — source for v3 dashboard ↺ reset. Mirror of focus."""
     from dataclasses import asdict
     from app.manager.spot_gazua_manager import SpotGazuaConfig
     return {"ok": True, "defaults": asdict(SpotGazuaConfig())}
@@ -53,16 +53,16 @@ def bybit_spot_focus_config_set(
     max_positions: Optional[int] = Query(None, ge=1, le=20),
     max_daily_plans: Optional[int] = Query(None, ge=1, le=999),
     risk_pct: Optional[float] = Query(None, ge=0, le=100),
-    conv_sizing_enabled: Optional[bool] = Query(None, description="점수(confidence) 비례 사이징. OFF=균등 1/N."),
-    conv_size_floor: Optional[float] = Query(None, ge=0, le=1, description="통과 하한 신호가 쓰는 슬롯 비중(0~1). 1=가중 OFF."),
+    conv_sizing_enabled: Optional[bool] = Query(None, description="Sizing proportional to score (confidence). OFF=equal 1/N."),
+    conv_size_floor: Optional[float] = Query(None, ge=0, le=1, description="Slot fraction used by a signal at the pass threshold (0~1). 1=weighting OFF."),
     min_conf: Optional[float] = Query(None, ge=0, le=1),
     entry_conf_threshold: Optional[float] = Query(None, ge=0, le=1),
     primary_tf: Optional[str] = Query(None),
     top_n: Optional[int] = Query(None, ge=1, le=50),
     scan_interval_sec: Optional[float] = Query(None, ge=1),
-    scan_exclude: Optional[str] = Query(None, description="스캔 제외 마켓 (쉼표 구분, 예: BTCUSDT)"),
-    block_warning_coins: Optional[bool] = Query(None, description="거래소 투자유의 종목 진입 차단(Bybit 현물=해당 없음)."),
-    block_caution_coins: Optional[bool] = Query(None, description="거래소 주의환기 종목 진입 차단(Bybit 현물=해당 없음)."),
+    scan_exclude: Optional[str] = Query(None, description="Markets to exclude from scan (comma-separated, e.g. BTCUSDT)"),
+    block_warning_coins: Optional[bool] = Query(None, description="Block entry on exchange investment-warning symbols (Bybit spot = N/A)."),
+    block_caution_coins: Optional[bool] = Query(None, description="Block entry on exchange caution symbols (Bybit spot = N/A)."),
     cooldown_sec: Optional[float] = Query(None, ge=0),
     tp1_mult: Optional[float] = Query(None, ge=0),
     tp2_mult: Optional[float] = Query(None, ge=0),
@@ -76,58 +76,58 @@ def bybit_spot_focus_config_set(
     tp1_pct: Optional[float] = Query(None, ge=0),
     tp2_pct: Optional[float] = Query(None, ge=0),
     sl_pct: Optional[float] = Query(None, ge=0),
-    longhold_enabled: Optional[bool] = Query(None, description="SL→존버 전환(§4.2). 기본 OFF."),
-    longhold_release_pct: Optional[float] = Query(None, ge=0, description="존버 해제 임계 %. 0=ATR 동적."),
-    longhold_max_hold_hours: Optional[float] = Query(None, ge=0, description="존버 최대 보유시간. 0=무제한."),
-    headroom_gate_pct: Optional[float] = Query(None, ge=0, description="머리 위 저항 최소 여유 %(§②). 0=OFF, 천장 추격 차단."),
-    atr_sl_floor_mult: Optional[float] = Query(None, ge=0, description="SL 거리 최소=mult×ATR(§②). 0=OFF, 잔챙이 즉사 방지."),
-    overext_range_pos_pct: Optional[float] = Query(None, ge=0, le=1, description="끝물 차단: 24H 범위 상단 비율↑(예 0.85). 0=OFF, ADX 면제 없음."),
-    overext_min_move_pct: Optional[float] = Query(None, ge=0, description="끝물 판정 최소 24H 변동 |%|."),
-    blowoff_move_pct: Optional[float] = Query(None, ge=0, description="파라볼릭 차단: 24H |변동|≥%(예 30)+추격. 0=OFF."),
-    guard_score_mode_enabled: Optional[bool] = Query(None, description="guard_score(ADX+추세conf) 계산·표시(G1)."),
-    guard_score_threshold: Optional[float] = Query(None, description="진입 최소 guard_score. 0=게이트 OFF(표시만)."),
-    guard_score_total_cap: Optional[float] = Query(None, ge=0, description="guard_score ±cap 클램프(80+ 억제). 0=무제한."),
-    multi_be_lock_enabled: Optional[bool] = Query(None, description="peak 단계별 SL 위로 잠금(이익 보호 ratchet)."),
-    multi_be_lock_stage1_pct: Optional[float] = Query(None, ge=0, description="1단계 peak%% → SL=BE+cushion."),
-    multi_be_lock_stage2_pct: Optional[float] = Query(None, ge=0, description="2단계 peak%% → SL=entry+0.3%%."),
-    multi_be_lock_stage3_pct: Optional[float] = Query(None, ge=0, description="3단계 peak%% → SL=entry+1.0%%."),
-    multi_be_lock_stage4_pct: Optional[float] = Query(None, ge=0, description="4단계 peak%% → SL=entry+2.0%%."),
-    multi_be_lock_fee_cushion_pct: Optional[float] = Query(None, ge=0, description="BE 잠금 수수료 쿠션 %%."),
-    multi_be_lock_atr_adaptive: Optional[bool] = Query(None, description="be_lock ATR 적응 — 메이저(저변동) 노이즈 BE컷 방지(Bybit 회전매 fix). 노이즈 위에서만 잠금 시작."),
-    multi_be_lock_atr_mult: Optional[float] = Query(None, ge=0, description="arming floor = ATR%% × 이값."),
-    be_stall_enabled: Optional[bool] = Query(None, description="be_stall(peak 정체+모멘텀 꺾임 익절 컷)."),
-    be_stall_sec: Optional[float] = Query(None, ge=0, description="peak 정체 최소 초(컷 후보)."),
-    be_stall_max_since_peak_sec: Optional[float] = Query(None, ge=0, description="stale 컷오프 초(묵은 peak 미발동)."),
-    be_stall_neutral_exit: Optional[bool] = Query(None, description="중립 모멘텀도 시간컷? 기본 False(보수)."),
-    be_stall_rsi_strong: Optional[float] = Query(None, ge=0, le=100, description="RSI 우리편 기준."),
-    be_stall_rsi_weak: Optional[float] = Query(None, ge=0, le=100, description="RSI 반대편 기준."),
-    fee_rate_pct: Optional[float] = Query(None, ge=0, le=5, description="한쪽 수수료율 %(Bybit 현물 taker≈0.1). 왕복=×2. net PnL 반영."),
-    manual_manage_enabled: Optional[bool] = Query(None, description="수동(퀵트레이드) 매수 포지션을 봇이 SL/TP 자동 관리? OFF=관망(청산 버튼으로 사람 수확)."),
-    contrarian_enabled: Optional[bool] = Query(None, description="역행(CONTRARIAN) 2번째 진입원 ON/OFF. 기본 OFF. 상승추세엔 OFF, 중립/하락만."),
-    contrarian_max_positions: Optional[int] = Query(None, ge=0, le=10, description="역행 별도 슬롯(FOCUS 슬롯과 분리)."),
-    contrarian_coin_up_th: Optional[float] = Query(None, ge=0, description="역행 진입 자격: 코인 24h move − BTC move ≥ 이 %%(상대강도)."),
-    contrarian_coin_up_cap: Optional[float] = Query(None, ge=0, description="파라볼릭 차단: 코인 24h |move| 이 %%↑면 제외(펌프 함정). 0=OFF."),
-    contrarian_regime_gate: Optional[bool] = Query(None, description="True=상승추세(BTC UP)엔 진입 안 함(중립/하락만). False=상시."),
-    contrarian_budget: Optional[float] = Query(None, ge=0, description="역행 예산. 0=equity의 contrarian_budget_pct%% / >0=고정 금액."),
-    contrarian_budget_pct: Optional[float] = Query(None, ge=0, le=100, description="contrarian_budget=0 일 때 equity 대비 비율 %%."),
-    contrarian_tp_pct: Optional[float] = Query(None, ge=0, description="역행 TP1(부분익절) 진입가 +%%."),
-    contrarian_tp2_pct: Optional[float] = Query(None, ge=0, description="역행 TP2(전량) 진입가 +%%."),
-    contrarian_sl_pct: Optional[float] = Query(None, ge=0, description="역행 SL 진입가 -%%."),
-    gap_check_enabled: Optional[bool] = Query(None, description="갭 체크(선물 복사) — 머리 위 N봉 고가까지 거리<필요갭이면 차단(천장 밑 진입 금지)."),
-    gap_check_min_pct: Optional[float] = Query(None, ge=0, description="최소 필요 갭 %%."),
-    micro_1m_check_enabled: Optional[bool] = Query(None, description="1M 타이밍(선물 복사) — 역봉/거래량소진/RSI과열이면 진입 보류."),
-    momentum_reversal_enabled: Optional[bool] = Query(None, description="직전 5M 강한 역행 차단(선물 복사) — 떨어지는 칼 진입 금지."),
-    momentum_reversal_strong_atr: Optional[float] = Query(None, ge=0, description="강한 역행 임계 (×5M ATR)."),
-    raw_body_enabled: Optional[bool] = Query(None, description="raw_body(선물 복사) — 직전 5M N봉 net 에너지가 진입 반대면 차단."),
-    momentum_deriv_enabled: Optional[bool] = Query(None, description="momentum_deriv(선물 복사) — 5M RSI/MACD 변화율이 진입 반대 가속이면 차단(RSI+MACD 둘 다)."),
-    mtf_align_enabled: Optional[bool] = Query(None, description="MTF 최종 차단(선물 복사) — 상위/단기 TF(240/30/15) 구조가 명확히 반대면 진입 차단."),
-    entry_expectation_enabled: Optional[bool] = Query(None, description="진입 기대치(선물 공유 유틸) — reward 부족 or risk 과대면 차단."),
-    entry_expectation_min_reward_pct: Optional[float] = Query(None, ge=0, description="reward < 이 %%면 차단."),
-    entry_expectation_max_risk_pct: Optional[float] = Query(None, ge=0, description="risk > 이 %%면 차단."),
-    microtiming_5m_enabled: Optional[bool] = Query(None, description="microtiming_5m(선물 복사) — 5M RSI/MACD/BB 변곡 2/3 미만이면 이번 tick 보류(defer)."),
-    microtiming_5m_min_score: Optional[int] = Query(None, ge=0, le=3, description="통과 최소 변곡 점수(0~3)."),
+    longhold_enabled: Optional[bool] = Query(None, description="SL→hold-through transition (§4.2). Default OFF."),
+    longhold_release_pct: Optional[float] = Query(None, ge=0, description="Hold-through release threshold %. 0=ATR dynamic."),
+    longhold_max_hold_hours: Optional[float] = Query(None, ge=0, description="Hold-through max holding time. 0=unlimited."),
+    headroom_gate_pct: Optional[float] = Query(None, ge=0, description="Min headroom to overhead resistance % (§②). 0=OFF, blocks ceiling chasing."),
+    atr_sl_floor_mult: Optional[float] = Query(None, ge=0, description="Min SL distance = mult×ATR (§②). 0=OFF, prevents instant stop-out."),
+    overext_range_pos_pct: Optional[float] = Query(None, ge=0, le=1, description="Late-pump block: 24H range upper-band ratio↑ (e.g. 0.85). 0=OFF, no ADX exemption."),
+    overext_min_move_pct: Optional[float] = Query(None, ge=0, description="Min 24H move |%| for late-pump detection."),
+    blowoff_move_pct: Optional[float] = Query(None, ge=0, description="Parabolic block: 24H |move|≥% (e.g. 30) + chasing. 0=OFF."),
+    guard_score_mode_enabled: Optional[bool] = Query(None, description="Compute/display guard_score (ADX + trend conf) (G1)."),
+    guard_score_threshold: Optional[float] = Query(None, description="Min guard_score for entry. 0=gate OFF (display only)."),
+    guard_score_total_cap: Optional[float] = Query(None, ge=0, description="guard_score ±cap clamp (suppress 80+). 0=unlimited."),
+    multi_be_lock_enabled: Optional[bool] = Query(None, description="Lock SL upward by peak stage (profit-protection ratchet)."),
+    multi_be_lock_stage1_pct: Optional[float] = Query(None, ge=0, description="Stage 1 peak%% → SL=BE+cushion."),
+    multi_be_lock_stage2_pct: Optional[float] = Query(None, ge=0, description="Stage 2 peak%% → SL=entry+0.3%%."),
+    multi_be_lock_stage3_pct: Optional[float] = Query(None, ge=0, description="Stage 3 peak%% → SL=entry+1.0%%."),
+    multi_be_lock_stage4_pct: Optional[float] = Query(None, ge=0, description="Stage 4 peak%% → SL=entry+2.0%%."),
+    multi_be_lock_fee_cushion_pct: Optional[float] = Query(None, ge=0, description="BE-lock fee cushion %%."),
+    multi_be_lock_atr_adaptive: Optional[bool] = Query(None, description="be_lock ATR adaptive — prevents major (low-vol) noise BE cut (Bybit churn fix). Arms only above noise."),
+    multi_be_lock_atr_mult: Optional[float] = Query(None, ge=0, description="arming floor = ATR%% × this value."),
+    be_stall_enabled: Optional[bool] = Query(None, description="be_stall (peak stall + momentum roll-over take-profit cut)."),
+    be_stall_sec: Optional[float] = Query(None, ge=0, description="Min seconds of peak stall (cut candidate)."),
+    be_stall_max_since_peak_sec: Optional[float] = Query(None, ge=0, description="stale cutoff seconds (no trigger on stale peak)."),
+    be_stall_neutral_exit: Optional[bool] = Query(None, description="Time-cut on neutral momentum too? Default False (conservative)."),
+    be_stall_rsi_strong: Optional[float] = Query(None, ge=0, le=100, description="RSI threshold favoring our side."),
+    be_stall_rsi_weak: Optional[float] = Query(None, ge=0, le=100, description="RSI threshold against our side."),
+    fee_rate_pct: Optional[float] = Query(None, ge=0, le=5, description="One-side fee rate % (Bybit spot taker≈0.1). Round-trip=×2. Reflected in net PnL."),
+    manual_manage_enabled: Optional[bool] = Query(None, description="Auto-manage SL/TP for manual (quick-trade) buy positions? OFF=hands-off (human harvests via close button)."),
+    contrarian_enabled: Optional[bool] = Query(None, description="CONTRARIAN second entry source ON/OFF. Default OFF. OFF in uptrend, neutral/down only."),
+    contrarian_max_positions: Optional[int] = Query(None, ge=0, le=10, description="Separate contrarian slots (isolated from FOCUS slots)."),
+    contrarian_coin_up_th: Optional[float] = Query(None, ge=0, description="Contrarian entry eligibility: coin 24h move − BTC move ≥ this %% (relative strength)."),
+    contrarian_coin_up_cap: Optional[float] = Query(None, ge=0, description="Parabolic block: exclude if coin 24h |move| above this %% (pump trap). 0=OFF."),
+    contrarian_regime_gate: Optional[bool] = Query(None, description="True=no entry in uptrend (BTC UP), neutral/down only. False=always."),
+    contrarian_budget: Optional[float] = Query(None, ge=0, description="Contrarian budget. 0=contrarian_budget_pct%% of equity / >0=fixed amount."),
+    contrarian_budget_pct: Optional[float] = Query(None, ge=0, le=100, description="Ratio %% of equity when contrarian_budget=0."),
+    contrarian_tp_pct: Optional[float] = Query(None, ge=0, description="Contrarian TP1 (partial take-profit) entry price +%%."),
+    contrarian_tp2_pct: Optional[float] = Query(None, ge=0, description="Contrarian TP2 (full) entry price +%%."),
+    contrarian_sl_pct: Optional[float] = Query(None, ge=0, description="Contrarian SL entry price -%%."),
+    gap_check_enabled: Optional[bool] = Query(None, description="Gap check (copied from futures) — block if distance to overhead N-bar high < required gap (no entry below ceiling)."),
+    gap_check_min_pct: Optional[float] = Query(None, ge=0, description="Min required gap %%."),
+    micro_1m_check_enabled: Optional[bool] = Query(None, description="1M timing (copied from futures) — defer entry on reversal bar / volume exhaustion / RSI overheat."),
+    momentum_reversal_enabled: Optional[bool] = Query(None, description="Block on strong recent 5M reversal (copied from futures) — no falling-knife entry."),
+    momentum_reversal_strong_atr: Optional[float] = Query(None, ge=0, description="Strong reversal threshold (×5M ATR)."),
+    raw_body_enabled: Optional[bool] = Query(None, description="raw_body (copied from futures) — block if recent 5M N-bar net energy opposes the entry."),
+    momentum_deriv_enabled: Optional[bool] = Query(None, description="momentum_deriv (copied from futures) — block if 5M RSI/MACD rate-of-change accelerates against entry (both RSI+MACD)."),
+    mtf_align_enabled: Optional[bool] = Query(None, description="MTF final block (copied from futures) — block entry if higher/short TF (240/30/15) structure is clearly opposed."),
+    entry_expectation_enabled: Optional[bool] = Query(None, description="Entry expectation (shared futures util) — block on insufficient reward or excessive risk."),
+    entry_expectation_min_reward_pct: Optional[float] = Query(None, ge=0, description="Block if reward < this %%."),
+    entry_expectation_max_risk_pct: Optional[float] = Query(None, ge=0, description="Block if risk > this %%."),
+    microtiming_5m_enabled: Optional[bool] = Query(None, description="microtiming_5m (copied from futures) — defer this tick if 5M RSI/MACD/BB inflection < 2/3."),
+    microtiming_5m_min_score: Optional[int] = Query(None, ge=0, le=3, description="Min inflection score to pass (0~3)."),
 ):
-    """명시적으로 보낸 필드만 갱신 (FOCUS 패턴)."""
+    """Update only explicitly sent fields (FOCUS pattern)."""
     um = _get_um(request)
     candidates = {
         "paper": paper, "budget": budget, "max_positions": max_positions,
@@ -173,7 +173,7 @@ def bybit_spot_focus_config_set(
         "microtiming_5m_enabled": microtiming_5m_enabled, "microtiming_5m_min_score": microtiming_5m_min_score,
     }
     cfg = {k: v for k, v in candidates.items() if v is not None}
-    # ★ generic: 위에 명시 안 된 672 미러 필드도 query param 으로 수용(update_config 타입강제+hasattr 필터).
+    # ★ generic: also accept the 672 mirror fields not listed above via query param (update_config type coercion + hasattr filter).
     for _k, _v in request.query_params.items():
         if _k not in cfg:
             cfg[_k] = _v
@@ -186,8 +186,8 @@ def bybit_spot_focus_config_set(
 @router.post("/enable")
 def bybit_spot_focus_enable(
     request: Request,
-    paper: Optional[bool] = Query(None, description="paper 모드. 생략 시 현재값 유지(기본 True)."),
-    budget: Optional[float] = Query(None, ge=0, description="예산 USDT (0=가용잔고 자동)."),
+    paper: Optional[bool] = Query(None, description="paper mode. Keeps current value if omitted (default True)."),
+    budget: Optional[float] = Query(None, ge=0, description="Budget USDT (0=auto available balance)."),
 ):
     um = _get_um(request)
     cfg: Dict[str, Any] = {"enabled": True}
@@ -211,7 +211,7 @@ def bybit_spot_focus_disable(request: Request):
 # ── Scan preview ────────────────────────────────────────────
 @router.get("/scan")
 def bybit_spot_focus_scan(request: Request):
-    """3중 확인 스캔 미리보기 (진입은 안 함)."""
+    """Triple-confirmation scan preview (does not enter)."""
     um = _get_um(request)
     try:
         from app.manager.spot_focus_coin_selector import select_spot_focus_coin
@@ -229,7 +229,7 @@ def bybit_spot_focus_scan(request: Request):
 
 @router.get("/scan-candidates")
 def bybit_spot_focus_scan_candidates(request: Request):
-    """예비 후보 현황 — 거래대금 상위를 GreenPen 진단(차단 사유 포함). 진입 안 함."""
+    """Candidate watchlist — GreenPen diagnosis of top-turnover markets (incl. block reasons). Does not enter."""
     um = _get_um(request)
     try:
         from app.manager.spot_focus_coin_selector import scan_spot_focus_candidates
@@ -255,7 +255,7 @@ def bybit_spot_focus_scan_candidates(request: Request):
 
 @router.get("/scan-list")
 def bybit_spot_focus_scan_list(request: Request):
-    """거래대금 상위 후보(Source1) 미리보기."""
+    """Top-turnover candidates (Source1) preview."""
     um = _get_um(request)
     try:
         from app.manager.spot_focus_coin_selector import _source1_spot_volume
@@ -266,11 +266,11 @@ def bybit_spot_focus_scan_list(request: Request):
         return {"ok": False, "error": str(exc)}
 
 
-# ── 공개 호가창 / 점수 궤적 ──────────────────────────────────
+# ── Public orderbook / score timeline ───────────────────────
 @router.get("/score-timeline")
-def bybit_spot_focus_score_timeline(request: Request, market: str = Query(..., description="마켓 (예: WLDUSDT)"),
+def bybit_spot_focus_score_timeline(request: Request, market: str = Query(..., description="Market (e.g. WLDUSDT)"),
                                     count: int = Query(60, ge=10, le=120)):
-    """과거 시점별 guard_score+conf 궤적 (점수↔차트 정합 검증)."""
+    """guard_score+conf trajectory per past timepoint (score↔chart consistency check)."""
     um = _get_um(request)
     try:
         from app.manager.spot_focus_coin_selector import score_timeline
@@ -288,9 +288,9 @@ def bybit_spot_focus_score_timeline(request: Request, market: str = Query(..., d
 
 
 @router.get("/orderbook")
-def bybit_spot_focus_orderbook(request: Request, market: str = Query(..., description="마켓 (예: BTCUSDT)"),
+def bybit_spot_focus_orderbook(request: Request, market: str = Query(..., description="Market (e.g. BTCUSDT)"),
                                depth: int = Query(15, ge=1, le=30)):
-    """Bybit 현물 공개 호가창 프록시 (서버 경유)."""
+    """Bybit spot public orderbook proxy (via server)."""
     um = _get_um(request)
     try:
         return {"ok": True, **um.client.get_orderbook(market, depth=depth)}
@@ -302,7 +302,7 @@ def bybit_spot_focus_orderbook(request: Request, market: str = Query(..., descri
 # ── Trade Journal ───────────────────────────────────────────
 @router.get("/journal")
 def bybit_spot_focus_journal(request: Request, limit: int = Query(100, ge=1, le=2000)):
-    """거래기록(최신순) + 집계(누적/오늘 PnL, 승률, 일별)."""
+    """Trade records (newest first) + aggregates (cumulative/today PnL, win rate, daily)."""
     um = _get_um(request)
     try:
         return {"ok": True, "rows": um.read_journal(limit=limit), "summary": um.journal_summary()}
@@ -312,8 +312,8 @@ def bybit_spot_focus_journal(request: Request, limit: int = Query(100, ge=1, le=
 
 
 @router.post("/journal/delete")
-def bybit_spot_focus_journal_delete(request: Request, ts: float = Query(..., description="삭제할 저널 기록의 ts (행 고유값)")):
-    """저널 기록 1건 삭제 (ts 매칭). 기록만 삭제 — 거래·포지션 무관."""
+def bybit_spot_focus_journal_delete(request: Request, ts: float = Query(..., description="ts of the journal record to delete (row unique key)")):
+    """Delete one journal record (ts match). Deletes the record only — unrelated to trades/positions."""
     um = _get_um(request)
     try:
         return um.delete_journal(ts)
@@ -322,17 +322,17 @@ def bybit_spot_focus_journal_delete(request: Request, ts: float = Query(..., des
         return {"ok": False, "error": str(exc)}
 
 
-# ── 퀵 트레이드 (수동 즉시 시장가, LIVE 전용) ─────────────────
+# ── Quick trade (manual immediate market order, LIVE only) ───
 @router.post("/order")
 def bybit_spot_focus_order(
     request: Request,
-    market: str = Query(..., description="마켓 (예: BTCUSDT 또는 BTC)"),
-    side: str = Query(..., description="buy(매수) 또는 sell(매도)"),
-    krw: float = Query(0.0, ge=0, description="매수 금액(USDT) — 원 모드"),
-    qty: float = Query(0.0, ge=0, description="매도 수량(0=실보유 전량) — 원 모드"),
-    pct: float = Query(0.0, ge=0, le=100, description="비율 % — 매수=가용USDT×%, 매도=보유×%. >0이면 krw/qty 무시(% 모드)."),
+    market: str = Query(..., description="Market (e.g. BTCUSDT or BTC)"),
+    side: str = Query(..., description="buy or sell"),
+    krw: float = Query(0.0, ge=0, description="Buy amount (USDT) — absolute mode"),
+    qty: float = Query(0.0, ge=0, description="Sell quantity (0=entire actual holding) — absolute mode"),
+    pct: float = Query(0.0, ge=0, le=100, description="Ratio % — buy=available USDT×%, sell=holding×%. If >0, krw/qty ignored (% mode)."),
 ):
-    """대시보드 퀵트레이드 — 즉시 시장가 주문. paper 모드 차단."""
+    """Dashboard quick trade — immediate market order. Blocked in paper mode."""
     um = _get_um(request)
     try:
         res = um.quick_order(market, side, krw=krw, qty=qty, pct=pct)
@@ -344,8 +344,8 @@ def bybit_spot_focus_order(
 
 
 @router.post("/force-close")
-def bybit_spot_focus_force_close(request: Request, market: str = Query(..., description="강제청산할 봇 관리 포지션 마켓 (예: BTCUSDT)")):
-    """봇 관리 포지션 1개 강제청산 (사람 수확). paper/live 공통."""
+def bybit_spot_focus_force_close(request: Request, market: str = Query(..., description="Market of the bot-managed position to force-close (e.g. BTCUSDT)")):
+    """Force-close one bot-managed position (human harvest). Common to paper/live."""
     um = _get_um(request)
     try:
         res = um.force_close(market)
@@ -356,12 +356,25 @@ def bybit_spot_focus_force_close(request: Request, market: str = Query(..., desc
         return {"ok": False, "error": str(exc)}
 
 
-# ── 📊 near-miss 사후판정 (과차단 탐지 · long-only 방패) ──────────
+@router.post("/release-cooldown")
+def bybit_spot_focus_release_cooldown(request: Request):
+    """Manual COOLDOWN release — reset daily plan/SL limits and post-trade cooldown, then resume (owner clicks the badge)."""
+    um = _get_um(request)
+    try:
+        res = um.release_cooldown()
+        logger.info("[BYBIT_SPOT_FOCUS_API] release_cooldown -> %s", res.get("ok"))
+        return res
+    except Exception as exc:
+        logger.warning("[BYBIT_SPOT_FOCUS_API] release_cooldown error: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+# ── 📊 near-miss post-hoc judgment (over-block detection · long-only shield) ──────────
 @router.get("/near-miss")
 def gazua_near_miss(request: Request):
-    """guard_score 통과 후 막판 게이트에 막힌 매수의 '차단가 대비 수익률' 사후판정.
-    막은 뒤 ↑(아쉬운 차단)=과차단 신호 / 그대로·↓(좋은 차단). kline 사용 →
-    get_near_miss_enriched 의 25s 응답캐시로 묶음(운영자 거래소 Tick 걱정 반영, 서버간 Tick 무관)."""
+    """Post-hoc 'return vs block price' judgment for buys that passed guard_score but were stopped by a late gate.
+    After the block: ↑ (regrettable block) = over-block signal / flat or ↓ (good block). Uses kline →
+    bundled under get_near_miss_enriched's 25s response cache (reflects operator's exchange-Tick concern; server-to-server Tick irrelevant)."""
     um = _get_um(request)
     try:
         return {"ok": True, "near_miss": um.get_near_miss_enriched()}
@@ -370,10 +383,10 @@ def gazua_near_miss(request: Request):
         return {"ok": False, "error": str(exc)}
 
 
-# ── 🕊️ 대사면(amnesty) — 유치장 코인 입양 ────────────────────
+# ── 🕊️ amnesty — adopt coins held outside the bot ────────────
 @router.get("/orphans")
 def bybit_spot_focus_orphans(request: Request):
-    """거래소 보유 중 봇 밖에 갇힌 코인(사면 후보) 조회. 정보만."""
+    """List coins held on the exchange but stranded outside the bot (amnesty candidates). Info only."""
     um = _get_um(request)
     try:
         return {"ok": True, "orphans": um.list_orphans()}
@@ -383,8 +396,8 @@ def bybit_spot_focus_orphans(request: Request):
 
 
 @router.post("/adopt")
-def bybit_spot_focus_adopt(request: Request, market: str = Query(..., description="사면할 코인 마켓 (예: WLDUSDT)")):
-    """사면 — 운영자가 고른 코인 하나만 봇 관리로 입양(자동 입양 X)."""
+def bybit_spot_focus_adopt(request: Request, market: str = Query(..., description="Market of the coin to amnesty (e.g. WLDUSDT)")):
+    """Amnesty — adopt only the single operator-chosen coin into bot management (no auto-adoption)."""
     um = _get_um(request)
     try:
         res = um.adopt_orphan(market)

@@ -18,9 +18,9 @@ def _norm_market(market: str) -> str:
     return str(market or "").strip().upper()
 
 class HyperSettingsStore:
-    """런타임(재시작 유지) 설정 저장소.
+    """Runtime (restart-persistent) settings store.
 
-    파일 스키마(권장)
+    File schema (recommended)
     {
       "version": 1,
       "ts": 0,
@@ -31,8 +31,8 @@ class HyperSettingsStore:
       }
     }
 
-    - ENV는 기본값
-    - UI가 변경한 값은 여기 저장 → 재시작 후에도 최우선 적용
+    - ENV is the default
+    - Values changed via the UI are stored here -> applied with top priority even after restart
     """
 
     def __init__(self, *, path: str) -> None:

@@ -1,7 +1,7 @@
 # Autocoin AI Module
 # ============================================================
-# 모듈 구성:
-# - features.py: 공용 Feature Extractor (학습/추론 일관성 보장)
-# - coin_tiers.py: 전략 기반 샘플 가중치 시스템
-# - labeling.py: 실제 거래 결과 기반 라벨링
+# Modules:
+# - features.py: shared Feature Extractor (ensures train/inference consistency)
+# - coin_tiers.py: strategy-based sample weighting system
+# - labeling.py: labeling based on actual trade results
 # ============================================================

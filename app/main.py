@@ -9,7 +9,7 @@ import os
 import asyncio
 import time
 
-# ★ 로깅 초기화 — 반드시 다른 모듈 import 전에 호출
+# ★ Initialize logging — must be called before importing other modules
 from app.core.logging_config import setup_logging
 setup_logging()
 
@@ -17,20 +17,20 @@ logger = logging.getLogger(__name__)
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
-# sklearn.utils.parallel 경고 완전 억제
+# Fully suppress sklearn.utils.parallel warnings
 os.environ["PYTHONWARNINGS"] = "ignore::UserWarning"
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*sklearn.*")
 warnings.filterwarnings("ignore", message=".*parallel.*")
 
-# showwarning 오버라이드로 sklearn parallel 경고 완전 차단
+# Override showwarning to fully block sklearn parallel warnings
 _original_showwarning = warnings.showwarning
 def _filtered_showwarning(message, category, filename, lineno, file=None, line=None):
     msg_str = str(message)
     if ("sklearn.utils.parallel" in msg_str) or ("delayed" in msg_str and "Parallel" in msg_str):
-        return  # 완전히 무시
+        return  # ignore entirely
     if "sklearn" in filename:
-        return  # sklearn 내부 경고 무시
+        return  # ignore sklearn-internal warnings
     _original_showwarning(message, category, filename, lineno, file, line)
 warnings.showwarning = _filtered_showwarning
 
@@ -44,13 +44,13 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from contextlib import asynccontextmanager
 
-# 세션 토큰 저장소 (메모리 기반, 서버 재시작 시 초기화)
+# Session token store (in-memory, reset on server restart)
 _AUTH_SESSIONS: set[str] = set()
-_AUTH_PASSWORD_HASH: str = ""  # 현재 비밀번호 해시 (변경 감지용)
+_AUTH_PASSWORD_HASH: str = ""  # current password hash (for change detection)
 _AUTH_FAILED: dict[str, dict[str, float]] = {}  # ip -> {count, first_ts, last_ts, blocked_until}
 
 def _get_password_hash() -> str:
-    """현재 환경변수 비밀번호의 해시값"""
+    """Hash of the current password from environment variables."""
     user = os.getenv("DASHBOARD_USER", "").strip()
     password = os.getenv("DASHBOARD_PASSWORD", "").strip()
     if not user or not password:
@@ -58,13 +58,13 @@ def _get_password_hash() -> str:
     return hashlib.sha256(f"{user}:{password}".encode()).hexdigest()[:16]
 
 def _generate_session_token(user: str, password: str) -> str:
-    """사용자 정보 기반 세션 토큰 생성 (비밀번호 해시 포함)"""
+    """Generate a session token from user info (includes password hash)."""
     pw_hash = _get_password_hash()
     data = f"{user}:{password}:{pw_hash}:{secrets.token_hex(8)}"
     return hashlib.sha256(data.encode()).hexdigest()[:32]
 
 def _invalidate_sessions_if_password_changed():
-    """비밀번호 변경 시 모든 세션 무효화"""
+    """Invalidate all sessions when the password changes."""
     global _AUTH_PASSWORD_HASH, _AUTH_SESSIONS
     current_hash = _get_password_hash()
     if _AUTH_PASSWORD_HASH and current_hash != _AUTH_PASSWORD_HASH:
@@ -167,63 +167,63 @@ def _auth_clear_failures(ip: str) -> None:
 
 
 # ============================================================
-# Basic Auth + Session Cookie Middleware (외부 접속 보호)
+# Basic Auth + Session Cookie Middleware (protects external access)
 # ============================================================
 class BasicAuthMiddleware(BaseHTTPMiddleware):
     """
-    환경변수 DASHBOARD_USER / DASHBOARD_PASSWORD 설정 시 Basic Auth 적용.
-    한 번 인증하면 세션 쿠키로 유지되어 페이지 이동 시 재인증 불필요.
+    Applies Basic Auth when DASHBOARD_USER / DASHBOARD_PASSWORD env vars are set.
+    Once authenticated, a session cookie persists so no re-auth is needed across pages.
     """
     async def dispatch(self, request: Request, call_next):
         user = os.getenv("DASHBOARD_USER", "").strip()
         password = os.getenv("DASHBOARD_PASSWORD", "").strip()
         
-        # 인증 미설정 시 통과
+        # Pass through when auth is not configured
         if not user or not password:
             return await call_next(request)
-        
-        # [2026-02-02] 비밀번호 변경 시 기존 세션 모두 무효화
+
+        # [2026-02-02] Invalidate all existing sessions when the password changes
         _invalidate_sessions_if_password_changed()
-        
-        # [2026-04-09 보안 강화] localhost 인증 우회 제거.
-        # 같은 서버의 다른 프로세스가 무인증 접근하는 것을 방지.
-        # 헬스체크(/health)는 위에서 이미 우회 허용됨.
-        
-        # WebSocket은 WS 핸들러 내부에서 인증 처리 (쿠키/Basic Auth)
-        # [2026-04-09] 미들웨어에서 무조건 우회하지 않고 핸들러에 위임
+
+        # [2026-04-09 hardening] Removed localhost auth bypass.
+        # Prevents other processes on the same server from accessing without auth.
+        # Health check (/health) is already allowed to bypass above.
+
+        # WebSocket auth is handled inside the WS handler (cookie / Basic Auth)
+        # [2026-04-09] Don't bypass unconditionally in the middleware; delegate to the handler
         if request.url.path.startswith("/ws"):
-            return await call_next(request)  # WS 핸들러가 자체 인증 수행
-        
-        # 인증 폼 경로는 우회 (브라우저 Basic Auth 프롬프트 미표시 환경 대응)
+            return await call_next(request)  # WS handler performs its own auth
+
+        # Bypass auth-form paths (for environments where the browser Basic Auth prompt is not shown)
         if request.url.path in ("/auth/login", "/auth/login-submit", "/auth/logout"):
             return await call_next(request)
 
-        # 헬스체크 경로는 인증 없이 통과 (Cloudflare 등 외부 모니터링)
+        # Health check paths pass without auth (external monitoring such as Cloudflare)
         if request.url.path in ("/health", "/api/system/health"):
             return await call_next(request)
 
-        # [2026-06-05] Peer Brief — Basic Auth 우회 (peer 간 polling 용).
-        #   라우터 내부에서 PEER_BRIEF_TOKEN 으로 자체 인증.
-        #   token 미설정 시 무인증 = 폐쇄망 전용. 외부 노출 환경은 token 필수.
+        # [2026-06-05] Peer Brief — bypass Basic Auth (for peer-to-peer polling).
+        #   The router authenticates itself with PEER_BRIEF_TOKEN.
+        #   No token = no auth = closed-network only. Externally exposed setups require a token.
         if request.url.path.startswith("/peer/"):
             return await call_next(request)
-        
-        # 정적 리소스 (CSS, JS, 이미지, 폰트)는 인증 없이 통과
+
+        # Static resources (CSS, JS, images, fonts) pass without auth
         static_exts = ('.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.woff', '.woff2', '.ttf', '.svg')
         if request.url.path.startswith("/ui/") and request.url.path.lower().endswith(static_exts):
             response = await call_next(request)
-            # JS/CSS는 Cloudflare 등 CDN 캐시 방지 (코드 배포 즉시 반영)
+            # Prevent CDN caching (e.g. Cloudflare) for JS/CSS so code deploys take effect immediately
             if request.url.path.lower().endswith(('.js', '.css')):
                 response.headers["Cache-Control"] = "no-cache, must-revalidate"
                 response.headers["Pragma"] = "no-cache"
             return response
         
-        # 1. 세션 쿠키 확인 (이미 인증된 경우)
+        # 1. Check the session cookie (already authenticated)
         session_token = request.cookies.get("autocoin_session")
         if session_token and session_token in _AUTH_SESSIONS:
             return await call_next(request)
-        
-        # 2. Basic Auth 헤더 확인
+
+        # 2. Check the Basic Auth header
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Basic "):
             try:
@@ -231,7 +231,7 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
                 decoded = base64.b64decode(encoded).decode("utf-8")
                 req_user, req_pass = decoded.split(":", 1)
                 if secrets.compare_digest(req_user, user) and secrets.compare_digest(req_pass, password):
-                    # 인증 성공 → 세션 쿠키 발급
+                    # Auth success → issue a session cookie
                     new_token = _generate_session_token(user, password)
                     _AUTH_SESSIONS.add(new_token)
                     response = await call_next(request)
@@ -240,15 +240,15 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
                         value=new_token,
                         httponly=True,
                         samesite="lax",
-                        max_age=86400  # 1일 유지 [2026-04-09 보안: 7일→1일 단축]
+                        max_age=86400  # keep for 1 day [2026-04-09 hardening: shortened 7d→1d]
                     )
                     return response
             except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-                logger.warning("[MAIN] 인증 성공 → 세션 쿠키 발급: %s", exc, exc_info=True)
-        
-        # 인증 실패:
-        # - HTML 페이지 접근은 로그인 화면으로 리다이렉트
-        # - API/비HTML 접근은 기존 401 + WWW-Authenticate 유지
+                logger.warning("[MAIN] Basic Auth processing failed: %s", exc, exc_info=True)
+
+        # Auth failure:
+        # - HTML page access redirects to the login screen
+        # - API / non-HTML access keeps the existing 401 + WWW-Authenticate
         accept = (request.headers.get("accept", "") or "").lower()
         wants_html = ("text/html" in accept) or ("*/*" in accept)
         if request.method == "GET" and wants_html and not request.url.path.startswith("/api"):
@@ -258,7 +258,7 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
             login_url = f"/auth/login?next={quote(next_path, safe='')}"
             return RedirectResponse(url=login_url, status_code=307)
 
-        # 인증 실패 → 401 + WWW-Authenticate 헤더
+        # Auth failure → 401 + WWW-Authenticate header
         return Response(
             content="Unauthorized",
             status_code=401,
@@ -376,17 +376,17 @@ def _boot_auto_start_engine(system: HyperSystem) -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import time
-    # [PERF] GC 튜닝: gen0 임계값 올려서 GC 빈도 감소 → tick 스파이크 완화
+    # [PERF] GC tuning: raise gen0 threshold to reduce GC frequency → smooth tick spikes
     import gc
-    gc.set_threshold(50000, 30, 20)  # 기본 (700, 10, 10) → 훨씬 덜 자주 GC
+    gc.set_threshold(50000, 30, 20)  # default (700, 10, 10) → GC much less often
 
-    # [2026-03-30] default executor 스레드 상한 — to_thread 스레드 무한 증가 방지
+    # [2026-03-30] default executor thread cap — prevents unbounded growth of to_thread threads
     import concurrent.futures
     loop = asyncio.get_running_loop()
     loop.set_default_executor(
         concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix="asyncio_default"))
 
-    # [2026-02-04] Runtime 상태 검증 및 자동 수정
+    # [2026-02-04] Validate runtime state and auto-fix
     try:
         from app.core.runtime_validator import validate_on_startup
         validation_result = validate_on_startup(auto_fix=True)
@@ -397,7 +397,7 @@ async def lifespan(app: FastAPI):
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
         logger.warning("[BOOT] Runtime validation failed: %s", exc, exc_info=True)
     
-    # [2026-04-09 보안] 인증 미설정 시 강력 경고
+    # [2026-04-09 security] Strong warning when auth is not configured
     _du = os.getenv("DASHBOARD_USER", "").strip()
     _dp = os.getenv("DASHBOARD_PASSWORD", "").strip()
     if not _du or not _dp:
@@ -407,12 +407,12 @@ async def lifespan(app: FastAPI):
         logger.critical("[SECURITY] Set DASHBOARD_USER and DASHBOARD_PASSWORD in .env")
         logger.critical("=" * 60)
 
-    # ★ 3-3: 테스트 환경에서는 HyperSystem 생성 + 백그라운드 루프 건너뜀
+    # ★ 3-3: In the test environment, skip HyperSystem creation + background loops
     if os.getenv("AUTOCOIN_TESTING") == "1":
         logger.info("[BOOT] AUTOCOIN_TESTING=1 — skipping HyperSystem and background loops")
         from unittest.mock import MagicMock
         mock_sys = MagicMock()
-        # ★ iterable 반환 메서드는 빈 리스트로 — MagicMock __iter__ 무한루프 방지
+        # ★ Make iterable-returning methods return empty lists — avoids MagicMock __iter__ infinite loop
         mock_sys.get_markets.return_value = []
         mock_sys.ledger.tail_records.return_value = []
         mock_sys.focus_manager = MagicMock()
@@ -424,10 +424,10 @@ async def lifespan(app: FastAPI):
     system = HyperSystem()
     app.state.system = system
 
-    # 1) 시스템 start
+    # 1) Start the system
     await system.start()
 
-    # 2) 원장 이벤트 기반 RECOVERY Reactor start (최소 침습)
+    # 2) Start the ledger-event-driven RECOVERY Reactor (minimally invasive)
     reactor = LedgerRecoveryReactor(system)
     app.state.ledger_recovery_reactor = reactor
     await reactor.start()
@@ -435,7 +435,7 @@ async def lifespan(app: FastAPI):
     # [2026-02-02] Auto Engine Start on Boot
     _boot_auto_start_engine(system)
 
-    # [2026-03-30] 이벤트 루프 하트비트 진단 (hang 감지용)
+    # [2026-03-30] Event loop heartbeat diagnostic (for hang detection)
     async def _heartbeat():
         import threading
         _hb_count = 0
@@ -451,14 +451,14 @@ async def lifespan(app: FastAPI):
     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
         logger.warning("[BOOT] Snapshot scheduler failed: %s", exc, exc_info=True)
 
-    # [2026-06-05] Peer Brief polling — 옆 서버 가드
+    # [2026-06-05] Peer Brief polling — guard against neighboring servers
     try:
         from app.core.peer_brief import start_poll_loop as _peer_start
         app.state.peer_brief_task = _peer_start()
     except (KeyError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
         logger.warning("[BOOT] Peer Brief poll loop failed: %s", exc, exc_info=True)
     
-    # [2026-02-03] Server Startup Telegram 알림
+    # [2026-02-03] Server Startup Telegram notification
     try:
         from app.notify.telegram import send_telegram
         import socket
@@ -469,18 +469,18 @@ async def lifespan(app: FastAPI):
             f"Mode: {mode}\n"
             f"Host: {hostname}\n"
             f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-            cooldown_key=None  # 서버 시작은 항상 알림
+            cooldown_key=None  # always notify on server start
         )
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
-        logger.warning("[MAIN] [2026-02-03] Server Startup Telegram 알림: %s", exc, exc_info=True)
+        logger.warning("[MAIN] [2026-02-03] Server Startup Telegram notification: %s", exc, exc_info=True)
 
     yield
 
-    # shutdown: websocket -> reactor -> system 순
+    # shutdown order: websocket -> reactor -> system
     try:
         await stop_broadcast_task()
     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-        logger.warning("[MAIN] shutdown: websocket -> reactor -> system 순: %s", exc, exc_info=True)
+        logger.warning("[MAIN] shutdown (websocket -> reactor -> system): %s", exc, exc_info=True)
 
     try:
         task = getattr(app.state, "recommend_snapshot_task", None)
@@ -491,12 +491,12 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass  # normal shutdown
     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-        logger.warning("[MAIN] shutdown: websocket -> reactor -> system 순: %s", exc, exc_info=True)
+        logger.warning("[MAIN] shutdown (websocket -> reactor -> system): %s", exc, exc_info=True)
 
     try:
         await reactor.stop()
     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-        logger.warning("[MAIN] shutdown: websocket -> reactor -> system 순: %s", exc, exc_info=True)
+        logger.warning("[MAIN] shutdown (websocket -> reactor -> system): %s", exc, exc_info=True)
 
     await system.stop()
 
@@ -504,42 +504,42 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Autocoin OS v3-H",
     description="""
-## 암호화폐 자동매매 시스템 API
+## Crypto Auto-Trading System API
 
-Autocoin OS v3-H는 Bybit 기반 자동매매 시스템입니다.
+Autocoin OS v3-H is a Bybit-based auto-trading system.
 
-### 주요 기능
-- **시스템 관리**: 시스템 상태 조회, 비상 정지/재개
-- **엔진 제어**: 매매 엔진 시작/정지, 수동 주문
-- **전략 관리**: PINGPONG, AUTOLOOP, LADDER 등 전략 설정
-- **마켓 관리**: OMA 마켓 등록/해제, 예산 설정
-- **예약 관리**: 후보 마켓 조회, 자동 승인 설정
+### Key Features
+- **System management**: query system status, emergency stop/resume
+- **Engine control**: start/stop the trading engine, manual orders
+- **Strategy management**: configure strategies such as PINGPONG, AUTOLOOP, LADDER
+- **Market management**: register/unregister OMA markets, budget settings
+- **Reserved management**: query candidate markets, auto-approval settings
 
-### 대시보드
-- `/ui/dashboard_v2.html` - 메인 대시보드 (V2)
-- `/ui/market_detail.html` - 마켓 상세
+### Dashboards
+- `/ui/dashboard_v2.html` - main dashboard (V2)
+- `/ui/market_detail.html` - market detail
     """,
     version="3.0.0",
     docs_url="/docs" if os.getenv("ENABLE_API_DOCS") == "1" else None,
     redoc_url="/redoc" if os.getenv("ENABLE_API_DOCS") == "1" else None,
     openapi_url="/openapi.json" if os.getenv("ENABLE_API_DOCS") == "1" else None,
     openapi_tags=[
-        {"name": "system", "description": "시스템 상태 및 제어"},
-        {"name": "engine", "description": "매매 엔진 제어"},
-        {"name": "strategy", "description": "전략 조회 및 설정"},
-        {"name": "manager", "description": "마켓 관리 (OMA)"},
-        {"name": "reserved", "description": "예약 후보 관리"},
-        {"name": "ladder", "description": "래더 전략 관리"},
-        {"name": "ai", "description": "AI 분석 및 학습"},
+        {"name": "system", "description": "System status and control"},
+        {"name": "engine", "description": "Trading engine control"},
+        {"name": "strategy", "description": "Strategy query and configuration"},
+        {"name": "manager", "description": "Market management (OMA)"},
+        {"name": "reserved", "description": "Reserved candidate management"},
+        {"name": "ladder", "description": "Ladder strategy management"},
+        {"name": "ai", "description": "AI analysis and learning"},
     ],
     lifespan=lifespan
 )
 
-# ✅ GZip 압축 — 외부/모바일 접속 응답 속도 개선 (1KB 이상 응답 자동 압축)
+# ✅ GZip compression — improves response speed for external/mobile access (auto-compresses responses over 1KB)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
-# ✅ 스캐너/백업파일 탐색 차단 미들웨어
-# 한국 IP 대역 (KT/SKT/LGU+/KORNET 주요 대역)
+# ✅ Middleware to block scanner / backup-file probing
+# Korean IP ranges (major KT/SKT/LGU+/KORNET ranges)
 _KR_IP_PREFIXES = (
     "1.11.", "1.176.", "1.177.", "1.178.", "1.179.",
     "14.32.", "14.33.", "14.34.", "14.35.", "14.36.", "14.37.",
@@ -572,33 +572,33 @@ _KR_IP_PREFIXES = (
     "220.64.", "220.65.", "220.66.", "220.67.", "220.68.", "220.69.", "220.70.", "220.71.",
     "221.140.", "221.141.", "221.142.", "221.143.", "221.144.", "221.145.", "221.146.", "221.147.",
     "222.96.", "222.97.", "222.98.", "222.99.", "222.100.", "222.101.",
-    # Cloudflare (모든 국가 경유 — 허용) — https://www.cloudflare.com/ips-v4/
+    # Cloudflare (passes through any country — allowed) — https://www.cloudflare.com/ips-v4/
     "172.64.", "172.65.", "172.66.", "172.67.", "172.68.", "172.69.", "172.70.", "172.71.",
     "104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.", "104.24.", "104.25.", "104.26.", "104.27.", "104.28.",
     "141.101.", "162.158.", "162.159.", "188.114.", "190.93.", "197.234.", "198.41.",
     "173.245.", "103.21.", "103.22.", "103.31.", "108.162.", "131.0.72.", "131.0.73.", "131.0.74.", "131.0.75.",
-    # 로컬/내부
+    # local / internal
     "127.", "10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.",
     "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.",
     "172.28.", "172.29.", "172.30.", "172.31.",
 )
 
 class BlockScannerMiddleware(BaseHTTPMiddleware):
-    """스캐너·백업파일·해외 직접접속 차단."""
+    """Blocks scanners, backup files, and direct overseas access."""
     _BAD_EXT = (".php", ".asp", ".aspx", ".jsp", ".cgi",
                 ".7z", ".rar", ".tar", ".gz", ".zip", ".bak", ".backup", ".sql", ".db")
     _BAD_PATH = ("/wp-", "/wordpress", "/xmlrpc", "/phpmyadmin", "/admin.php",
                  "/.env", "/.git", "/shell", "/backdoor", "/webshell", "/cgibin")
 
     async def dispatch(self, request: Request, call_next):
-        # ★ 3-2: 테스트 환경에서 우회
+        # ★ 3-2: Bypass in the test environment
         if os.getenv("AUTOCOIN_TESTING") == "1":
             return await call_next(request)
-        # 해외 직접접속 차단 (Cloudflare/KR/로컬 외)
+        # Block direct overseas access (anything outside Cloudflare/KR/local)
         client_ip = request.client.host if request.client else ""
         if client_ip and not any(client_ip.startswith(p) for p in _KR_IP_PREFIXES):
             return Response(status_code=444)
-        # 스캐너 패턴 차단
+        # Block scanner patterns
         path = request.url.path.lower()
         if path.endswith(self._BAD_EXT) or any(p in path for p in self._BAD_PATH):
             return Response(status_code=444)
@@ -606,7 +606,7 @@ class BlockScannerMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(BlockScannerMiddleware)
 
-# ✅ Basic Auth 미들웨어 적용 (DASHBOARD_USER/PASSWORD 설정 시 활성화)
+# ✅ Apply Basic Auth middleware (enabled when DASHBOARD_USER/PASSWORD are set)
 app.add_middleware(BasicAuthMiddleware)
 
 
@@ -615,7 +615,7 @@ app.add_middleware(BasicAuthMiddleware)
 # ============================================================
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
-    """모든 HTTP 응답에 보안 헤더 추가."""
+    """Add security headers to all HTTP responses."""
     response = await call_next(request)
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -624,12 +624,12 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     return response
 
-# ✅ UI 정적 파일 서빙 (핵심)
+# ✅ Serve UI static files (core)
 app.mount("/ui", StaticFiles(directory="app/ui"), name="ui")
 
 
 def _serve_html_no_cache(filepath: str):
-    """HTML 파일을 항상 no-cache로 서빙 (배포 즉시 반영)."""
+    """Serve HTML files always no-cache (deploys take effect immediately)."""
     with open(filepath, encoding="utf-8") as f:
         content = f.read()
     return Response(
@@ -644,42 +644,42 @@ def _serve_html_no_cache(filepath: str):
 
 @app.get("/ui/dashboard_v2.html", include_in_schema=False)
 async def dashboard_html():
-    """V2 자리 = Upbit 현물 대시보드 (레거시 dashboard_v2.html 은 디스크 보존, 미서빙)."""
+    """V2 slot = Upbit spot dashboard (legacy dashboard_v2.html kept on disk, not served)."""
     return _serve_html_no_cache("app/ui/dashboard_upbit.html")
 
 @app.get("/ui/dashboard_upbit.html", include_in_schema=False)
 async def dashboard_upbit_html():
-    """Upbit FOCUS 현물 대시보드 — 항상 no-cache."""
+    """Upbit FOCUS spot dashboard — always no-cache."""
     return _serve_html_no_cache("app/ui/dashboard_upbit.html")
 
 @app.get("/ui/dashboard_upbit_v3.html", include_in_schema=False)
 async def dashboard_upbit_v3_html():
-    """Upbit FOCUS v3 리본 대시보드 (개편 중 — dashboard_upbit.html 과 병행, 완성 후 교체)."""
+    """Upbit FOCUS v3 ribbon dashboard (under rework — runs alongside dashboard_upbit.html, to replace it once done)."""
     return _serve_html_no_cache("app/ui/dashboard_upbit_v3.html")
 
 @app.get("/ui/dashboard_bithumb_v3.html", include_in_schema=False)
 async def dashboard_bithumb_v3_html():
-    """Bithumb FOCUS v3 리본 대시보드 (Upbit v3 미러 — 빗썸 전용 API)."""
+    """Bithumb FOCUS v3 ribbon dashboard (Upbit v3 mirror — Bithumb-specific API)."""
     return _serve_html_no_cache("app/ui/dashboard_bithumb_v3.html")
 
 @app.get("/ui/dashboard_bybit_spot_v3.html", include_in_schema=False)
 async def dashboard_bybit_spot_v3_html():
-    """Bybit 현물(USDT) FOCUS v3 리본 대시보드 (Upbit v3 미러 — Bybit 현물 전용 API)."""
+    """Bybit spot (USDT) FOCUS v3 ribbon dashboard (Upbit v3 mirror — Bybit spot-specific API)."""
     return _serve_html_no_cache("app/ui/dashboard_bybit_spot_v3.html")
 
 @app.get("/ui/dashboard_binance_spot_v3.html", include_in_schema=False)
 async def dashboard_binance_spot_v3_html():
-    """Binance 현물(USDT) FOCUS v3 리본 대시보드 (Bybit 현물 v3 미러 — Binance 현물 전용 API)."""
+    """Binance spot (USDT) FOCUS v3 ribbon dashboard (Bybit spot v3 mirror — Binance spot-specific API)."""
     return _serve_html_no_cache("app/ui/dashboard_binance_spot_v3.html")
 
 @app.get("/ui/focus.html", include_in_schema=False)
 async def focus_html():
-    """FOCUS 대시보드 HTML — 항상 no-cache."""
+    """FOCUS dashboard HTML — always no-cache."""
     return _serve_html_no_cache("app/ui/focus.html")
 
 @app.get("/ui/js/dashboard_v2.js", include_in_schema=False)
 async def dashboard_js():
-    """대시보드 JS — 항상 no-cache (배포 즉시 반영)."""
+    """Dashboard JS — always no-cache (deploys take effect immediately)."""
     with open("app/ui/js/dashboard_v2.js", encoding="utf-8") as f:
         content = f.read()
     return Response(
@@ -695,13 +695,13 @@ async def dashboard_js():
 
 @app.get("/")
 async def root():
-    """루트 경로 → V3 대시보드로 리다이렉트 (★2026-06-02 부모님: v3 기본 통일, 헷갈림 방지)."""
+    """Root path → redirect to the V3 dashboard (★2026-06-02 owner: unify on v3 by default to avoid confusion)."""
     return RedirectResponse(url="/ui/dashboard_v3.html")
 
 
 @app.get("/auth/login")
 async def auth_login(request: Request):
-    """브라우저용 로그인 폼 (세션 쿠키 발급)."""
+    """Browser login form (issues a session cookie)."""
     user = os.getenv("DASHBOARD_USER", "").strip()
     password = os.getenv("DASHBOARD_PASSWORD", "").strip()
     next_target = str(request.query_params.get("next") or "/ui/dashboard_v3.html")
@@ -713,7 +713,7 @@ async def auth_login(request: Request):
 
     html = f"""
 <!doctype html>
-<html lang="ko">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -729,10 +729,10 @@ async def auth_login(request: Request):
 </head>
 <body>
   <div class="wrap">
-    <h1>Autocoin 로그인</h1>
-    <input id="u" placeholder="아이디" autocomplete="username" />
-    <input id="p" type="password" placeholder="비밀번호" autocomplete="current-password" />
-    <button id="btn">로그인</button>
+    <h1>Autocoin Login</h1>
+    <input id="u" placeholder="Username" autocomplete="username" />
+    <input id="p" type="password" placeholder="Password" autocomplete="current-password" />
+    <button id="btn">Log in</button>
     <div id="err" class="err"></div>
   </div>
   <script>
@@ -752,12 +752,12 @@ async def auth_login(request: Request):
         }});
         const data = await res.json();
         if (!res.ok || !data.ok) {{
-          err.textContent = (data && data.error) ? data.error : '로그인 실패';
+          err.textContent = (data && data.error) ? data.error : 'Login failed';
           return;
         }}
         window.location.href = data.redirect || '/ui/dashboard_v3.html';
       }} catch (e) {{
-        err.textContent = '로그인 요청 실패';
+        err.textContent = 'Login request failed';
       }}
     }}
     btn.addEventListener('click', login);
@@ -771,12 +771,12 @@ async def auth_login(request: Request):
 
 @app.post("/auth/login-submit")
 async def auth_login_submit(request: Request):
-    """로그인 처리 후 세션 쿠키 발급."""
+    """Process login then issue a session cookie."""
     client_ip = _get_request_ip(request)
     blocked, remain_sec = _auth_is_blocked(client_ip)
     if blocked:
         return JSONResponse(
-            {"ok": False, "error": f"로그인 시도 제한. {remain_sec}초 후 다시 시도하세요."},
+            {"ok": False, "error": f"Too many login attempts. Try again in {remain_sec}s."},
             status_code=429,
         )
 
@@ -798,7 +798,7 @@ async def auth_login_submit(request: Request):
 
     if not (secrets.compare_digest(req_user, user) and secrets.compare_digest(req_pass, password)):
         _auth_register_failure(client_ip)
-        return JSONResponse({"ok": False, "error": "아이디/비밀번호 불일치"}, status_code=401)
+        return JSONResponse({"ok": False, "error": "Invalid username or password"}, status_code=401)
 
     _invalidate_sessions_if_password_changed()
     new_token = _generate_session_token(user, password)
@@ -817,7 +817,7 @@ async def auth_login_submit(request: Request):
 
 @app.get("/auth/logout")
 async def auth_logout(request: Request):
-    """세션 쿠키 삭제."""
+    """Delete the session cookie."""
     token = request.cookies.get("autocoin_session")
     if token and token in _AUTH_SESSIONS:
         try:
@@ -831,13 +831,13 @@ async def auth_logout(request: Request):
 
 @app.get("/health")
 async def health_check():
-    """헬스체크 엔드포인트 - 서버 상태, 마지막 거래 시간, Autopilot 상태 체크."""
+    """Health check endpoint - checks server status, last trade time, and Autopilot status."""
     import time
     
     now = time.time()
     system = getattr(app.state, "system", None)
     
-    # 기본 상태
+    # Default status
     status = {
         "ok": True,
         "timestamp": now,
@@ -857,7 +857,7 @@ async def health_check():
         status["warnings"].append("system_not_initialized")
         return status
     
-    # 엔진 상태
+    # Engine status
     try:
         engine_status = getattr(system.coordinator.engine.status, "state", "unknown")
         status["engine_status"] = str(engine_status)
@@ -865,21 +865,21 @@ async def health_check():
         logger.warning("[Health] engine_status check failed", exc_info=True)
         status["warnings"].append("engine_status_unavailable")
     
-    # Autopilot 상태
+    # Autopilot status
     try:
         autopilot_mgr = getattr(system, "autopilot_manager", None)
         status["autopilot_enabled"] = bool(getattr(system, "autopilot_enabled", False))
         status["autopilot_last_run"] = float(getattr(autopilot_mgr, "last_run_ts", 0) or 0) if autopilot_mgr is not None else 0.0
         status["autopilot_idle_sec"] = int(now - status["autopilot_last_run"]) if status["autopilot_last_run"] > 0 else 0
         
-        # Autopilot 10분 이상 idle 경고
+        # Warn if Autopilot is idle for more than 10 minutes
         if status["autopilot_enabled"] and status["autopilot_idle_sec"] > 600:
             status["warnings"].append(f"autopilot_idle_{status['autopilot_idle_sec']}sec")
     except (KeyError, AttributeError, TypeError, ValueError):
         logger.warning("[Health] autopilot_status check failed", exc_info=True)
         status["warnings"].append("autopilot_status_unavailable")
     
-    # 마지막 거래 시간 (FILL 이벤트)
+    # Last trade time (FILL event)
     try:
         records = system.ledger.tail_records(since_ts=now - 3600, tail_lines=1000)
         last_fill = 0.0
@@ -891,26 +891,26 @@ async def health_check():
         status["last_fill_ts"] = last_fill
         status["last_fill_idle_sec"] = int(now - last_fill) if last_fill > 0 else 0
         
-        # 30분 이상 거래 없으면 경고
+        # Warn if no trades for more than 30 minutes
         if status["engine_status"] == "RUNNING" and status["last_fill_idle_sec"] > 1800:
             status["warnings"].append(f"no_trades_{status['last_fill_idle_sec']}sec")
     except (KeyError, AttributeError, TypeError, ValueError):
         logger.warning("[Health] last_fill check failed", exc_info=True)
         status["warnings"].append("last_fill_unavailable")
     
-    # Active 마켓 수
+    # Active market count
     try:
         snap = system.oma_registry.snapshot()
         status["active_markets"] = len(snap.get("active") or [])
-        
-        # Active 마켓 0개면 경고
+
+        # Warn if there are 0 active markets
         if status["engine_status"] == "RUNNING" and status["active_markets"] == 0:
             status["warnings"].append("no_active_markets")
     except (KeyError, AttributeError, TypeError):
         logger.warning("[Health] active_markets check failed", exc_info=True)
         status["warnings"].append("active_markets_unavailable")
     
-    # 경고가 있으면 ok=False
+    # If there are warnings, set ok=False
     if status["warnings"]:
         status["ok"] = False
     

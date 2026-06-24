@@ -30,12 +30,12 @@ router = APIRouter(
 )
 
 
-@router.get("/health", summary="헬스체크", description="서버 정상 동작 여부 확인")
+@router.get("/health", summary="Health check", description="Check whether the server is operating normally")
 def health(request: Request) -> Dict[str, Any]:
-    """서버 헬스체크 엔드포인트 (강화)."""
+    """Server health check endpoint (extended)."""
     system = request.app.state.system
-    
-    # 기본 체크
+
+    # Basic checks
     checks = {
         "server": "ok",
         "websocket": "unknown",
@@ -48,13 +48,13 @@ def health(request: Request) -> Dict[str, Any]:
         "ledger": {},
     }
     
-    # 1. 메모리 사용량
+    # 1. Memory usage
     try:
         import psutil
         process = psutil.Process()
         checks["memory_mb"] = int(process.memory_info().rss / 1024 / 1024)
     except (ImportError, AttributeError, TypeError, ValueError):
-        # psutil 미설치 환경 fallback (Windows 우선)
+        # Fallback for environments without psutil (Windows first)
         logger.warning("system_router.health: psutil unavailable, trying ctypes fallback", exc_info=True)
         try:
             import ctypes
@@ -86,9 +86,9 @@ def health(request: Request) -> Dict[str, Any]:
             if ok:
                 checks["memory_mb"] = int(float(counters.WorkingSetSize) / 1024 / 1024)
         except (AttributeError, ImportError, OSError, ValueError):
-            report_suppressed_exception(__name__, 'psutil 미설치 환경 fallback (Windows 우선)')
+            report_suppressed_exception(__name__, 'Fallback for environments without psutil (Windows first)')
 
-    # 최후 fallback: tracemalloc(파이썬 힙 기준)이라도 0 방지
+    # Last-resort fallback: use tracemalloc (Python heap) to avoid reporting 0
     if int(checks.get("memory_mb") or 0) <= 0:
         try:
             import tracemalloc
@@ -97,12 +97,12 @@ def health(request: Request) -> Dict[str, Any]:
             current, peak = tracemalloc.get_traced_memory()
             checks["memory_mb"] = int(max(float(current), float(peak)) / 1024 / 1024)
         except (ImportError, AttributeError, ValueError):
-            report_suppressed_exception(__name__, '최후 fallback: tracemalloc(파이썬 힙 기준)이라도 0 방지')
-    
-    # 2. Exchange API 응답 확인
+            report_suppressed_exception(__name__, 'Last-resort fallback: use tracemalloc (Python heap) to avoid reporting 0')
+
+    # 2. Check Exchange API response
     try:
         if hasattr(system, "query_client"):
-            # 간단한 ticker 조회로 API 상태 확인
+            # Verify API status with a simple ticker query
             ticker = system.query_client.get_ticker("BTCUSDT")
             if ticker and ticker.get("trade_price"):
                 checks["exchange_api"] = "ok"
@@ -112,7 +112,7 @@ def health(request: Request) -> Dict[str, Any]:
         logger.warning("system_router.health L111 except", exc_info=True)
         checks["exchange_api"] = "error"
     
-    # 3. WebSocket 상태 (price feed)
+    # 3. WebSocket status (price feed)
     try:
         if hasattr(system, "price_feed"):
             pf = system.price_feed
@@ -129,8 +129,8 @@ def health(request: Request) -> Dict[str, Any]:
         logger.warning("system_router.health L127 except", exc_info=True)
         checks["websocket"] = "error"
     
-    # 4. 최근 reconcile orphan 수
-    # 우선 in-memory 마지막 reconcile 결과 사용 (가장 정확/저비용)
+    # 4. Recent reconcile orphan count
+    # Prefer the in-memory last reconcile result (most accurate / lowest cost)
     try:
         last_result = getattr(system, "_last_reconcile_result", None)
         if isinstance(last_result, dict):
@@ -140,9 +140,9 @@ def health(request: Request) -> Dict[str, Any]:
             elif orphans is not None:
                 checks["orphan_markets"] = int(orphans)
     except (AttributeError, TypeError, ValueError):
-        report_suppressed_exception(__name__, '우선 in-memory 마지막 reconcile 결과 사용 (가장 정확/저비용)')
+        report_suppressed_exception(__name__, 'Prefer the in-memory last reconcile result (most accurate / lowest cost)')
 
-    # fallback: 최근 원장 레코드
+    # fallback: recent ledger records
     try:
         if int(checks.get("orphan_markets") or 0) <= 0:
             now_ts = time.time()
@@ -161,18 +161,20 @@ def health(request: Request) -> Dict[str, Any]:
             if last_orphans is not None:
                 checks["orphan_markets"] = int(last_orphans)
     except (AttributeError, TypeError, ValueError):
-        report_suppressed_exception(__name__, 'fallback: 최근 원장 레코드')
-    
-    # 5. 오래된 미체결 주문 (1시간 이상)
-    #   2026-06-06: 기존 구현은 system.get_markets() + system.get_context() (둘 다 HyperSystem
-    #   에 없는 유령 — get_context 는 coordinator 전용) + ctx.get("order") (HyperEngineContext
-    #   는 dict 도 order 필드도 없음) 3중 깨짐 → 매 health 호출마다 AttributeError 로그 스팸.
-    #   현 아키텍처(FOCUS 시장가 + 서버사이드 TP/SL)는 미체결 limit 주문을 로컬 context 에
-    #   들고 있지 않아 이 메트릭 자체가 무의미 → 0 고정. 실측 stuck-order 모니터가 필요하면
-    #   Bybit open-orders 를 별도 async(여기 동기 폴링 X)로 붙일 것.
+        report_suppressed_exception(__name__, 'fallback: recent ledger records')
+
+    # 5. Stale unfilled orders (older than 1 hour)
+    #   2026-06-06: the old implementation was triple-broken — system.get_markets() +
+    #   system.get_context() (both phantom on HyperSystem — get_context is coordinator-only)
+    #   + ctx.get("order") (HyperEngineContext is neither a dict nor has an order field),
+    #   spamming AttributeError logs on every health call.
+    #   The current architecture (FOCUS market orders + server-side TP/SL) does not hold
+    #   unfilled limit orders in the local context, so this metric is meaningless → fixed at 0.
+    #   If a real stuck-order monitor is needed, attach Bybit open-orders via a separate
+    #   async path (no synchronous polling here).
     checks["stuck_orders"] = 0
 
-    # 6. Rate limiter 상태
+    # 6. Rate limiter status
     try:
         rl_status = rate_limiter.status()
         checks["rate_limiter"] = {
@@ -186,12 +188,12 @@ def health(request: Request) -> Dict[str, Any]:
             checks["rate_limiter"]["exchange_recent_sec"] = exchange_stats.get("recent_sec", 0)
             checks["rate_limiter"]["exchange_recent_min"] = exchange_stats.get("recent_min", 0)
         except (AttributeError, TypeError):
-            report_suppressed_exception(__name__, '6. Rate limiter 상태')
+            report_suppressed_exception(__name__, '6. Rate limiter status')
     except (AttributeError, TypeError, ValueError):
         logger.warning("system_router.health L200 except", exc_info=True)
         checks["rate_limiter"] = {"error": "unavailable"}
 
-    # 7. Price feed 상태 (last update timestamp)
+    # 7. Price feed status (last update timestamp)
     try:
         ps = getattr(system, "price_store", None)
         if ps is None:
@@ -209,7 +211,7 @@ def health(request: Request) -> Dict[str, Any]:
         logger.warning("system_router.health L217 except", exc_info=True)
         checks["price_feed"] = {"error": "unavailable"}
 
-    # 8. Ledger 상태 (last write, total entries)
+    # 8. Ledger status (last write, total entries)
     try:
         ledger = system.ledger
         path = getattr(ledger, "path", getattr(ledger, "_path", None))
@@ -221,7 +223,7 @@ def health(request: Request) -> Dict[str, Any]:
                 with open(path, "r", encoding="utf-8") as f:
                     total_entries = sum(1 for line in f if line.strip())
             except OSError:
-                report_suppressed_exception(__name__, '8. Ledger 상태 (last write, total entries)')
+                report_suppressed_exception(__name__, '8. Ledger status (last write, total entries)')
         checks["ledger"] = {
             "last_write_ts": last_write_ts,
             "total_entries": total_entries,
@@ -230,7 +232,7 @@ def health(request: Request) -> Dict[str, Any]:
         logger.warning("system_router.health L237 except", exc_info=True)
         checks["ledger"] = {"error": "unavailable"}
     
-    # 전체 상태 판정 (healthy / degraded / critical)
+    # Overall status determination (healthy / degraded / critical)
     status = "healthy"
     rl = checks.get("rate_limiter") or {}
     pf = checks.get("price_feed") or {}
@@ -256,19 +258,19 @@ def health(request: Request) -> Dict[str, Any]:
     }
 
 
-@router.get("/currency", summary="기축통화 정보", description="현재 설정된 기축통화(Quote Currency) 정보 조회")
+@router.get("/currency", summary="Quote currency info", description="Get the currently configured quote currency information")
 def currency() -> Dict[str, Any]:
-    """현재 설정된 기축통화 정보를 반환합니다.
-    
+    """Return the currently configured quote currency information.
+
     Returns:
-        symbol, min_order, decimals, exchange 등 통화 설정 정보
+        Currency settings such as symbol, min_order, decimals, exchange
     """
     return {"ok": True, **Q.to_dict()}
 
 
-@router.get("/info", summary="시스템 정보", description="시스템 버전 및 엔진 정보 조회")
+@router.get("/info", summary="System info", description="Get the system version and engine information")
 def info() -> Dict[str, Any]:
-    """시스템 기본 정보를 반환합니다."""
+    """Return basic system information."""
     return {
         "ok": True,
         "version": "v3-H",
@@ -277,13 +279,13 @@ def info() -> Dict[str, Any]:
     }
 
 
-@router.get("/markets", summary="Bybit 마켓 목록", description="CORS 없이 Bybit 마켓 목록 조회 (서버 프록시)")
+@router.get("/markets", summary="Bybit market list", description="Get the Bybit market list without CORS (server proxy)")
 def bybit_markets(
-    quote: str = Query(Q.symbol, description="기축통화 필터 (예: USDT)"),
-    refresh: bool = Query(False, description="True면 업비트 API를 즉시 조회"),
-    details: bool = Query(False, description="True면 마켓 상세 정보 포함"),
+    quote: str = Query(Q.symbol, description="Quote currency filter (e.g., USDT)"),
+    refresh: bool = Query(False, description="If True, query the exchange API immediately"),
+    details: bool = Query(False, description="If True, include detailed market info"),
 ) -> Dict[str, Any]:
-    """UI용 Bybit 마켓 목록 조회 (서버 프록시)."""
+    """Get the Bybit market list for the UI (server proxy)."""
     quote_u = str(quote or Q.symbol).upper()
     markets: List[Dict[str, Any]] = []
     source = "cache"
@@ -329,9 +331,9 @@ def bybit_markets(
             "items": [],
         }
 
-@router.get("/feed-status", summary="가격 피드 상태", description="REST/WebSocket 피드 상태 조회")
+@router.get("/feed-status", summary="Price feed status", description="Get REST/WebSocket feed status")
 def feed_status() -> Dict[str, Any]:
-    """가격 피드 상태를 반환합니다."""
+    """Return the price feed status."""
     return {
         "ok": True,
         "mode": "REST",
@@ -341,17 +343,17 @@ def feed_status() -> Dict[str, Any]:
         "ban_until": None,
     }
 
-@router.get("/status", summary="시스템 상태", description="실시간 시스템 스냅샷 조회")
+@router.get("/status", summary="System status", description="Get a real-time system snapshot")
 def status(request: Request, response: Response) -> Dict[str, Any]:
-    """실시간 시스템 상태 스냅샷.
+    """Real-time system status snapshot.
 
-    2초 캐시: 부팅 직후 스레드풀 경쟁 시에도 빠르게 응답.
+    2-second cache: responds quickly even during thread-pool contention right after boot.
     """
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
 
-    # 2초 캐시: 동시 다발 요청 시 스레드풀 과부하 방지
+    # 2-second cache: prevents thread-pool overload under bursts of concurrent requests
     now = time.time()
     cached = getattr(request.app.state, "_status_cache", None)
     if cached and (now - cached[0]) < 2.0:
@@ -362,9 +364,10 @@ def status(request: Request, response: Response) -> Dict[str, Any]:
     snap["server_now_ts"] = now
 
     # API call stats (rate limit monitoring)
-    # ★ [2026-06-23 부모] FOCUS 실호출로 통일 — 기존 system.trade_client(상태폴링만=거의 1)는
-    #   실제 스캔/주문 트래픽을 안 셈(FOCUS 는 별도 클라이언트 인스턴스). FOCUS 클라의 get_api_stats
-    #   를 우선 표시해 진짜 사용량(스캔 시 ~20-25)을 보이게. (표시 전용·거래 무관, Binance 창은 이미 동일.)
+    # ★ [2026-06-23 owner] Unify on the FOCUS actual call counts — the old system.trade_client
+    #   (status polling only ≈ 1) does not count real scan/order traffic (FOCUS is a separate
+    #   client instance). Prefer FOCUS client's get_api_stats so the real usage (~20-25 during
+    #   scans) is shown. (Display only, trade-unrelated; the Binance panel already matches.)
     try:
         _fm = getattr(system, "focus_manager", None)
         if _fm is not None and hasattr(_fm, "_get_client"):
@@ -395,20 +398,20 @@ def ledger_tail(
 
 
 def _extract_equity_from_ledger_record(rec: Dict[str, Any]) -> Optional[float]:
-    """원장 레코드에서 계정 총자산(equity_usdt) 값을 추출한다."""
+    """Extract the account equity (equity_usdt) value from a ledger record."""
     try:
         data = rec.get("data") if isinstance(rec, dict) else None
         if not isinstance(data, dict):
             return None
 
-        # 1) 가장 흔한 케이스: ALLOC_REBALANCE.data.equity_usdt
+        # 1) Most common case: ALLOC_REBALANCE.data.equity_usdt
         eq = data.get("equity_usdt")
         if eq is not None:
             v = float(eq)
             if v > 0:
                 return v
 
-        # 2) 일부 스냅샷형 포맷 대응
+        # 2) Handle some snapshot-style formats
         eq_obj = data.get("equity")
         if isinstance(eq_obj, dict):
             v2 = eq_obj.get("equity_usdt")
@@ -422,17 +425,17 @@ def _extract_equity_from_ledger_record(rec: Dict[str, Any]) -> Optional[float]:
     return None
 
 
-@router.get("/equity/at", summary="기준 시각 총자산 조회", description="원장에서 기준 시각에 가장 가까운 equity_usdt를 조회")
+@router.get("/equity/at", summary="Equity at reference time", description="Get the equity_usdt closest to the reference time from the ledger")
 def get_equity_at_time(
     request: Request,
-    dt: str = Query(..., description="기준 시각 (예: 2026-02-15T00:00)"),
-    lookback_hours: int = Query(240, ge=1, le=720, description="원장 검색 범위(시간)"),
-    tail_lines: int = Query(120000, ge=1000, le=400000, description="원장 최대 스캔 라인 수"),
+    dt: str = Query(..., description="Reference time (e.g., 2026-02-15T00:00)"),
+    lookback_hours: int = Query(240, ge=1, le=720, description="Ledger search range (hours)"),
+    tail_lines: int = Query(120000, ge=1000, le=400000, description="Max ledger lines to scan"),
 ) -> Dict[str, Any]:
     """
-    입력한 시각과 가장 가까운 원장 equity 스냅샷을 반환합니다.
-    - 주 데이터 소스: ALLOC_REBALANCE.data.equity_usdt
-    - 없으면 최근 상태값으로 폴백
+    Return the ledger equity snapshot closest to the given time.
+    - Primary data source: ALLOC_REBALANCE.data.equity_usdt
+    - Falls back to the latest status value if absent
     """
     from datetime import datetime
 
@@ -441,7 +444,7 @@ def get_equity_at_time(
         if not dt_str:
             return {"ok": False, "error": "dt is required"}
 
-        # datetime-local("YYYY-MM-DDTHH:MM") 또는 ISO datetime을 로컬 시간으로 해석
+        # Interpret datetime-local ("YYYY-MM-DDTHH:MM") or ISO datetime as local time
         target_dt = datetime.fromisoformat(dt_str)
         target_ts = float(target_dt.timestamp())
     except (TypeError, ValueError) as e:
@@ -473,7 +476,7 @@ def get_equity_at_time(
             best_diff = diff
 
     if best is None:
-        # 폴백: 현재 상태값
+        # Fallback: current status value
         try:
             snap = system.status()
             now_eq = float(((snap.get("equity") or {}).get("equity_usdt")) or 0.0)
@@ -488,7 +491,7 @@ def get_equity_at_time(
                     "note": "ledger_match_not_found",
                 }
         except (AttributeError, TypeError, ValueError):
-            report_suppressed_exception(__name__, '폴백: 현재 상태값')
+            report_suppressed_exception(__name__, 'Fallback: current status value')
         return {"ok": False, "error": "no equity snapshot found in ledger"}
 
     eq_val = _extract_equity_from_ledger_record(best)
@@ -565,21 +568,22 @@ def reconcile(request: Request, reason: str | None = None) -> Dict[str, Any]:
         return {"ok": False, "error": "reconcile_failed", "message": str(e)}
 
 # ------------------------------------------------------------
-# PnL Baseline Reset — 한 클릭 시각적 reset
-# ★ [2026-05-31 부모] "보기에 좋은 떡이 맛도 좋다" — 현재 잔액 캡처 → PnL 0 부터 시작.
+# PnL Baseline Reset — one-click visual reset
+# ★ [2026-05-31 owner] "A rice cake that looks good tastes good too" — capture the current
+#   balance → start PnL from 0.
 # ------------------------------------------------------------
 @router.post("/pnl-baseline/reset")
 def pnl_baseline_reset(
     request: Request,
-    baseline: Optional[float] = Query(None, ge=0, description="기준 금액(USDT). 입금 등 반영해 직접 지정. 미지정/0 이면 현재 equity 사용(기존 동작)"),
+    baseline: Optional[float] = Query(None, ge=0, description="Reference amount (USDT). Set directly to reflect deposits etc. If unset/0, uses current equity (legacy behavior)"),
 ) -> Dict[str, Any]:
-    """PnL baseline 캡처 → runtime/pnl_baseline.json 저장.
+    """Capture the PnL baseline → save to runtime/pnl_baseline.json.
 
-    [2026-06-02 부모] baseline 직접 입력 지원 — 입금 후 '얼마를 기준으로' 리셋할지 선택.
-      · baseline 지정(>0): 그 금액을 기준점으로 (입금 반영)
-      · 미지정/0: 현재 equity 캡처 (기존 '직전 금액' 동작 = 하위호환)
-    효과: dashboard 상단 PnL 표시가 0 부터 다시 시작 (시각적 reset).
-    봇 동작에는 영향 X (진입 사이즈/가드 모두 현재 잔액만 기준).
+    [2026-06-02 owner] Support direct baseline input — choose 'what amount' to reset from after a deposit.
+      - baseline set (>0): use that amount as the reference point (reflects deposit)
+      - unset/0: capture current equity (legacy 'previous amount' behavior = backward compatible)
+    Effect: the PnL display at the top of the dashboard restarts from 0 (visual reset).
+    No effect on bot behavior (entry sizing/guards are all based on the current balance only).
     """
     import json as _json
     import time as _time
@@ -587,13 +591,13 @@ def pnl_baseline_reset(
     system = request.app.state.system
     try:
         current_equity = float(getattr(system, "_last_equity_usdt", 0) or 0)
-        # baseline 입력 있으면 그 값(입금 반영), 없으면 현재 equity (하위호환)
+        # If a baseline is provided, use it (reflects deposit); otherwise use current equity (backward compatible)
         if baseline is not None and float(baseline) > 0:
             base_val = round(float(baseline), 2)
             _src = "manual_input"
         else:
             if current_equity <= 0:
-                return {"ok": False, "error": "no_equity", "message": "현재 equity 측정 불가 — 잠시 후 재시도"}
+                return {"ok": False, "error": "no_equity", "message": "Cannot measure current equity — retry shortly"}
             base_val = round(current_equity, 2)
             _src = "current_equity"
         _bp = _os.path.join("runtime", "pnl_baseline.json")
@@ -650,10 +654,10 @@ def guards_get(request: Request) -> Dict[str, Any]:
             try:
                 ctx = system.coordinator.contexts.get(market)
                 if ctx is None:
-                    # ACTIVE/RECOVERY가 contexts에 없으면 생성해 Guard Matrix에서 보이도록 함
+                    # If an ACTIVE/RECOVERY market is missing from contexts, create it so it shows in the Guard Matrix
                     ctx = system.coordinator.ensure_market(market)
             except (KeyError, AttributeError, TypeError):
-                report_suppressed_exception(__name__, 'ACTIVE/RECOVERY가 contexts에 없으면 생성해 Guard Matrix에서 보이도록 함 except-> continue')
+                report_suppressed_exception(__name__, 'If an ACTIVE/RECOVERY market is missing from contexts, create it so it shows in the Guard Matrix; except-> continue')
                 continue
             pos = getattr(ctx, "position", None)
             pos_qty = 0.0
@@ -1176,7 +1180,7 @@ def guards_set(
         system.circuit_breaker_loss_pct = max(1.0, min(50.0, float(circuit_breaker_loss_pct)))
     if circuit_breaker_cooldown_min is not None:
         system.circuit_breaker_cooldown_min = max(1.0, min(1440.0, float(circuit_breaker_cooldown_min)))
-    # [2026-03-23] Guards 저장 시 PRM에 동기화
+    # [2026-03-23] Sync to PRM when guards are saved
     _prm = getattr(system, "portfolio_risk_manager", None)
     if _prm:
         _prm.sync_from_system(system)
@@ -1341,10 +1345,10 @@ def guards_set(
 
 @router.post("/guards/save")
 def guards_save(request: Request, body: Dict[str, Any]) -> Dict[str, Any]:
-    """Guards 설정을 저장합니다.
-    
-    전략별 오버라이드가 있으면 해당 전략에만 적용,
-    없으면 글로벌 설정으로 적용됩니다.
+    """Save guard settings.
+
+    If a per-strategy override is present, apply only to that strategy;
+    otherwise apply as a global setting.
     """
     import json
     from pathlib import Path
@@ -1375,38 +1379,38 @@ def guards_save(request: Request, body: Dict[str, Any]) -> Dict[str, Any]:
             if hasattr(system, key):
                 setattr(system, key, val)
 
-        # [2026-03-23] 스마트 리스크: os.environ 기반 설정 처리
+        # [2026-03-23] Smart risk: handle os.environ-based settings
         import os as _os
         if "size_mult_hi_pct" in guards:
             try:
                 v = min(-0.1, float(guards["size_mult_hi_pct"]))
                 _os.environ["OMA_SIZE_MULT_HI_PCT"] = str(v)
             except (OverflowError, TypeError, ValueError):
-                report_suppressed_exception(__name__, '[2026-03-23] 스마트 리스크: os.environ 기반 설정 처리')
+                report_suppressed_exception(__name__, '[2026-03-23] Smart risk: handle os.environ-based settings')
         if "size_mult_floor" in guards:
             try:
                 v = max(0.1, min(0.9, float(guards["size_mult_floor"])))
                 _os.environ["OMA_SIZE_MULT_FLOOR"] = str(v)
             except (OverflowError, TypeError, ValueError):
-                report_suppressed_exception(__name__, '[2026-03-23] 스마트 리스크: os.environ 기반 설정 처리')
+                report_suppressed_exception(__name__, '[2026-03-23] Smart risk: handle os.environ-based settings')
         if "concentration_limit_pct" in guards:
             try:
                 v = max(5.0, min(50.0, float(guards["concentration_limit_pct"])))
                 setattr(system, "concentration_limit_pct", v)
             except (AttributeError, OverflowError, TypeError, ValueError):
-                report_suppressed_exception(__name__, '[2026-03-23] 스마트 리스크: os.environ 기반 설정 처리')
+                report_suppressed_exception(__name__, '[2026-03-23] Smart risk: handle os.environ-based settings')
 
         try:
             system.persist_ui_settings()
         except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError):
-            report_suppressed_exception(__name__, '[2026-03-23] 스마트 리스크: os.environ 기반 설정 처리')
+            report_suppressed_exception(__name__, '[2026-03-23] Smart risk: handle os.environ-based settings')
 
         return {"ok": True, "applied": len(guards)}
 
 
 @router.get("/guards/strategies")
 def guards_strategies_get(request: Request) -> Dict[str, Any]:
-    """전략별 Guard 설정을 조회합니다."""
+    """Get per-strategy guard settings."""
     import json
     from pathlib import Path
     
@@ -1429,7 +1433,7 @@ def guards_strategies_get(request: Request) -> Dict[str, Any]:
 
 
 def _apply_guards_to_system(system, guards: Dict[str, Any], strategy: str) -> None:
-    """Guard 설정을 시스템에 실시간 반영합니다."""
+    """Apply guard settings to the system in real time."""
     if hasattr(system, "_strategy_guards"):
         if strategy not in system._strategy_guards:
             system._strategy_guards[strategy] = {}
@@ -1555,7 +1559,7 @@ def pnl_markets(
                 logger.warning("system_router.pnl_markets L1498 except", exc_info=True)
                 price = 0.0
         
-        # [FIX] 가격이 없으면 entry_price(평단가)로 fallback
+        # [FIX] If price is missing, fall back to entry_price (average entry price)
         if price <= 0 and entry_price > 0:
             price = entry_price
 
@@ -1665,13 +1669,13 @@ def autopilot_stats(
 )
 def check_delisting_markets(request: Request):
     """
-    현재 보유 중인 코인 중 거래지원 종료 예정인 코인 확인.
-    
+    Check held coins that are scheduled for delisting.
+
     Returns:
-    - delisting_markets: 거래지원 종료 예정 마켓 목록
-    - holdings_at_risk: 보유 중이면서 종료 예정인 마켓
-    
-    Note: Bybit delisting API를 통해 확인합니다.
+    - delisting_markets: list of markets scheduled for delisting
+    - holdings_at_risk: markets that are held and scheduled for delisting
+
+    Note: Checked via the Bybit delisting API.
     """
     return {
         "ok": True,
@@ -1688,7 +1692,7 @@ def set_auto_liquidate_delisting(
     request: Request,
     enabled: bool = Query(..., description="Enable auto liquidation of delisting markets")
 ) -> Dict[str, Any]:
-    """종료 예정 마켓 자동 청산 옵션 설정."""
+    """Set the auto-liquidation option for markets scheduled for delisting."""
     import os
     os.environ["OMA_AUTO_LIQUIDATE_DELISTING"] = "1" if enabled else "0"
     return {"ok": True, "auto_liquidate_delisting": enabled}
@@ -1696,7 +1700,7 @@ def set_auto_liquidate_delisting(
 
 @router.get("/auto-liquidate-delisting")
 def get_auto_liquidate_delisting(request: Request) -> Dict[str, Any]:
-    """종료 예정 마켓 자동 청산 옵션 조회."""
+    """Get the auto-liquidation option for markets scheduled for delisting."""
     from app.core.constants import env_bool
     return {"ok": True, "enabled": env_bool("OMA_AUTO_LIQUIDATE_DELISTING", default=False)}
 
@@ -1710,19 +1714,19 @@ def get_auto_liquidate_delisting(request: Request) -> Dict[str, Any]:
 )
 def check_market_status_changes(request: Request):
     """
-    마켓 상태 변경 감지 (신규 상장, 종료 예정, 상장 대기).
-    
+    Detect market status changes (new listings, scheduled delisting, pending listing).
+
     Returns:
-    - new_listings: 새로 상장된 마켓 (PREVIEW → ACTIVE)
-    - delisting_alerts: 종료 예정으로 변경된 마켓
-    - preview_markets: 현재 상장 대기 중인 마켓
+    - new_listings: newly listed markets (PREVIEW → ACTIVE)
+    - delisting_alerts: markets changed to scheduled-for-delisting
+    - preview_markets: markets currently pending listing
     """
     from app.manager.market_status_monitor import check_market_status_changes
     
     system = request.app.state.system
     
     try:
-        # 현재 활성 마켓 목록
+        # Current active market list
         active_markets = set(system.oma_registry.list_active())
         
         result = check_market_status_changes(active_markets=active_markets)
@@ -1746,11 +1750,11 @@ def check_market_status_changes(request: Request):
 
 @router.get(
     "/sector-map",
-    summary="섹터 매핑 조회",
-    responses={200: {"description": "현재 섹터 매핑 정보"}},
+    summary="Get sector map",
+    responses={200: {"description": "Current sector mapping info"}},
 )
 def get_sector_map(request: Request):
-    """Smart Allocation에 사용되는 섹터 매핑 정보를 조회합니다."""
+    """Get the sector mapping info used by Smart Allocation."""
     import json
     from pathlib import Path
     
@@ -1763,14 +1767,14 @@ def get_sector_map(request: Request):
         else:
             data = {"sectors": {}, "default_sector": "OTHERS", "default_cap": 0.40}
         
-        # 코인 → 섹터 플랫 맵 생성
+        # Build a flat coin → sector map
         coin_to_sector = {}
         sector_caps = {}
         for sector_id, sector_info in data.get("sectors", {}).items():
             sector_caps[sector_id] = sector_info.get("cap", 0.40)
             for coin in sector_info.get("coins", []):
                 coin_to_sector[coin] = sector_id
-        
+
         return {
             "ok": True,
             "sectors": data.get("sectors", {}),
@@ -1786,11 +1790,11 @@ def get_sector_map(request: Request):
 
 @router.post(
     "/sector-map",
-    summary="섹터 매핑 저장",
-    responses={200: {"description": "섹터 매핑 저장 완료"}},
+    summary="Save sector map",
+    responses={200: {"description": "Sector map saved"}},
 )
 def save_sector_map(request: Request, data: Dict[str, Any]):
-    """Smart Allocation에 사용되는 섹터 매핑 정보를 저장합니다."""
+    """Save the sector mapping info used by Smart Allocation."""
     import json
     from pathlib import Path
     
@@ -1800,10 +1804,10 @@ def save_sector_map(request: Request, data: Dict[str, Any]):
         from app.core.io_utils import safe_write_json
         safe_write_json(str(sector_file), data)
 
-        # HyperSystem에 반영
+        # Apply to HyperSystem
         system = request.app.state.system
 
-        # 코인 → 섹터 플랫 맵 생성
+        # Build a flat coin → sector map
         coin_to_sector = {}
         sector_caps = {}
         for sector_id, sector_info in data.get("sectors", {}).items():
@@ -1823,46 +1827,46 @@ def save_sector_map(request: Request, data: Dict[str, Any]):
 
 @router.post(
     "/sector-map/coin",
-    summary="코인 섹터 설정",
-    responses={200: {"description": "코인 섹터 설정 완료"}},
+    summary="Set coin sector",
+    responses={200: {"description": "Coin sector set"}},
 )
 def set_coin_sector(
     request: Request,
-    market: str = Query(..., description="마켓 코드 (e.g., BTCUSDT)"),
-    sector: str = Query(..., description="섹터 ID (e.g., L1, DEFI, MEME)"),
+    market: str = Query(..., description="Market code (e.g., BTCUSDT)"),
+    sector: str = Query(..., description="Sector ID (e.g., L1, DEFI, MEME)"),
 ):
-    """개별 코인의 섹터를 설정합니다."""
+    """Set the sector of an individual coin."""
     import json
     from pathlib import Path
     
     sector_file = Path(__file__).parent.parent / "data" / "sector_map.json"
     
     try:
-        # 기존 데이터 로드
+        # Load existing data
         if sector_file.exists():
             with open(sector_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
         else:
             data = {"sectors": {}, "default_sector": "OTHERS", "default_cap": 0.40}
-        
-        # 기존 섹터에서 코인 제거
+
+        # Remove the coin from its existing sector
         for s_id, s_info in data.get("sectors", {}).items():
             coins = s_info.get("coins", [])
             if market in coins:
                 coins.remove(market)
-        
-        # 새 섹터에 코인 추가
+
+        # Add the coin to the new sector
         if sector not in data["sectors"]:
             data["sectors"][sector] = {"name": sector, "cap": 0.20, "coins": []}
-        
+
         if market not in data["sectors"][sector].get("coins", []):
             data["sectors"][sector].setdefault("coins", []).append(market)
-        
-        # 저장
+
+        # Save
         from app.core.io_utils import safe_write_json
         safe_write_json(str(sector_file), data)
 
-        # HyperSystem에 반영
+        # Apply to HyperSystem
         system = request.app.state.system
         if hasattr(system, "smart_alloc_sector_map"):
             system.smart_alloc_sector_map[market] = sector
@@ -1877,14 +1881,14 @@ def set_coin_sector(
 # Fear & Greed Index API
 # ============================================================
 
-@router.get("/fear-greed", summary="Fear & Greed Index 조회", description="현재 시장 심리 지수 및 예산 배율 조회")
+@router.get("/fear-greed", summary="Get Fear & Greed Index", description="Get the current market sentiment index and budget multiplier")
 def get_fear_greed(request: Request) -> Dict[str, Any]:
-    """Fear & Greed Index 정보를 반환합니다.
-    
+    """Return the Fear & Greed Index information.
+
     Returns:
-        value: 0-100 (0=극도의 공포, 100=극도의 탐욕)
+        value: 0-100 (0=extreme fear, 100=extreme greed)
         level: EXTREME_FEAR, FEAR, NEUTRAL, GREED, EXTREME_GREED
-        budget_mult: 예산 배율 (역발상: 공포→높음, 탐욕→낮음)
+        budget_mult: budget multiplier (contrarian: fear→high, greed→low)
     """
     try:
         from app.core.fear_greed import get_fear_greed_index
@@ -1895,9 +1899,9 @@ def get_fear_greed(request: Request) -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-@router.post("/fear-greed/refresh", summary="Fear & Greed Index 새로고침", description="캐시 무시하고 최신 데이터 조회")
+@router.post("/fear-greed/refresh", summary="Refresh Fear & Greed Index", description="Fetch the latest data ignoring the cache")
 def refresh_fear_greed(request: Request) -> Dict[str, Any]:
-    """Fear & Greed Index를 강제로 새로고침합니다."""
+    """Force-refresh the Fear & Greed Index."""
     try:
         from app.core.fear_greed import get_fear_greed_index
         fg = get_fear_greed_index()
@@ -1916,19 +1920,19 @@ def refresh_fear_greed(request: Request) -> Dict[str, Any]:
 
 
 # ============================================================
-# Daily PnL (매매일지) API
+# Daily PnL (trading journal) API
 # [CREATED 2026-01-23]
 # ============================================================
 
-@router.get("/daily-pnl/today", summary="오늘 손익 조회", description="오늘의 매매 손익 요약")
+@router.get("/daily-pnl/today", summary="Get today's PnL", description="Summary of today's trading PnL")
 def get_daily_pnl_today(request: Request) -> Dict[str, Any]:
-    """오늘의 손익 리포트를 반환합니다."""
+    """Return today's PnL report."""
     try:
         from app.manager.daily_pnl import get_daily_pnl_manager
         system = request.app.state.system
         
         manager = get_daily_pnl_manager()
-        # 오늘 자정부터의 레코드만 조회
+        # Only query records since today's midnight
         from datetime import datetime
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         records = system.ledger.tail_records(since_ts=today_start)
@@ -1940,9 +1944,9 @@ def get_daily_pnl_today(request: Request) -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-@router.get("/daily-pnl/summary", summary="일별 손익 요약", description="최근 N일간 손익 요약")
+@router.get("/daily-pnl/summary", summary="Daily PnL summary", description="PnL summary for the last N days")
 def get_daily_pnl_summary(request: Request, days: int = 7) -> Dict[str, Any]:
-    """최근 N일간의 손익 요약을 반환합니다."""
+    """Return the PnL summary for the last N days."""
     try:
         from app.manager.daily_pnl import get_daily_pnl_manager
         
@@ -1955,9 +1959,9 @@ def get_daily_pnl_summary(request: Request, days: int = 7) -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-@router.get("/daily-pnl/list", summary="일별 손익 목록", description="저장된 일별 손익 목록")
+@router.get("/daily-pnl/list", summary="Daily PnL list", description="List of saved daily PnL entries")
 def get_daily_pnl_list(request: Request, limit: int = 30) -> Dict[str, Any]:
-    """저장된 일별 손익 날짜 목록을 반환합니다."""
+    """Return the list of saved daily PnL dates."""
     try:
         from app.manager.daily_pnl import get_daily_pnl_manager
         
@@ -1970,9 +1974,9 @@ def get_daily_pnl_list(request: Request, limit: int = 30) -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-@router.get("/daily-pnl/{date}", summary="특정 날짜 손익 조회", description="특정 날짜의 매매 손익")
+@router.get("/daily-pnl/{date}", summary="Get PnL for a specific date", description="Trading PnL for a specific date")
 def get_daily_pnl_date(request: Request, date: str) -> Dict[str, Any]:
-    """특정 날짜의 손익 리포트를 반환합니다. (형식: 2026-01-23)"""
+    """Return the PnL report for a specific date. (format: 2026-01-23)"""
     try:
         from app.manager.daily_pnl import get_daily_pnl_manager
         
@@ -1988,9 +1992,9 @@ def get_daily_pnl_date(request: Request, date: str) -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-@router.post("/daily-pnl/snapshot", summary="오늘 스냅샷 저장", description="오늘의 손익을 파일로 저장")
+@router.post("/daily-pnl/snapshot", summary="Save today's snapshot", description="Save today's PnL to a file")
 def save_daily_pnl_snapshot(request: Request) -> Dict[str, Any]:
-    """오늘의 손익 스냅샷을 저장합니다."""
+    """Save today's PnL snapshot."""
     try:
         from app.manager.daily_pnl import get_daily_pnl_manager
         from datetime import datetime
@@ -2011,8 +2015,8 @@ def save_daily_pnl_snapshot(request: Request) -> Dict[str, Any]:
 # Cross-exchange price comparison (reserved for future Bithumb integration)
 # ============================================================
 
-# ── 공유 httpx 클라이언트 (TCP 커넥션 풀링) ──
-# 매 요청마다 httpx.Client() 생성 → 10054 원인이었음
+# ── Shared httpx client (TCP connection pooling) ──
+# Creating a new httpx.Client() per request was the cause of the 10054 error
 import httpx as _httpx
 from app.core.constants import BYBIT_MARKET_KLINE, BYBIT_MARKET_TICKERS, parse_bybit_list
 
@@ -2020,7 +2024,7 @@ _bybit_ui_client: Optional[_httpx.Client] = None
 
 
 def _get_bybit_ui_client() -> _httpx.Client:
-    """Bybit UI 프록시용 공유 httpx 클라이언트 (lazy init, 커넥션 풀링)."""
+    """Shared httpx client for the Bybit UI proxy (lazy init, connection pooling)."""
     global _bybit_ui_client
     if _bybit_ui_client is None:
         _bybit_ui_client = _httpx.Client(
@@ -2034,17 +2038,17 @@ def _get_bybit_ui_client() -> _httpx.Client:
     return _bybit_ui_client
 
 
-@router.get("/binance-klines", summary="Bybit 캔들 데이터", description="Bybit V5 klines 프록시 (CORS 우회)")
+@router.get("/binance-klines", summary="Bybit candle data", description="Bybit V5 klines proxy (CORS bypass)")
 def binance_klines(symbol: str = "BTCUSDT", interval: str = "15", limit: int = 100) -> Dict[str, Any]:
-    """Bybit V5 kline API 프록시.
+    """Bybit V5 kline API proxy.
 
     Args:
-        symbol: 거래쌍 심볼 (예: BTCUSDT)
-        interval: 캔들 간격 (1,3,5,15,30,60,120,240,360,720,D,W,M)
-        limit: 캔들 개수 (최대 1000)
+        symbol: trading pair symbol (e.g., BTCUSDT)
+        interval: candle interval (1,3,5,15,30,60,120,240,360,720,D,W,M)
+        limit: number of candles (max 1000)
 
     Returns:
-        OHLCV 캔들 데이터
+        OHLCV candle data
     """
     try:
         # Map common Binance-style intervals to Bybit V5 format
@@ -2073,9 +2077,9 @@ def binance_klines(symbol: str = "BTCUSDT", interval: str = "15", limit: int = 1
         return {"ok": False, "error": str(e)}
 
 
-@router.get("/binance-tickers", summary="Bybit 전체 가격", description="Bybit V5 모든 티커 가격 프록시 (CORS 우회)")
+@router.get("/binance-tickers", summary="Bybit all prices", description="Bybit V5 all ticker prices proxy (CORS bypass)")
 def binance_tickers() -> Dict[str, Any]:
-    """Bybit V5 모든 spot 티커 가격 프록시."""
+    """Bybit V5 all spot ticker prices proxy."""
     try:
         client = _get_bybit_ui_client()
         resp = client.get(BYBIT_MARKET_TICKERS, params={"category": "spot"})
@@ -2106,26 +2110,26 @@ def binance_tickers() -> Dict[str, Any]:
 import hashlib
 import secrets
 
-# 세션 토큰 저장 (메모리 기반, 서버 재시작 시 초기화)
+# Session token store (in-memory, reset on server restart)
 _admin_sessions: dict = {}
 
 def _get_admin_password() -> str:
-    """환경변수에서 admin 비밀번호를 가져옵니다.
+    """Get the admin password from the environment variable.
 
-    공개 배포 안전 기본값: ADMIN_PASSWORD 미설정 시 빈 문자열 반환 →
-    admin 로그인 자체를 비활성화한다(추측 가능한 기본 비번을 절대 내장하지 않음).
+    Safe default for public deployment: if ADMIN_PASSWORD is unset, return an empty string →
+    disable admin login entirely (never embed a guessable default password).
     """
     import os
     return os.getenv("ADMIN_PASSWORD", "")
 
 def _verify_admin_token(token: str) -> bool:
-    """admin 토큰이 유효한지 확인합니다."""
+    """Check whether the admin token is valid."""
     if not token:
         return False
     session = _admin_sessions.get(token)
     if not session:
         return False
-    # 24시간 만료
+    # 24-hour expiry
     import time
     if time.time() - session.get("created", 0) > 86400:
         del _admin_sessions[token]
@@ -2133,53 +2137,53 @@ def _verify_admin_token(token: str) -> bool:
     return True
 
 
-@router.post("/admin/login", summary="Admin 로그인", description="admin 비밀번호로 로그인")
+@router.post("/admin/login", summary="Admin login", description="Log in with the admin password")
 def admin_login(password: str = Query(...)) -> Dict[str, Any]:
-    """Admin 비밀번호를 확인하고 세션 토큰을 발급합니다."""
+    """Verify the admin password and issue a session token."""
     import time
-    
+
     admin_pw = _get_admin_password()
     if not admin_pw:
-        return {"ok": False, "error": "ADMIN_PASSWORD 가 설정되지 않아 admin 기능이 비활성화되어 있습니다. (.env 에 ADMIN_PASSWORD 설정 필요)"}
+        return {"ok": False, "error": "ADMIN_PASSWORD is not set, so admin features are disabled. (Set ADMIN_PASSWORD in .env)"}
     if password != admin_pw:
-        return {"ok": False, "error": "비밀번호가 일치하지 않습니다."}
-    
-    # 토큰 생성
+        return {"ok": False, "error": "Password does not match."}
+
+    # Generate token
     token = secrets.token_hex(32)
     _admin_sessions[token] = {"created": time.time()}
-    
-    return {"ok": True, "token": token, "message": "로그인 성공"}
+
+    return {"ok": True, "token": token, "message": "Login successful"}
 
 
-@router.get("/admin/verify", summary="Admin 토큰 확인", description="admin 토큰이 유효한지 확인")
+@router.get("/admin/verify", summary="Verify admin token", description="Check whether the admin token is valid")
 def admin_verify(token: str = Query("")) -> Dict[str, Any]:
-    """admin 토큰이 유효한지 확인합니다."""
+    """Check whether the admin token is valid."""
     if _verify_admin_token(token):
         return {"ok": True, "valid": True}
     return {"ok": True, "valid": False}
 
 
-@router.post("/admin/logout", summary="Admin 로그아웃", description="admin 세션 종료")
+@router.post("/admin/logout", summary="Admin logout", description="End the admin session")
 def admin_logout(token: str = Query("")) -> Dict[str, Any]:
-    """admin 세션을 종료합니다."""
+    """End the admin session."""
     if token in _admin_sessions:
         del _admin_sessions[token]
-    return {"ok": True, "message": "로그아웃 완료"}
+    return {"ok": True, "message": "Logout complete"}
 
 
 # ============================================================
 # Exchange API Settings
 # ============================================================
 
-@router.get("/exchange-api/status", summary="Exchange API 상태", description="Exchange API 키 설정 상태 확인")
+@router.get("/exchange-api/status", summary="Exchange API status", description="Check the Exchange API key configuration status")
 def exchange_api_status() -> Dict[str, Any]:
-    """Exchange API 키 설정 상태를 확인합니다."""
+    """Check the Exchange API key configuration status."""
     import os
     access_key = os.getenv("BYBIT_API_KEY", "")
     secret_key = os.getenv("BYBIT_API_SECRET", "")
     
     has_keys = bool(access_key and secret_key)
-    # [2026-04-09 보안] 앞2자만 노출 (기존 앞4+뒤4 → 너무 많이 드러남)
+    # [2026-04-09 security] Expose only the first 2 chars (previously first 4 + last 4 → too much exposed)
     masked_access = access_key[:2] + "****" if len(access_key) > 4 else ("****" if access_key else "")
     
     return {
@@ -2189,13 +2193,13 @@ def exchange_api_status() -> Dict[str, Any]:
     }
 
 
-@router.get("/exchange-api/detect-ip", summary="서버 공인 IP 감지", description="서버의 공인 IP 주소를 감지합니다")
+@router.get("/exchange-api/detect-ip", summary="Detect server public IP", description="Detect the server's public IP address")
 def detect_public_ip() -> Dict[str, Any]:
-    """서버의 공인 IP 주소를 감지합니다."""
+    """Detect the server's public IP address."""
     import requests
-    
+
     try:
-        # 여러 IP 감지 서비스 시도
+        # Try multiple IP detection services
         services = [
             "https://api.ipify.org?format=json",
             "https://httpbin.org/ip",
@@ -2211,18 +2215,18 @@ def detect_public_ip() -> Dict[str, Any]:
                     if ip:
                         return {"ok": True, "ip": ip.split(",")[0].strip()}
             except Exception:
-                report_suppressed_exception(__name__, '여러 IP 감지 서비스 시도 except-> continue')
+                report_suppressed_exception(__name__, 'Try multiple IP detection services; except-> continue')
                 continue
-        
-        return {"ok": False, "error": "IP 감지 실패"}
+
+        return {"ok": False, "error": "IP detection failed"}
     except Exception as e:
         logger.warning("system_router.detect_public_ip L2124: %s", e)
         return {"ok": False, "error": str(e)}
 
 
-@router.post("/exchange-api/test", summary="Exchange API 연결 테스트", description="입력된 API 키로 Exchange 연결 테스트")
+@router.post("/exchange-api/test", summary="Test Exchange API connection", description="Test the Exchange connection with the provided API keys")
 def test_exchange_api(access_key: str = Body(..., embed=True), secret_key: str = Body(..., embed=True)) -> Dict[str, Any]:
-    """입력된 API 키로 Exchange 연결을 테스트합니다."""
+    """Test the Exchange connection with the provided API keys."""
     try:
         from app.integrations.bybit_trade import BybitTradeClient as BybitTradeClient
 
@@ -2230,9 +2234,9 @@ def test_exchange_api(access_key: str = Body(..., embed=True), secret_key: str =
         accounts = client.get_accounts()
         
         if accounts is None:
-            return {"ok": False, "error": "API 응답 없음"}
-        
-        # 잔고 요약
+            return {"ok": False, "error": "No API response"}
+
+        # Balance summary
         quote_balance = 0
         coin_count = 0
         for acc in accounts:
@@ -2243,7 +2247,7 @@ def test_exchange_api(access_key: str = Body(..., embed=True), secret_key: str =
         
         return {
             "ok": True,
-            "message": "연결 성공",
+            "message": "Connection successful",
             "quote_balance": quote_balance,
             "coin_count": coin_count,
         }
@@ -2251,28 +2255,28 @@ def test_exchange_api(access_key: str = Body(..., embed=True), secret_key: str =
         logger.warning("system_router.test_exchange_api L2155: %s", e)
         error_msg = str(e)
         if "no_authorization_ip" in error_msg.lower() or "허용되지 않은" in error_msg:
-            return {"ok": False, "error": "IP가 허용되지 않음. Bybit에서 서버 IP를 등록하세요."}
+            return {"ok": False, "error": "IP not allowed. Register the server IP on Bybit."}
         return {"ok": False, "error": error_msg}
 
 
-@router.post("/exchange-api/save", summary="Exchange API 키 저장", description=".env 파일에 API 키 저장 (admin 인증 필요)")
+@router.post("/exchange-api/save", summary="Save Exchange API keys", description="Save API keys to the .env file (admin auth required)")
 def save_exchange_api(access_key: str = Body(..., embed=True), secret_key: str = Body(..., embed=True), admin_token: str = Body("", embed=True)) -> Dict[str, Any]:
-    """API 키를 .env 파일에 저장합니다. (admin 인증 필요)"""
+    """Save the API keys to the .env file. (admin auth required)"""
     if not _verify_admin_token(admin_token):
-        return {"ok": False, "error": "Admin 인증이 필요합니다."}
+        return {"ok": False, "error": "Admin authentication required."}
     import os
     from pathlib import Path
-    
+
     try:
         env_path = Path(".env")
-        
-        # 기존 .env 파일 읽기
+
+        # Read the existing .env file
         env_lines = []
         if env_path.exists():
             with open(env_path, "r", encoding="utf-8") as f:
                 env_lines = f.readlines()
-        
-        # BYBIT_API_KEY, BYBIT_API_SECRET 업데이트
+
+        # Update BYBIT_API_KEY, BYBIT_API_SECRET
         new_lines = []
         access_found = False
         secret_found = False
@@ -2288,21 +2292,21 @@ def save_exchange_api(access_key: str = Body(..., embed=True), secret_key: str =
             else:
                 new_lines.append(line if line.endswith("\n") else line + "\n")
 
-        # 없으면 추가
+        # Add if missing
         if not access_found:
             new_lines.append(f"BYBIT_API_KEY={access_key}\n")
         if not secret_found:
             new_lines.append(f"BYBIT_API_SECRET={secret_key}\n")
 
-        # 파일 저장
+        # Save the file
         with open(env_path, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
 
-        # 환경 변수 업데이트 (현재 프로세스)
+        # Update environment variables (current process)
         os.environ["BYBIT_API_KEY"] = access_key
         os.environ["BYBIT_API_SECRET"] = secret_key
-        
-        return {"ok": True, "message": ".env 파일에 저장되었습니다. 서버 재시작 후 완전히 적용됩니다."}
+
+        return {"ok": True, "message": "Saved to the .env file. Fully applied after a server restart."}
     except (OSError, KeyError, AttributeError, TypeError, ValueError) as e:
         logger.warning("system_router.save_exchange_api L2210: %s", e)
         return {"ok": False, "error": str(e)}
@@ -2312,9 +2316,9 @@ def save_exchange_api(access_key: str = Body(..., embed=True), secret_key: str =
 # Telegram Settings
 # ============================================================
 
-@router.get("/telegram/status", summary="Telegram 설정 상태", description="Telegram 알림 설정 상태 확인")
+@router.get("/telegram/status", summary="Telegram settings status", description="Check the Telegram notification settings status")
 def telegram_status() -> Dict[str, Any]:
-    """Telegram 설정 상태를 확인합니다."""
+    """Check the Telegram settings status."""
     import os
     token = os.getenv("TELEGRAM_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -2330,15 +2334,15 @@ def telegram_status() -> Dict[str, Any]:
     }
 
 
-@router.post("/telegram/test", summary="Telegram 테스트 메시지", description="입력된 설정으로 테스트 메시지 전송")
+@router.post("/telegram/test", summary="Telegram test message", description="Send a test message with the provided settings")
 def test_telegram(token: str = Query(...), chat_id: str = Query(...)) -> Dict[str, Any]:
-    """입력된 설정으로 Telegram 테스트 메시지를 전송합니다."""
+    """Send a Telegram test message with the provided settings."""
     import requests
     from datetime import datetime
-    
+
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        message = f"🤖 Autocoin OS 테스트 메시지\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n✅ 연결 성공!"
+        message = f"🤖 Autocoin OS test message\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n✅ Connection successful!"
         
         resp = requests.post(
             url,
@@ -2347,21 +2351,21 @@ def test_telegram(token: str = Query(...), chat_id: str = Query(...)) -> Dict[st
         )
         
         if resp.status_code == 200:
-            return {"ok": True, "message": "테스트 메시지 전송 성공"}
+            return {"ok": True, "message": "Test message sent successfully"}
         else:
             data = resp.json()
-            error_desc = data.get("description", "알 수 없는 오류")
+            error_desc = data.get("description", "Unknown error")
             return {"ok": False, "error": error_desc}
     except Exception as e:
         logger.warning("system_router.test_telegram L2258: %s", e)
         return {"ok": False, "error": str(e)}
 
 
-@router.post("/telegram/save", summary="Telegram 설정 저장", description=".env 파일에 Telegram 설정 저장 (admin 인증 필요)")
+@router.post("/telegram/save", summary="Save Telegram settings", description="Save Telegram settings to the .env file (admin auth required)")
 def save_telegram(token: str = Query(...), chat_id: str = Query(...), admin_token: str = Query("")) -> Dict[str, Any]:
-    """Telegram 설정을 .env 파일에 저장합니다. (admin 인증 필요)"""
+    """Save the Telegram settings to the .env file. (admin auth required)"""
     if not _verify_admin_token(admin_token):
-        return {"ok": False, "error": "Admin 인증이 필요합니다."}
+        return {"ok": False, "error": "Admin authentication required."}
     import os
     from pathlib import Path
     
@@ -2398,16 +2402,17 @@ def save_telegram(token: str = Query(...), chat_id: str = Query(...), admin_toke
         
         os.environ["TELEGRAM_TOKEN"] = token
         os.environ["TELEGRAM_CHAT_ID"] = chat_id
-        
-        return {"ok": True, "message": ".env 파일에 저장되었습니다."}
+
+        return {"ok": True, "message": "Saved to the .env file."}
     except (OSError, KeyError, AttributeError, TypeError, ValueError) as e:
         logger.warning("system_router.save_telegram L2305: %s", e)
         return {"ok": False, "error": str(e)}
 
 
-# ── [2026-06-01] 알림 종류 토글 (longhold/drawdown/exit_streak/daily/harpoon) ──
-#   send 지점 무수정: 부팅 시 읽힌 system 속성 + env-read 사이트가 그대로 체크하므로,
-#   런타임에 속성 + os.environ 갱신하면 즉시 반영. .env 도 갱신해 재시작 후 유지.
+# ── [2026-06-01] Alert-type toggles (longhold/drawdown/exit_streak/daily/harpoon) ──
+#   No changes to send sites: since the system attributes read at boot + the env-read
+#   sites are checked as-is, updating the attribute + os.environ at runtime applies
+#   immediately. Also update .env to persist across restarts.
 _ALERT_FLAGS = {
     # ui_key: (env_name, system_attr or None, default)
     "longhold": ("OMA_LONGHOLD_ALERTS", "longhold_alerts_enabled", True),
@@ -2423,7 +2428,7 @@ def _alert_truthy(v: str) -> bool:
 
 
 def _persist_env_keys(updates: Dict[str, str]) -> None:
-    """.env 의 여러 키를 갱신/추가 (비밀 아님·알림 플래그)."""
+    """Update/add multiple keys in .env (non-secret, alert flags)."""
     from pathlib import Path
     p = Path(".env")
     lines = []
@@ -2446,7 +2451,7 @@ def _persist_env_keys(updates: Dict[str, str]) -> None:
         f.writelines(out)
 
 
-@router.get("/alerts", summary="알림 종류 on/off 상태")
+@router.get("/alerts", summary="Alert-type on/off status")
 def get_alerts(request: Request) -> Dict[str, Any]:
     system = request.app.state.system
     out = {}
@@ -2459,14 +2464,14 @@ def get_alerts(request: Request) -> Dict[str, Any]:
     return {"ok": True, "alerts": out}
 
 
-@router.post("/alerts", summary="알림 종류 on/off 설정 (런타임+.env)")
+@router.post("/alerts", summary="Set alert-type on/off (runtime + .env)")
 def set_alerts(request: Request, longhold: str = Query(""), drawdown: str = Query(""),
                exit_profit_streak: str = Query(""), daily: str = Query(""), harpoon: str = Query("")) -> Dict[str, Any]:
     system = request.app.state.system
     incoming = {"longhold": longhold, "drawdown": drawdown, "exit_profit_streak": exit_profit_streak, "daily": daily, "harpoon": harpoon}
     env_updates: Dict[str, str] = {}
     for k, raw in incoming.items():
-        if raw == "":   # 미지정 = 변경 안 함
+        if raw == "":   # unspecified = no change
             continue
         val = _alert_truthy(raw)
         env_name, attr, _ = _ALERT_FLAGS[k]
@@ -2474,12 +2479,12 @@ def set_alerts(request: Request, longhold: str = Query(""), drawdown: str = Quer
         env_updates[env_name] = "1" if val else "0"
         if attr:
             try:
-                setattr(system, attr, val)   # 런타임 즉시 반영 (send 지점이 이 속성 체크)
+                setattr(system, attr, val)   # apply immediately at runtime (send sites check this attribute)
             except (AttributeError, TypeError):
                 logger.warning("set_alerts: setattr %s failed", attr, exc_info=True)
     if env_updates:
         try:
-            _persist_env_keys(env_updates)   # 재시작 후 유지
+            _persist_env_keys(env_updates)   # persist across restarts
         except OSError as e:
             return {"ok": False, "error": str(e)}
     return get_alerts(request)
@@ -2489,17 +2494,17 @@ def set_alerts(request: Request, longhold: str = Query(""), drawdown: str = Quer
 # Server Restart / Stop
 # ============================================================
 
-@router.post("/restart", summary="서버 재시작", description="서버를 재시작합니다 (run.ps1 필요)")
+@router.post("/restart", summary="Restart server", description="Restart the server (requires run.ps1)")
 async def restart_server(
     request: Request,
-    delay_sec: int = Query(15, ge=1, le=60, description="정리 대기 시간 (초)"),
-    cleanup: int = Query(1, ge=0, le=1, description="정리 실행 여부 (1/0)")
+    delay_sec: int = Query(15, ge=1, le=60, description="Cleanup wait time (seconds)"),
+    cleanup: int = Query(1, ge=0, le=1, description="Whether to run cleanup (1/0)")
 ) -> Dict[str, Any]:
-    """서버 재시작을 요청합니다.
-    
-    - delay_sec: 정리 대기 시간 (기본 15초, 최대 60초)
-    - run.ps1이 exit code 42를 감지하면 자동으로 재시작합니다.
-    - Graceful shutdown 수행 후 재시작
+    """Request a server restart.
+
+    - delay_sec: cleanup wait time (default 15s, max 60s)
+    - run.ps1 auto-restarts when it detects exit code 42.
+    - Restart after performing a graceful shutdown
     """
     import asyncio
     import os
@@ -2510,14 +2515,14 @@ async def restart_server(
     
     async def graceful_shutdown():
         try:
-            # 1) 엔진 정지
+            # 1) Stop the engine
             if hasattr(system, 'coordinator') and hasattr(system.coordinator, 'engine'):
                 system.coordinator.engine.status.stop()
-            # 1.5) Autopilot 비활성화 (정리 기간 동안 자동 승격 방지)
+            # 1.5) Disable autopilot (prevent auto-promotion during cleanup)
             if hasattr(system, "autopilot_enabled"):
                 system.autopilot_enabled = False
 
-            # 2) 정리 옵션
+            # 2) Cleanup option
             start_ts = time.time()
             if do_cleanup:
                 try:
@@ -2555,18 +2560,18 @@ async def restart_server(
                             reason="restart"
                         )
                     except (AttributeError, TypeError):
-                        report_suppressed_exception(__name__, '2) 정리 옵션')
+                        report_suppressed_exception(__name__, '2) Cleanup option')
                 except (KeyError, AttributeError, TypeError, ValueError) as e:
                     logger.warning("system_router.save_telegram L2378: %s", e)
                     print(f"[RESTART] Cleanup error: {e}")
 
-            # 3) 정리 대기 (tick loop는 계속 돌며 pending 정리)
+            # 3) Cleanup wait (the tick loop keeps running and clears pending orders)
             elapsed = time.time() - start_ts
             remain = max(0.0, float(delay_sec) - elapsed)
             if remain > 0:
                 await asyncio.sleep(remain)
 
-            # 4) 상태 저장
+            # 4) Save state
             await system.stop()
         except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as e:
             logger.warning("system_router.save_telegram L2389: %s", e)
@@ -2578,22 +2583,22 @@ async def restart_server(
     asyncio.create_task(graceful_shutdown())
     return {
         "ok": True,
-        "message": f"서버가 {delay_sec}초 후 재시작됩니다... (cleanup={1 if do_cleanup else 0})",
+        "message": f"Server will restart in {delay_sec}s... (cleanup={1 if do_cleanup else 0})",
         "delay_sec": delay_sec,
         "cleanup": 1 if do_cleanup else 0
     }
 
 
-@router.post("/stop", summary="서버 정지", description="서버를 정지합니다")
+@router.post("/stop", summary="Stop server", description="Stop the server")
 async def stop_server(
     request: Request,
-    delay_sec: int = Query(15, ge=1, le=60, description="정리 대기 시간 (초)"),
-    cleanup: int = Query(1, ge=0, le=1, description="정리 실행 여부 (1/0)")
+    delay_sec: int = Query(15, ge=1, le=60, description="Cleanup wait time (seconds)"),
+    cleanup: int = Query(1, ge=0, le=1, description="Whether to run cleanup (1/0)")
 ) -> Dict[str, Any]:
-    """서버를 완전히 정지합니다.
-    
-    - delay_sec: 정리 대기 시간 (기본 15초, 최대 60초)
-    - Graceful shutdown 수행 후 정지
+    """Stop the server completely.
+
+    - delay_sec: cleanup wait time (default 15s, max 60s)
+    - Stop after performing a graceful shutdown
     """
     import asyncio
     import os
@@ -2651,7 +2656,7 @@ async def stop_server(
                     logger.warning("system_router.save_telegram L2465: %s", e)
                     print(f"[STOP] Cleanup error: {e}")
 
-            # 정리 대기 (tick loop는 계속 돌며 pending 정리)
+            # Cleanup wait (the tick loop keeps running and clears pending orders)
             elapsed = time.time() - start_ts
             remain = max(0.0, float(delay_sec) - elapsed)
             if remain > 0:
@@ -2668,7 +2673,7 @@ async def stop_server(
     asyncio.create_task(graceful_shutdown())
     return {
         "ok": True,
-        "message": f"서버가 {delay_sec}초 후 정지됩니다... (cleanup={1 if do_cleanup else 0})",
+        "message": f"Server will stop in {delay_sec}s... (cleanup={1 if do_cleanup else 0})",
         "delay_sec": delay_sec,
         "cleanup": 1 if do_cleanup else 0
     }
@@ -2677,14 +2682,14 @@ async def stop_server(
 # ------------------------------------------------------------
 # Ledger Validation
 # ------------------------------------------------------------
-@router.get("/validate/ledger", summary="원장 검증", description="Trade Ledger 무결성 검증")
+@router.get("/validate/ledger", summary="Validate ledger", description="Validate Trade Ledger integrity")
 def validate_ledger() -> Dict[str, Any]:
     """
-    Trade Ledger 검증:
-    - BUY/SELL 짝 확인
-    - 중복 거래 감지
-    - 시간순 정렬 검증
-    - 음수 값 검증
+    Trade Ledger validation:
+    - Check BUY/SELL pairs
+    - Detect duplicate trades
+    - Validate chronological ordering
+    - Validate negative values
     """
     try:
         from app.manager.ledger_validator import validate_ledger as do_validate
@@ -2699,12 +2704,12 @@ def validate_ledger() -> Dict[str, Any]:
         }
 
 
-@router.get("/validate/holding-sync", summary="포지션 동기화 검증", description="Context vs Exchange 잔고 비교")
+@router.get("/validate/holding-sync", summary="Validate position sync", description="Compare Context vs Exchange balances")
 def validate_holding_sync(request: Request) -> Dict[str, Any]:
     """
-    Context.position vs Exchange.balance 검증:
-    - Active 마켓의 포지션 불일치 감지
-    - 허용 오차: 0.0001
+    Context.position vs Exchange.balance validation:
+    - Detect position mismatches for active markets
+    - Tolerance: 0.0001
     """
     try:
         from app.manager.ledger_validator import validate_holding_sync as do_validate
@@ -2723,17 +2728,17 @@ def validate_holding_sync(request: Request) -> Dict[str, Any]:
 # ============================================================
 # Night Mode API
 # ============================================================
-@router.get("/night-mode", summary="Night Mode 설정 조회")
+@router.get("/night-mode", summary="Get Night Mode settings")
 def get_night_mode(request: Request):
     system = request.app.state.system
     return {"ok": True, **system.get_night_mode_config()}
 
 
-@router.patch("/night-mode", summary="Night Mode 설정 변경")
+@router.patch("/night-mode", summary="Change Night Mode settings")
 def patch_night_mode(request: Request, body: Dict[str, Any]):
-    """Night Mode 설정 변경.
+    """Change Night Mode settings.
 
-    body 예시::
+    body example::
 
         {"enabled": true, "start_hour": 2, "end_hour": 9,
          "entry_score_boost_pct": 30, "sl_multiplier": 1.5}
@@ -2750,7 +2755,7 @@ def patch_night_mode(request: Request, body: Dict[str, Any]):
     if "sl_multiplier" in body:
         system.night_mode_sl_multiplier = max(1.0, min(5.0, float(body["sl_multiplier"])))
 
-    # ui_settings에 저장 (재시작 시 복원)
+    # Save to ui_settings (restored on restart)
     try:
         g = getattr(system, '_ui_guard_overrides', {}) or {}
         g["night_mode_enabled"] = system.night_mode_enabled
@@ -2761,7 +2766,7 @@ def patch_night_mode(request: Request, body: Dict[str, Any]):
         system._ui_guard_overrides = g
         system._save_ui_settings()
     except (KeyError, AttributeError, TypeError):
-        report_suppressed_exception(__name__, 'ui_settings에 저장 (재시작 시 복원)')
+        report_suppressed_exception(__name__, 'Save to ui_settings (restored on restart)')
 
     return {"ok": True, **system.get_night_mode_config()}
 
@@ -2785,8 +2790,8 @@ _DEFAULT_STALE_HOURS = 120.0
 
 @router.get(
     "/position-ages",
-    summary="포지션 보유 기간 모니터링",
-    description="모든 활성 포지션의 보유 시간과 장기 보유 경고를 반환합니다.",
+    summary="Position holding-age monitoring",
+    description="Return the holding time and long-hold warnings for all active positions.",
 )
 def position_ages(request: Request) -> Dict[str, Any]:
     system = request.app.state.system
@@ -2877,14 +2882,14 @@ def position_ages(request: Request) -> Dict[str, Any]:
 
 
 # ============================================================
-# Paper Trading Mode — 모드 전환 & 상태 조회
+# Paper Trading Mode — mode switching & status queries
 # ============================================================
 
 @router.post("/trading-mode", summary="Switch LIVE/PAPER trading mode")
 def switch_trading_mode(request: Request, body: Dict[str, Any] = {}):
-    """런타임에서 LIVE ↔ PAPER 모드 전환.
+    """Switch between LIVE ↔ PAPER mode at runtime.
 
-    PAPER 모드: 실제 주문 없이 가상 체결로 전략 테스트.
+    PAPER mode: test strategies with simulated fills and no real orders.
     """
     mode = str(body.get("mode", "")).upper()
     if mode not in ("LIVE", "PAPER"):
@@ -2896,7 +2901,7 @@ def switch_trading_mode(request: Request, body: Dict[str, Any] = {}):
     if old_mode == mode:
         return {"ok": True, "mode": mode, "changed": False}
 
-    # LIVE 전환 시 API 키 필요
+    # API keys required when switching to LIVE
     if mode == "LIVE":
         ak = os.environ.get("BYBIT_API_KEY", "")
         sk = os.environ.get("BYBIT_API_SECRET", "")
@@ -2940,7 +2945,7 @@ def switch_trading_mode(request: Request, body: Dict[str, Any] = {}):
 
 @router.get("/paper/status", summary="Paper trading status")
 def paper_status(request: Request):
-    """Paper 모드 거래 현황 조회."""
+    """Get the Paper-mode trading status."""
     system = request.app.state.system
     mode = str(getattr(system, "trading_mode", "LIVE")).upper()
 
@@ -2952,7 +2957,7 @@ def paper_status(request: Request):
 
 @router.post("/paper/reset", summary="Reset paper trading balance")
 def paper_reset(request: Request, body: Dict[str, Any] = {}):
-    """Paper 잔고 초기화."""
+    """Reset the Paper balance."""
     system = request.app.state.system
     mode = str(getattr(system, "trading_mode", "LIVE")).upper()
 

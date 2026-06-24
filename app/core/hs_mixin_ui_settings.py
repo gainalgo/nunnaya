@@ -109,7 +109,7 @@ class UISettingsMixin:
             logger.warning("Failed to log Bybit V5 category change to ledger: %s", exc)
 
     def _true_auto_approve(self, strategy: str, default: bool = False) -> bool:
-        """BTC Guard 무관하게 사용자의 원래 auto_approve 값 반환."""
+        """Return the user's original auto_approve value, independent of BTC Guard."""
         attr = f"autopilot_auto_approve_{strategy}"
         if getattr(self, "btc_guard_mode", False):
             pga = getattr(self, "_pre_guard_auto_approve", {})
@@ -190,7 +190,7 @@ class UISettingsMixin:
             "tp_limit_timeout_sec": float(getattr(self, "tp_limit_timeout_sec", 0.0) or 0.0),
             "tp_limit_max_retries": int(getattr(self, "tp_limit_max_retries", 0) or 0),
 
-            # Entry limit buy (지정가 진입)
+            # Entry limit buy
             "entry_limit_buy_enabled": bool(getattr(self, "entry_limit_buy_enabled", False)),
             "entry_limit_timeout_sec": float(getattr(self, "entry_limit_timeout_sec", 5.0) or 5.0),
             "entry_limit_price_mode": str(getattr(self, "entry_limit_price_mode", "best_bid") or "best_bid"),
@@ -235,7 +235,7 @@ class UISettingsMixin:
             "reserved_whale_n": int(getattr(self, "reserved_whale_n", 0) or 0),
             "reserved_candidate_price_min_usdt": float(getattr(self, "reserved_candidate_price_min_usdt", 0.0) or 0.0),
             "reserved_candidate_price_max_usdt": float(getattr(self, "reserved_candidate_price_max_usdt", 0.0) or 0.0),
-            # autopilot_scope_target_n은 아래 scope 블록(L1845)에서 정의 (중복 제거)
+            # autopilot_scope_target_n is defined in the scope block below (dedup)
             "autopilot_scope_instant_buy_min_conf": float(getattr(self, "autopilot_scope_instant_buy_min_conf", 55.0) or 55.0),
             "sniper_min_surge_pct": float(getattr(self, "sniper_min_surge_pct", 5.0) or 5.0),
             "sniper_scan_timeframe": str(getattr(self, "sniper_scan_timeframe", "1h") or "1h"),
@@ -245,7 +245,7 @@ class UISettingsMixin:
 
             "autopilot_enabled": bool(getattr(self, "autopilot_enabled", False)),
             "autopilot_auto_approve": bool(getattr(self, "autopilot_auto_approve", False)),
-            # [FIX] BTC Guard 활성 중에는 _pre_guard 원본값 저장 (False로 덮어쓰기 방지)
+            # [FIX] While BTC Guard is active, store the _pre_guard original value (prevent overwrite with False)
             "autopilot_auto_approve_pingpong": self._true_auto_approve("pingpong", True),
             "autopilot_auto_approve_autoloop": self._true_auto_approve("autoloop", True),
             "autopilot_auto_approve_ladder": self._true_auto_approve("ladder", False),
@@ -254,7 +254,7 @@ class UISettingsMixin:
             "autopilot_auto_approve_contrarian": self._true_auto_approve("contrarian", False),
             "autopilot_auto_approve_sniper": self._true_auto_approve("sniper", False),
 
-            # [2026-02-04] 백테스트 가중치
+            # [2026-02-04] Backtest weights
             "backtest_weight_pingpong": float(getattr(self, "backtest_weight_pingpong", 0.10)),
             "backtest_weight_autoloop": float(getattr(self, "backtest_weight_autoloop", 0.15)),
             "backtest_weight_ladder": float(getattr(self, "backtest_weight_ladder", 0.30)),
@@ -275,7 +275,7 @@ class UISettingsMixin:
             "autopilot_idle_demote_min": int(getattr(self, "autopilot_idle_demote_min", 180) or 0),
             "autopilot_idle_demote_overrides": dict(getattr(self, "autopilot_idle_demote_overrides", {}) or {}),
 
-            # [2026-02-01] 24시간 무거래 → LongHold 자동 전환
+            # [2026-02-01] 24h no-trade -> auto switch to LongHold
             "autopilot_idle_to_longhold_enabled": bool(getattr(self, "autopilot_idle_to_longhold_enabled", True)),
             "autopilot_idle_to_longhold_hours": int(getattr(self, "autopilot_idle_to_longhold_hours", 24) or 24),
 
@@ -319,7 +319,7 @@ class UISettingsMixin:
             "longshort_scope_min_price": float(getattr(self, "longshort_scope_min_price", 0.0) or 0),
             "longshort_scope_max_price": float(getattr(self, "longshort_scope_max_price", 0.0) or 0),
 
-            # [2026-02-01] 자동 먼지 청소
+            # [2026-02-01] Automatic dust cleanup
             "dust_vacuum_enabled": bool(getattr(self, "dust_vacuum_enabled", False)),
             "dust_vacuum_daily_count": int(getattr(self, "dust_vacuum_daily_count", 1) or 1),
             "dust_vacuum_threshold_usdt": float(getattr(self, "dust_vacuum_threshold_usdt", 5.0) or 5.0),
@@ -329,7 +329,7 @@ class UISettingsMixin:
             # Bybit REST/WS/order category; "default" = follow BYBIT_V5_CATEGORY env
             "bybit_v5_category": _bybit_v5_cat_key,
 
-            # [2026-03-23] 스마트 리스크 기능 (①②③)
+            # [2026-03-23] Smart-risk features (1/2/3)
             "dynamic_size_mult_enabled": bool(getattr(self, "dynamic_size_mult_enabled", True)),
             "size_mult_hi_pct": float(os.getenv("OMA_SIZE_MULT_HI_PCT", "-2.0")),
             "size_mult_floor": float(os.getenv("OMA_SIZE_MULT_FLOOR", "0.4")),
@@ -396,7 +396,7 @@ class UISettingsMixin:
             "longshort_scope_random_active",
             "longshort_scope_auto_scan",
             "dust_vacuum_enabled",
-            # [2026-03-23] 스마트 리스크 기능 ON/OFF
+            # [2026-03-23] Smart-risk feature ON/OFF
             "dynamic_size_mult_enabled",
             "regime_per_strategy_enabled",
             "concentration_limit_enabled",
@@ -406,18 +406,18 @@ class UISettingsMixin:
                 if b is not None:
                     setattr(self, k, bool(b))
 
-        # ①② 상호 배타: 둘 다 ON이면 방금 명시적으로 ON한 쪽 우선, 반대쪽 자동 OFF
+        # ①② mutually exclusive: if both ON, the one just explicitly turned ON wins, the other auto-OFF
         if self.dynamic_size_mult_enabled and self.regime_per_strategy_enabled:
             _r_on = self._ui_as_bool(patch.get("regime_per_strategy_enabled"))
             _d_on = self._ui_as_bool(patch.get("dynamic_size_mult_enabled"))
             if _r_on and not _d_on:
-                # 유저가 ①을 명시적으로 ON → ② 자동 OFF
+                # User explicitly turned ① ON -> ② auto-OFF
                 self.dynamic_size_mult_enabled = False
-                logger.info("[SmartRisk] ① 레짐스위칭 명시 ON → ② 동적규모 자동 OFF (곱연산 방지)")
+                logger.info("[SmartRisk] ① regime-switching explicitly ON -> ② dynamic-sizing auto-OFF (avoid multiplicative effect)")
             else:
-                # 유저가 ②를 ON하거나 둘 다 ON → ① 자동 OFF
+                # User turned ② ON or both ON -> ① auto-OFF
                 self.regime_per_strategy_enabled = False
-                logger.info("[SmartRisk] ② 동적규모 활성 → ① 레짐스위칭 자동 OFF (곱연산 방지)")
+                logger.info("[SmartRisk] ② dynamic-sizing active -> ① regime-switching auto-OFF (avoid multiplicative effect)")
 
         if "btc_guard_enabled" in patch:
             b = self._ui_as_bool(patch.get("btc_guard_enabled"))
@@ -483,7 +483,7 @@ class UISettingsMixin:
             "sniper_min_surge_pct",
             "reserved_candidate_price_min_usdt",
             "reserved_candidate_price_max_usdt",
-            # 먼지 청소
+            # Dust cleanup
             "dust_vacuum_threshold_usdt",
             # Night Mode
             "night_mode_entry_score_boost_pct",
@@ -578,11 +578,11 @@ class UISettingsMixin:
                 if x is not None:
                     setattr(self, k, int(x))
 
-        # [2026-03-23] 스마트 리스크 float 설정
+        # [2026-03-23] Smart-risk float settings
         if "size_mult_hi_pct" in patch:
             x = self._ui_as_float(patch.get("size_mult_hi_pct"))
             if x is not None:
-                v = min(-0.1, float(x))  # 반드시 음수
+                v = min(-0.1, float(x))  # must be negative
                 os.environ["OMA_SIZE_MULT_HI_PCT"] = str(v)
         if "size_mult_floor" in patch:
             x = self._ui_as_float(patch.get("size_mult_floor"))
@@ -669,7 +669,7 @@ class UISettingsMixin:
             "sniper_n": max(0, int(getattr(self, "reserved_sniper_n", 0) or 0)),
             "snipers_n": max(0, int(getattr(self, "autopilot_scope_target_n", getattr(self, "reserved_sniper_n", 0)) or 0)),
             "whale_n": max(0, int(getattr(self, "reserved_whale_n", 0) or 0)),
-            # [2026-05-30] Per-strategy ON/OFF toggle persistence (재시작 후 유지)
+            # [2026-05-30] Per-strategy ON/OFF toggle persistence (survives restart)
             "pingpong_enabled": bool(getattr(self, "reserved_pingpong_enabled", True)),
             "autoloop_enabled": bool(getattr(self, "reserved_autoloop_enabled", True)),
             "ladder_enabled": bool(getattr(self, "reserved_ladder_enabled", True)),
@@ -729,7 +729,7 @@ class UISettingsMixin:
             "perf_min_net_cash_usdt": float(getattr(self, "autopilot_perf_min_net_cash_usdt", 0.0) or 0.0),
             "perf_min_net_cash_per_trade_usdt": float(getattr(self, "autopilot_perf_min_net_cash_per_trade", 0.0) or 0.0),
             "cooldown_min": max(0, int(getattr(self, "autopilot_cooldown_min", 0) or 0)),
-            # 전략별 AutoApprove — BTC Guard 중에도 원본값 저장
+            # Per-strategy AutoApprove — store original value even during BTC Guard
             "auto_approve_pingpong": self._true_auto_approve("pingpong", True),
             "auto_approve_autoloop": self._true_auto_approve("autoloop", True),
             "auto_approve_ladder": self._true_auto_approve("ladder", False),
@@ -738,7 +738,7 @@ class UISettingsMixin:
             "auto_approve_contrarian": self._true_auto_approve("contrarian", False),
             "auto_approve_sniper": self._true_auto_approve("sniper", False),
             "auto_approve_whale": self._true_auto_approve("whale", False),
-            # 전략별 최소 신뢰도 %
+            # Per-strategy minimum confidence %
             "min_confidence_pingpong": float(getattr(self, "autopilot_min_confidence_pingpong", 60.0) or 60.0),
             "min_confidence_autoloop": float(getattr(self, "autopilot_min_confidence_autoloop", 60.0) or 60.0),
             "min_confidence_ladder": float(getattr(self, "autopilot_min_confidence_ladder", 60.0) or 60.0),
@@ -753,12 +753,12 @@ class UISettingsMixin:
             "sniper_dca_step_pct": float(getattr(self, "sniper_dca_step_pct", 0.2) or 0.2),
             "sniper_dca_add_ratio": float(getattr(self, "sniper_dca_add_ratio", 0.5) or 0.5),
             "sniper_dca_max_depth_pct": float(getattr(self, "sniper_dca_max_depth_pct", 1.0) or 1.0),
-            # [2026-02-04] Global Profit Take: 모든 ACTIVE 코인 강제 매도
+            # [2026-02-04] Global Profit Take: force-sell all ACTIVE coins
             "global_profit_take": bool(getattr(self, "global_profit_take", False)),
             "global_profit_pct": float(getattr(self, "global_profit_pct", 5.0) or 5.0),
             "global_profit_interval_min": float(getattr(self, "global_profit_interval_min", 10.0) or 10.0),
             "global_min_sl_pct": float(getattr(self, "global_min_sl_pct", -2.5) or -2.5),
-            # [2026-03-23] 수익 자동 락인 (④)
+            # [2026-03-23] Automatic profit lock-in (④)
             "profit_lock_enabled": bool(getattr(self, "profit_lock_enabled", False)),
             "profit_lock_trigger_pct": float(getattr(self, "profit_lock_trigger_pct", 10.0)),
             "profit_lock_sell_ratio": float(getattr(self, "profit_lock_sell_ratio", 0.3)),
@@ -842,7 +842,7 @@ class UISettingsMixin:
 
     def _ui_apply_autopilot_settings(self, patch: Dict[str, Any]) -> None:
         """Apply autopilot settings loaded from ui_settings.json (best-effort)."""
-        # [2026-02-06] BTC Guard Mode UI 연동
+        # [2026-02-06] BTC Guard Mode UI integration
         if not isinstance(patch, dict):
             return
         try:
@@ -922,7 +922,7 @@ class UISettingsMixin:
             if "scope_target_n" in patch:
                 self.autopilot_scope_target_n = max(0, int(patch.get("scope_target_n") or 0))
 
-            # [2026-03-08] 즉시매수 최소 신뢰도 (운영자 설정 가능)
+            # [2026-03-08] Instant-buy minimum confidence (operator-configurable)
             if "scope_instant_buy_min_conf" in patch:
                 try:
                     self.autopilot_scope_instant_buy_min_conf = max(
@@ -955,7 +955,7 @@ class UISettingsMixin:
             if "cooldown_min" in patch:
                 self.autopilot_cooldown_min = max(0, int(patch.get("cooldown_min") or 0))
 
-            # 전략별 AutoApprove
+            # Per-strategy AutoApprove
             if "auto_approve_pingpong" in patch:
                 self.autopilot_auto_approve_pingpong = bool(patch.get("auto_approve_pingpong"))
             if "auto_approve_autoloop" in patch:
@@ -970,12 +970,12 @@ class UISettingsMixin:
                 self.autopilot_auto_approve_contrarian = bool(patch.get("auto_approve_contrarian"))
             if "auto_approve_sniper" in patch:
                 self.autopilot_auto_approve_sniper = bool(patch.get("auto_approve_sniper"))
-            # [FIX 2026-03-23] WHALE auto_approve 복원 누락
+            # [FIX 2026-03-23] WHALE auto_approve restore was missing
             if "auto_approve_whale" in patch:
                 self.autopilot_auto_approve_whale = bool(patch.get("auto_approve_whale"))
 
-            # 전략별 최소 신뢰도 %
-            # [FIX 2026-03-23] "whale" 추가 — 재시작 시 confidence 65%가 기본값(60%)으로 리셋되던 버그
+            # Per-strategy minimum confidence %
+            # [FIX 2026-03-23] Added "whale" — fixes bug where confidence 65% reset to default (60%) on restart
             for _sk in ("pingpong", "autoloop", "ladder", "lightning", "gazua", "contrarian", "sniper", "whale"):
                 _conf_key = f"min_confidence_{_sk}"
                 if _conf_key in patch:
@@ -1027,7 +1027,7 @@ class UISettingsMixin:
                 except (OSError, OverflowError, TypeError, ValueError) as exc:
                     logger.warning("Failed to apply global_min_sl_pct setting: %s", exc)
 
-            # [2026-03-23] 수익 자동 락인 (④)
+            # [2026-03-23] Automatic profit lock-in (④)
             if "profit_lock_enabled" in patch:
                 self.profit_lock_enabled = bool(patch.get("profit_lock_enabled"))
             if "profit_lock_trigger_pct" in patch:
@@ -1042,7 +1042,7 @@ class UISettingsMixin:
                     logger.warning("[UI_SETTINGS] profit_lock_sell_ratio: %s", exc, exc_info=True)
             if "profit_lock_cooldown_h" in patch:
                 try:
-                    h = max(0.016, float(patch.get("profit_lock_cooldown_h") or 1.0))  # 최소 1분
+                    h = max(0.016, float(patch.get("profit_lock_cooldown_h") or 1.0))  # min 1 minute
                     self.profit_lock_cooldown_sec = h * 3600.0
                 except (OverflowError, TypeError, ValueError) as exc:
                     logger.warning("[UI_SETTINGS] profit_lock_cooldown_h: %s", exc, exc_info=True)

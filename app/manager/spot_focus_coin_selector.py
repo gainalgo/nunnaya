@@ -1,14 +1,14 @@
 # ============================================================
 # Upbit FOCUS Coin Selector — Triple-Confirmation (long_only)
 # ------------------------------------------------------------
-# Source 1: Upbit KRW 마켓 거래대금 상위 (거래소별 — 새로 구현)
-# Source 2: GreenPen multi-TF 분석  ← focus_coin_selector 재사용
-# Source 3: 구조 필터               ← focus_coin_selector 재사용
+# Source 1: Upbit KRW market top turnover (per-exchange — newly implemented)
+# Source 2: GreenPen multi-TF analysis  ← reuses focus_coin_selector
+# Source 3: structural filter           ← reuses focus_coin_selector
 #
-# Source 2/3 가 client.get_kline() 만 의존하고, UpbitTradeClient 가
-# Bybit 와 동일 포맷(oldest-first)으로 캔들을 주므로 그대로 상속한다.
-# direction_mode 는 항상 "long_only" (현물).
-# 0 candidates = "안 들어가는 것도 전략" (북극성)
+# Source 2/3 only depend on client.get_kline(), and UpbitTradeClient returns
+# candles in the same format as Bybit (oldest-first), so it inherits directly.
+# direction_mode is always "long_only" (spot).
+# 0 candidates = "not entering is also a strategy" (North Star)
 # ============================================================
 from __future__ import annotations
 
@@ -17,29 +17,29 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# 유동성/변동 필터 (Upbit KRW 기준)
-_MIN_TURNOVER_KRW = 5_000_000_000.0   # 24h 거래대금 50억 KRW 이상 (슬리피지 방지)
-_MAX_CHANGE = 0.20                     # 24h 극변동 제외 (±20%)
-_MIN_CHANGE = 0.005                    # 너무 잠잠하면 TP 안 맞음 (±0.5%)
+# Liquidity/volatility filter (Upbit KRW basis)
+_MIN_TURNOVER_KRW = 5_000_000_000.0   # 24h turnover >= 5B KRW (slippage prevention)
+_MAX_CHANGE = 0.20                     # exclude 24h extreme moves (±20%)
+_MIN_CHANGE = 0.005                    # too quiet => TP won't be reached (±0.5%)
 
-# ── 거래소별 분기 (Bybit 현물=USDT) — Upbit/Bithumb(KRW) 경로는 100% 불변 ──
-#   EXCHANGE_TYPE: BybitTradeClient="bybit" / Upbit·Bithumb=없음("") → 'KRW'.
-_MIN_TURNOVER_USDT = 3_000_000.0       # 24h 거래대금 ~300만 USDT (≈50억 KRW 환산, Bybit/Binance 현물)
+# ── Per-exchange branch (Bybit spot=USDT) — Upbit/Bithumb(KRW) path is 100% unchanged ──
+#   EXCHANGE_TYPE: BybitTradeClient="bybit" / Upbit·Bithumb=none("") → 'KRW'.
+_MIN_TURNOVER_USDT = 3_000_000.0       # 24h turnover ~3M USDT (≈5B KRW equivalent, Bybit/Binance spot)
 
 
 def _exchange_quote(client: Any) -> str:
-    """client 견적통화 — 'USDT'(Bybit/Binance) 또는 'KRW'(Upbit/Bithumb)."""
+    """client quote currency — 'USDT'(Bybit/Binance) or 'KRW'(Upbit/Bithumb)."""
     et = str(getattr(client, "EXCHANGE_TYPE", "")).lower()
     return "USDT" if et in ("bybit", "binance") else "KRW"
 
 
 def _btc_ref(client: Any) -> str:
-    """BTC 기준 심볼 (guard_score BTC 정렬용)."""
+    """BTC reference symbol (for guard_score BTC alignment)."""
     return "BTCUSDT" if _exchange_quote(client) == "USDT" else "KRW-BTC"
 
 
 def _accepts_market(client: Any, mk: Any) -> bool:
-    """이 거래소의 견적통화 마켓인가 (KRW- 접두 vs USDT 접미)."""
+    """Is this a market in this exchange's quote currency (KRW- prefix vs USDT suffix)?"""
     m = str(mk).upper()
     return m.endswith("USDT") if _exchange_quote(client) == "USDT" else m.startswith("KRW-")
 
@@ -49,15 +49,20 @@ def _min_turnover(client: Any) -> float:
 
 
 def _status_to_gate(status: str, passed: bool) -> str:
-    """scanner status(동적 숫자/괄호 suffix 포함) → 안정적 게이트 키(GateLedger 집계용).
-    같은 게이트가 매번 다른 숫자(점수/여유%)를 달고 와도 한 카운터로 합치도록 정규화한다.
-    ★ 새 판단 0 — 이미 계산된 row["status"] 를 라벨로만 매핑(관측)."""
+    """scanner status (incl. dynamic number/paren suffix) → stable gate key (for GateLedger aggregation).
+    Normalizes so the same gate aggregates into one counter even when it carries a different
+    number (score / headroom %) each time.
+    ★ 0 new judgment — only maps the already-computed row["status"] to a label (observation).
+
+    NOTE: the keyword/gate strings below are load-bearing — they are matched as substrings
+    against row["status"] (set in scan_spot_focus_candidates) and the gate values are dict
+    keys aggregated by GateLedger. Do not translate them."""
     if passed:
         return "PASS"
     s = str(status or "").strip()
     if not s:
         return "기타"
-    # 대표 키워드(부분일치) → 안정 키. 동적 suffix(숫자/괄호)는 무시.
+    # Representative keyword (substring match) → stable key. Dynamic suffix (number/paren) ignored.
     table = (
         ("데이터부족", "데이터부족"),
         ("신호 없음", "신호없음"),
@@ -80,11 +85,11 @@ def _status_to_gate(status: str, passed: bool) -> str:
 
 
 def _entry_score_threshold(cfg: Any, guard_score_threshold: float) -> float:
-    """현물 최종 진입점수 문턱.
+    """Spot final entry-score threshold.
 
-    Phase 2 배선 후 `guard_score_threshold` 는 이름은 유지하지만 의미는
-    `base_conviction + guard_modifier` final score 문턱이다. 0 이면 기존처럼
-    점수 게이트 OFF.
+    After Phase 2 wiring, `guard_score_threshold` keeps its name but its meaning is
+    the `base_conviction + guard_modifier` final-score threshold. 0 means the score
+    gate is OFF, as before.
     """
     try:
         th = float(guard_score_threshold or 0.0)
@@ -97,10 +102,10 @@ def _entry_score_threshold(cfg: Any, guard_score_threshold: float) -> float:
 
 def _final_entry_score_for(client: Any, market: str, cfg: Any,
                            btc_dir: str = "NEUTRAL") -> Optional[Dict[str, Any]]:
-    """Phase 2 현물 점수: base conviction + guard-chain modifier.
+    """Phase 2 spot score: base conviction + guard-chain modifier.
 
-    반환 필드는 scan/select/UI 가 같은 값을 보도록 공통으로 쓴다.
-    실패 시 None(fail-open 가능 지점에서 호출부가 처리).
+    The returned fields are shared so scan/select/UI all see the same values.
+    Returns None on failure (caller handles it where fail-open is allowed).
     """
     try:
         from app.manager.spot_conviction import compute_base_conviction
@@ -118,7 +123,7 @@ def _final_entry_score_for(client: Any, market: str, cfg: Any,
             "guard_breakdown": mod_bd,
         }
     except Exception as exc:
-        logger.debug("[SPOT_SELECT] final score 계산 실패 %s: %s", market, exc)
+        logger.debug("[SPOT_SELECT] final score computation failed %s: %s", market, exc)
         return None
 
 
@@ -141,11 +146,11 @@ def select_spot_focus_coin(
     block_caution: bool = False,
     record: Any = None,
 ) -> Optional[Dict]:
-    """3중 확인 스캔 → 최고 final score LONG 후보 1개 (없으면 None).
-    §② 게이트: headroom + overext + blowoff + final score(threshold>0일 때) 통과한 최상위 후보.
-    block_warning/block_caution: 거래소 투자유의/주의환기 종목 진입 차단.
-    record(market, gate, passed): 옵션 콜백 — 켜지면 스캔된 코인별 게이트 통과/거절을
-      GateLedger 에 집계('왜 침묵했나' 관제판). None=집계 OFF(동작 0변화)."""
+    """Triple-confirmation scan → single highest-final-score LONG candidate (None if none).
+    §② gate: top candidate that passes headroom + overext + blowoff + final score (when threshold>0).
+    block_warning/block_caution: block entry on exchange investment-warning / caution-flagged coins.
+    record(market, gate, passed): optional callback — when on, aggregates per-coin gate pass/reject
+      into GateLedger ('why did it stay silent' control panel). None=aggregation OFF (0 behavior change)."""
     rows = scan_spot_focus_candidates(
         system, client,
         primary_tf=primary_tf, top_n=top_n, min_conf=min_conf, exclude=exclude,
@@ -160,12 +165,12 @@ def select_spot_focus_coin(
         logger.info("[SPOT_SELECT] no candidates from scan")
         return None
 
-    # ★ §② 진입품질 게이트 — headroom(머리 위 저항 여유) + overext(24H 끝물 추격).
-    #   통과하는 최상위 후보 선택. 게이트값<=0 이면 항상 통과(=종전 동작 0변화).
+    # ★ §② entry-quality gate — headroom (overhead resistance room) + overext (chasing 24H top).
+    #   Pick the top candidate that passes. Gate value <=0 always passes (=0 behavior change).
     from app.manager.spot_entry_quality import (
         check_headroom, check_overextension, check_blowoff,
     )
-    # 24H 메트릭 — overext/blowoff 중 하나라도 켜졌을 때만, final 후보들만 1회 배치 fetch(중복 fetch 방지).
+    # 24H metrics — only when overext/blowoff is on; batch-fetch the final candidates once (avoid duplicate fetch).
     metrics: Dict[str, Dict] = {}
     if overext_range_pos_pct > 0 or blowoff_move_pct > 0:
         metrics = _fetch_24h_metrics(client, [c.get("market") for c in rows if c.get("market")])
@@ -177,7 +182,7 @@ def select_spot_focus_coin(
         price = float(c.get("price", 0) or 0)
         ok, reason = check_headroom(price, c.get("zones", []), min_headroom_pct=headroom_gate_pct)
         if not ok:
-            logger.info("[SPOT_SELECT] %s %s — 건너뜀", mk, reason)
+            logger.info("[SPOT_SELECT] %s %s — skipped", mk, reason)
             continue
         m = metrics.get(mk) or {}
         if overext_range_pos_pct > 0:
@@ -186,19 +191,19 @@ def select_spot_focus_coin(
                 range_pos_pct=overext_range_pos_pct, min_move_pct=overext_min_move_pct,
             )
             if not ok2:
-                logger.info("[SPOT_SELECT] %s %s — 건너뜀", mk, reason2)
+                logger.info("[SPOT_SELECT] %s %s — skipped", mk, reason2)
                 continue
         if blowoff_move_pct > 0:
             ok3, reason3 = check_blowoff(
                 m.get("move", 0.0), blowoff_move_pct=blowoff_move_pct, direction="LONG",
             )
             if not ok3:
-                logger.info("[SPOT_SELECT] %s %s — 건너뜀", mk, reason3)
+                logger.info("[SPOT_SELECT] %s %s — skipped", mk, reason3)
                 continue
         best = c
         break
     if best is None:
-        logger.info("[SPOT_SELECT] 모든 후보 진입품질 게이트 차단(천장/끝물/파라볼릭) — skip")
+        logger.info("[SPOT_SELECT] all candidates blocked by entry-quality gate (ceiling/overextended/parabolic) — skip")
         return None
 
     if best.get("confidence", 0) < min_conf:
@@ -206,7 +211,7 @@ def select_spot_focus_coin(
                     best.get("market"), best.get("confidence", 0), min_conf)
         return None
 
-    # 현물 long_only 안전장치: SHORT 후보는 절대 통과 금지
+    # Spot long_only safeguard: SHORT candidates must never pass
     if best.get("direction") != "LONG":
         logger.info("[SPOT_SELECT] best %s dir=%s != LONG — blocked (spot long_only)",
                     best.get("market"), best.get("direction"))
@@ -232,16 +237,16 @@ def select_spot_contrarian_coin(
     block_warning: bool = False,
     block_caution: bool = False,
 ) -> Optional[Dict]:
-    """역행(CONTRARIAN) 현물 후보 1개 — BTC 비추세(중립/하락)에서 *BTC 대비 상대강도* 코인.
-    FOCUS(추세추종) 정반대 regime: 상승추세엔 OFF(regime_gate), 중립/하락에서만 = FOCUS churn 장.
-    신호 = (코인 24h move − BTC 24h move) ≥ coin_up_th  ∧  move ≤ coin_up_cap(파라볼릭 펌프 제외).
-    ★ v1 = 24h 상대강도 coarse proxy(기존 _fetch_24h_metrics 재사용, 새 캔들 fetch 0).
-       paper 관측 후 단기(분봉) 상대강도로 정밀화 예정. long_only(현물).
-    0 후보 = "안 들어가는 것도 전략"(북극성)."""
-    # ── regime-gate: 상승추세는 FOCUS 영역 → 역행 OFF ──
+    """Single CONTRARIAN spot candidate — a coin with *relative strength vs BTC* when BTC is non-trending (neutral/down).
+    Opposite regime to FOCUS (trend-following): OFF in uptrend (regime_gate), only in neutral/down = the FOCUS churn zone.
+    Signal = (coin 24h move − BTC 24h move) ≥ coin_up_th  ∧  move ≤ coin_up_cap (exclude parabolic pumps).
+    ★ v1 = coarse 24h relative-strength proxy (reuses existing _fetch_24h_metrics, 0 new candle fetch).
+       To be refined with short-term (minute) relative strength after paper observation. long_only (spot).
+    0 candidates = "not entering is also a strategy" (North Star)."""
+    # ── regime-gate: uptrend is FOCUS territory → contrarian OFF ──
     btc_dir = _btc_direction(client)
     if regime_gate and btc_dir == "UP":
-        logger.info("[SPOT_CONTRA] BTC UPTREND — 역행 skip (FOCUS 영역)")
+        logger.info("[SPOT_CONTRA] BTC UPTREND — contrarian skip (FOCUS territory)")
         return None
     markets = _source1_spot_volume(client, top_n=top_n, exclude=exclude,
                                    block_warning=block_warning, block_caution=block_caution)
@@ -251,7 +256,7 @@ def select_spot_contrarian_coin(
     btc_ref = _btc_ref(client)
     metrics = _fetch_24h_metrics(client, list(markets) + [btc_ref])
     if not metrics:
-        logger.info("[SPOT_CONTRA] 24h 메트릭 없음 — skip (blind 진입 방지)")
+        logger.info("[SPOT_CONTRA] no 24h metrics — skip (prevent blind entry)")
         return None
     btc_move = float((metrics.get(btc_ref) or {}).get("move", 0.0))
     best = None
@@ -261,17 +266,17 @@ def select_spot_contrarian_coin(
         move = float(m.get("move", 0.0) or 0.0)
         if last <= 0:
             continue
-        rel = move - btc_move                      # BTC 대비 초과수익(상대강도)
-        if rel < coin_up_th:                        # BTC보다 충분히 강해야 역행 진입 자격
+        rel = move - btc_move                      # excess return vs BTC (relative strength)
+        if rel < coin_up_th:                        # must be strong enough vs BTC to qualify for contrarian entry
             continue
-        if coin_up_cap > 0 and move > coin_up_cap:  # 절대 24h 펌프 = exit유동성 함정 제외
+        if coin_up_cap > 0 and move > coin_up_cap:  # absolute 24h pump = exclude exit-liquidity trap
             continue
         if best is None or rel > best["_rel"]:
             best = {"market": mk, "price": last, "move": move, "_rel": rel,
                     "direction": "LONG", "confidence": 0.0, "btc_dir": btc_dir,
                     "_source": "CONTRARIAN"}
     if best is None:
-        logger.info("[SPOT_CONTRA] 역행 후보 0 (BTC=%s %.2f%%, 상대강도 ≥%.1f%% 없음)",
+        logger.info("[SPOT_CONTRA] 0 contrarian candidates (BTC=%s %.2f%%, none with relative strength ≥%.1f%%)",
                     btc_dir, btc_move, coin_up_th)
         return None
     logger.info("[SPOT_CONTRA] Selected %s LONG move=%.2f%% rel=%.2f%% (btc=%s %.2f%%)",
@@ -295,23 +300,23 @@ def scan_spot_focus_candidates(
     block_caution: bool = False,
     record: Any = None,
 ) -> List[Dict]:
-    """예비 후보 현황 — 거래대금 상위 N개를 GreenPen 으로 진단해 *전부* 반환(표시용).
-    select 와 달리 차단된 것도 사유와 함께 보여준다 (Bybit GreenPen Scanner 미러).
-    headroom_gate_pct>0 이면 천장 여유 부족 후보를 "천장 추격" 으로 표기(게이트 효과 미리보기).
-    guard_score_mode_enabled 이면 Phase2 final score(base+modifier) 컬럼 표시, threshold>0 이면 미달 차단 표기.
+    """Prospective-candidate snapshot — diagnose the top-N by turnover with GreenPen and return *all* (for display).
+    Unlike select, also shows blocked ones with their reason (mirrors the Bybit GreenPen Scanner).
+    When headroom_gate_pct>0, candidates with insufficient overhead room are flagged as "chasing the ceiling" (gate preview).
+    When guard_score_mode_enabled, shows the Phase2 final-score (base+modifier) column; when threshold>0, marks below-threshold blocks.
     """
     from app.strategy.greenpen import full_analysis
     from app.strategy.greenpen.pa_detector import OHLCV
     from app.manager.focus_coin_selector import _source3_structural_filter
 
-    # 표시용은 차단 안 하고 *전부* 보여줌(유의/주의 배지로 표기) — block 은 진입(select)에서만.
+    # Display path does not block — shows *all* (with warning/caution badges); blocking only happens at entry (select).
     markets = _source1_spot_volume(client, top_n=top_n, exclude=exclude)
-    # 거래소 경고 플래그 (TTL 캐시 — 추가 fetch 거의 없음)
+    # Exchange warning flags (TTL cache — almost no extra fetch)
     try:
         warn = client.get_market_warnings()
     except Exception:
         warn = {}
-    # BTC 정렬 — 스캔당 1회 (모든 후보 공통, 캐시)
+    # BTC alignment — once per scan (shared by all candidates, cached)
     _btc_dir = _btc_direction(client) if guard_score_mode_enabled else "NEUTRAL"
     _cfg = getattr(system, "config", None)
     _score_threshold = _entry_score_threshold(_cfg, guard_score_threshold)
@@ -329,7 +334,7 @@ def scan_spot_focus_candidates(
         try:
             raw = client.get_kline(market, interval=primary_tf, limit=31)
             if raw and len(raw) >= 2:
-                raw = raw[:-1]  # Phase2: PA/추세 판단은 closed candle 기준.
+                raw = raw[:-1]  # Phase2: PA/trend judgment uses the closed candle.
             candles = []
             for r in raw:
                 try:
@@ -350,7 +355,7 @@ def scan_spot_focus_candidates(
             row["price"] = candles[-1].close
             row["atr"] = gp.atr
             row["zones"] = _zser(gp.zones)
-            # guard_score G1(ADX+추세conf) — 캔들 재사용(무fetch), 표시용
+            # guard_score G1 (ADX+trend conf) — reuse candles (no fetch), for display
             if guard_score_mode_enabled:
                 try:
                     from app.manager.spot_guard_score import compute_guard_score, gs_weights_from_config
@@ -368,7 +373,7 @@ def scan_spot_focus_candidates(
                         weights=gs_weights_from_config(getattr(system, "config", None)),
                     )
                     row["legacy_guard_score"] = gsc
-                    row["guard_score"] = gsc   # 기본 표시 = legacy gs8(무fetch). final 은 LONG 확정 후 덮음.
+                    row["guard_score"] = gsc   # default display = legacy gs8 (no fetch). final overwrites after LONG is confirmed.
                 except Exception:
                     pass
             pa = gp.pa_signals[0] if gp.pa_signals else None
@@ -387,15 +392,15 @@ def scan_spot_focus_candidates(
                 "confidence": conf,
                 "atr": gp.atr,
             }
-            # ★ final 진입점수(base conviction + guard modifier) — **LONG 신호 확정 후보만** 계산.
-            #   (성능: 후보당 base+modifier=get_kline 30회/2초 → 신호없음/SHORT 까지 풀계산하면 top_n×30 폭주.
-            #    실측 300회/스캔 → Scanner 멈춤·타임아웃. LONG 신호 있는 후보(보통 0~3개)만 = 폭주 해소.)
+            # ★ final entry score (base conviction + guard modifier) — computed **only for confirmed-LONG candidates**.
+            #   (Perf: per candidate base+modifier = get_kline 30 calls/2s → full-computing no-signal/SHORT too explodes to top_n×30.
+            #    Measured ~300 calls/scan → Scanner stalls/timeouts. Only LONG-signal candidates (usually 0~3) = explosion resolved.)
             if guard_score_mode_enabled and direction == "LONG":
                 score_row = _final_entry_score_for(client, market, _cfg, btc_dir=_btc_dir)
                 if score_row:
                     row.update(score_row)
-                    row["guard_score"] = score_row["final_score"]  # 표시/게이트 = final(base+modifier)
-            # headroom(머리 위 가장 가까운 RESISTANCE 여유 %) — 표시 + 게이트 미리보기
+                    row["guard_score"] = score_row["final_score"]  # display/gate = final (base+modifier)
+            # headroom (% room to the nearest overhead RESISTANCE) — display + gate preview
             overhead = [
                 z.price_low for z in gp.zones
                 if (z.type.value if hasattr(z.type, "value") else str(z.type)).upper() == "RESISTANCE"
@@ -403,10 +408,10 @@ def scan_spot_focus_candidates(
             ]
             if overhead and row["price"] > 0:
                 row["headroom_pct"] = round((min(overhead) - row["price"]) / row["price"] * 100.0, 2)
-            # ADX (진입 adx_entry_gate 와 동일 기준) — candles 재사용(무fetch). 표시 + status 일치.
+            # ADX (same basis as entry adx_entry_gate) — reuse candles (no fetch). matches display + status.
             _adxv = _adx_value(candles)
             row["adx"] = round(_adxv, 1) if _adxv is not None else None
-            # 게이트(select 와 동일 판정) — 차단 사유 표기
+            # Gate (same decision as select) — annotate the block reason
             if direction == "LONG" and trend == "DOWNTREND":
                 row["status"] = "역추세 차단"
             elif direction == "SHORT":
@@ -425,15 +430,15 @@ def scan_spot_focus_candidates(
                     row["status"] = f"문턱 미달(<{min_conf:.2f})"
                 elif (headroom_gate_pct > 0 and row["headroom_pct"] is not None
                         and row["headroom_pct"] < headroom_gate_pct):
-                    # ★ headroom 게이트는 *머리 위 저항이 가까움*만 본다(코인이 끝물/레인지상단인지 아님).
-                    #   → 레인지 중간 코인에 '천장 추격'은 과장. 정확히 '저항 근접'(여유=저항까지 거리).
+                    # ★ The headroom gate only looks at *overhead resistance being close* (not whether the coin is overextended / at range top).
+                    #   → calling a mid-range coin "chasing the ceiling" is an overstatement. Precisely "near resistance" (room = distance to resistance).
                     row["status"] = f"저항 근접(여유 {row['headroom_pct']:.1f}%)"
                 elif (_score_threshold > 0 and row["guard_score"] is not None
                         and row["guard_score"] < _score_threshold):
                     row["status"] = f"점수 미달({row['guard_score']:.0f}<{_score_threshold:.0f})"
                 else:
-                    # ★ [2026-06-19 부모] 실제 진입 게이트(adx_entry_gate: H1 ADX + 돌파면제)와 동일 판정으로 표시.
-                    #   여기 도달 = 다른 게이트 다 통과한 finalist 뿐 → 호출 적음(fetch storm 아님). _adx_blocks_entry(H4) 대체.
+                    # ★ [2026-06-19 owner] Display using the same decision as the real entry gate (adx_entry_gate: H1 ADX + breakout exemption).
+                    #   Reaching here = only finalists that passed every other gate → few calls (no fetch storm). Replaces _adx_blocks_entry(H4).
                     try:
                         from app.manager.spot_guard_chain import adx_entry_gate as _adx_gate
                         _adx_ok, _adx_why = _adx_gate(client, market, _cfg)
@@ -445,17 +450,17 @@ def scan_spot_focus_candidates(
                         row["status"] = "✅ 진입 가능"
                         row["passed"] = True
         except Exception as exc:
-            logger.warning("[UPBIT_SCAN] %s 진단 실패: %s", market, exc)
+            logger.warning("[UPBIT_SCAN] %s diagnosis failed: %s", market, exc)
             row["status"] = "오류"
-        # ★ 거래소 경고 — 최우선. 투자유의(block_warning)는 진입 차단으로 덮음, 주의는 표시만.
+        # ★ Exchange warning — top priority. Investment-warning (block_warning) overrides to block entry; caution is display-only.
         if row["warning"] and block_warning:
             row["status"] = "⛔ 투자유의(차단)"
             row["passed"] = False
         elif row["caution"] and block_caution:
             row["status"] = "⛔ 주의환기(차단)"
             row["passed"] = False
-        # ★ [2026-06-21] GateLedger 집계 — 이 코인이 어느 게이트에 걸렸나(관측만, 진입 불침).
-        #   record 콜백 자체가 예외를 삼키지만 한 번 더 감싸 스캔 흐름을 절대 안 깬다.
+        # ★ [2026-06-21] GateLedger aggregation — which gate this coin hit (observation only, does not affect entry).
+        #   The record callback swallows exceptions itself, but wrap once more so it never breaks the scan flow.
         if record is not None:
             try:
                 record(market, _status_to_gate(row.get("status", ""), bool(row.get("passed"))),
@@ -464,7 +469,7 @@ def scan_spot_focus_candidates(
                 pass
         rows.append(row)
 
-    # 진입가능 먼저, 그 다음 confidence 내림차순
+    # Enterable first, then by confidence descending
     rows.sort(key=lambda x: (not x["passed"],
                              -float(x.get("guard_score") or 0),
                              -float(x.get("confidence") or 0)))
@@ -472,7 +477,7 @@ def scan_spot_focus_candidates(
 
 
 def _parse_exclude(exclude: Any) -> set:
-    """쉼표/리스트 입력을 정규화된 마켓 집합으로 (KRW- 접두 보정, 대문자)."""
+    """Normalize comma/list input into a market set (add KRW- prefix, uppercase)."""
     if not exclude:
         return set()
     items = exclude.split(",") if isinstance(exclude, str) else list(exclude)
@@ -488,7 +493,7 @@ def _parse_exclude(exclude: Any) -> set:
 
 
 def _btc_direction(client: Any) -> str:
-    """KRW-BTC 구조 추세 → 'UP'/'DOWN'/'NEUTRAL'. guard_score BTC 정렬용(스캔당 1회·캐시). 실패 NEUTRAL."""
+    """KRW-BTC structural trend → 'UP'/'DOWN'/'NEUTRAL'. For guard_score BTC alignment (once per scan, cached). NEUTRAL on failure."""
     try:
         from app.strategy.greenpen.market_structure import analyze_structure
         from app.strategy.greenpen.pa_detector import OHLCV
@@ -504,7 +509,7 @@ def _btc_direction(client: Any) -> str:
 
 
 def _zser(zones) -> List[dict]:
-    """GreenPen zone 객체 → guard_score Anchor 용 직렬화."""
+    """Serialize GreenPen zone objects for guard_score Anchor use."""
     out = []
     for z in (zones or []):
         try:
@@ -518,11 +523,11 @@ def _zser(zones) -> List[dict]:
 
 
 def _adx_value(candles) -> Optional[float]:
-    """candles(OHLCV, oldest-first) → primary ADX. 부족/실패 None.
-    스캐너 표시·status 와 진입 adx_entry_gate 가 같은 기준 쓰도록(candles 재사용=무fetch)."""
+    """candles (OHLCV, oldest-first) → primary ADX. None if insufficient/failed.
+    So the scanner display/status and the entry adx_entry_gate use the same basis (reuse candles = no fetch)."""
     try:
         from app.strategy import indicators
-        if not candles or len(candles) < 29:   # ADX(14) 최소 29봉
+        if not candles or len(candles) < 29:   # ADX(14) needs >= 29 bars
             return None
         a = indicators.adx([c.high for c in candles], [c.low for c in candles],
                            [c.close for c in candles])
@@ -534,8 +539,8 @@ def _adx_value(candles) -> Optional[float]:
 
 
 def _adx_blocks_entry(system, adxv: Optional[float]) -> bool:
-    """adx_filter_enabled(672 기본 True) 이고 adx < min_adx_entry(17) 면 진입 차단(=SIDEWAYS junk).
-    진입 경로 spot_guard_chain.adx_entry_gate 와 동일 판정 — 스캐너 표시 일치용. adxv None=fail-open."""
+    """If adx_filter_enabled (default True) and adx < min_adx_entry(17), block entry (=SIDEWAYS junk).
+    Same decision as the entry path spot_guard_chain.adx_entry_gate — to match the scanner display. adxv None=fail-open."""
     cfg = getattr(system, "config", None)
     if cfg is None or adxv is None or not getattr(cfg, "adx_filter_enabled", True):
         return False
@@ -544,7 +549,7 @@ def _adx_blocks_entry(system, adxv: Optional[float]) -> bool:
 
 def _guard_score_for(client: Any, market: str, primary_tf: str, total_cap: float,
                      btc_dir: str = "NEUTRAL", weights: dict = None):
-    """select 게이트용 guard_score. primary kline(캐시) + full_analysis(structure+PA) → 점수. 실패 None."""
+    """guard_score for the select gate. primary kline (cached) + full_analysis (structure+PA) → score. None on failure."""
     try:
         from app.strategy.greenpen import full_analysis
         from app.strategy.greenpen.pa_detector import OHLCV
@@ -569,23 +574,23 @@ def _guard_score_for(client: Any, market: str, primary_tf: str, total_cap: float
         )
         return gsc
     except Exception as exc:
-        logger.debug("[SPOT_SELECT] guard_score 계산 실패 %s: %s", market, exc)
+        logger.debug("[SPOT_SELECT] guard_score computation failed %s: %s", market, exc)
         return None
 
 
 def score_timeline(client: Any, market: str, primary_tf: str = "240",
                    count: int = 60, total_cap: float = 80.0,
                    weights: dict = None) -> List[Dict]:
-    """과거 시점별 guard_score + conf 궤적 (점수↔차트 정합 검증용).
-    각 시점에서 라이브 스캔과 동일하게 trailing 30캔들 full_analysis + guard_score 재계산.
-    BTC 방향도 그 시점 기준(시점별)으로 반영. 반환 = 오래된→최신 순 rows."""
+    """Historical per-timestamp guard_score + conf trajectory (for score↔chart consistency checks).
+    At each timestamp, recompute trailing-30-candle full_analysis + guard_score exactly as the live scan does.
+    BTC direction is also reflected per-timestamp. Returns rows in oldest→newest order."""
     try:
         from app.strategy.greenpen import full_analysis
         from app.strategy.greenpen.pa_detector import OHLCV
         from app.strategy.greenpen.market_structure import analyze_structure
         from app.manager.spot_guard_score import compute_guard_score
     except Exception as exc:
-        logger.warning("[SPOT_SELECT] score_timeline import 실패: %s", exc)
+        logger.warning("[SPOT_SELECT] score_timeline import failed: %s", exc)
         return []
 
     def _mk(raw):
@@ -643,13 +648,13 @@ def score_timeline(client: Any, market: str, primary_tf: str = "240",
                 continue
         return rows
     except Exception as exc:
-        logger.warning("[SPOT_SELECT] score_timeline %s 실패: %s", market, exc)
+        logger.warning("[SPOT_SELECT] score_timeline %s failed: %s", market, exc)
         return []
 
 
 def _fetch_24h_metrics(client: Any, markets: List[str]) -> Dict[str, Dict]:
-    """final 후보들의 24H 메트릭(last/hi/lo/move%) 한 번에 배치 조회 — overext 게이트용.
-    실패/누락은 빈 dict → 게이트는 no_data 로 통과(fail-open)."""
+    """Batch-fetch the final candidates' 24H metrics (last/hi/lo/move%) at once — for the overext gate.
+    Failure/missing → empty dict → the gate passes as no_data (fail-open)."""
     out: Dict[str, Dict] = {}
     codes = [m for m in (markets or []) if m]
     if not codes:
@@ -657,7 +662,7 @@ def _fetch_24h_metrics(client: Any, markets: List[str]) -> Dict[str, Dict]:
     try:
         tickers = client.get_tickers(codes)
     except Exception as exc:
-        logger.warning("[SPOT_SELECT] 24H 메트릭 조회 실패(overext skip): %s", exc)
+        logger.warning("[SPOT_SELECT] 24H metrics fetch failed (overext skip): %s", exc)
         return out
     for t in (tickers or []):
         if not isinstance(t, dict):
@@ -676,9 +681,9 @@ def _fetch_24h_metrics(client: Any, markets: List[str]) -> Dict[str, Dict]:
 
 def _source1_spot_volume(client: Any, top_n: int = 10, exclude: Any = None,
                           block_warning: bool = False, block_caution: bool = False) -> List[str]:
-    """Upbit KRW 마켓을 24h 거래대금 기준 정렬해 상위 N개. exclude=운영 제외 마켓.
-    block_warning=True 면 거래소 투자유의 종목(상폐위험) 제외, block_caution=True 면 주의환기도 제외.
-    경고 플래그는 get_all_markets(isDetails=true) 응답에서 추출 — 추가 fetch 없음."""
+    """Sort Upbit KRW markets by 24h turnover and take the top N. exclude=operationally excluded markets.
+    block_warning=True excludes exchange investment-warning coins (delisting risk); block_caution=True also excludes caution-flagged.
+    Warning flags are extracted from the get_all_markets(isDetails=true) response — no extra fetch."""
     skip = _parse_exclude(exclude)
     try:
         markets = client.get_all_markets()
@@ -691,10 +696,10 @@ def _source1_spot_volume(client: Any, top_n: int = 10, exclude: Any = None,
                 try:
                     f = client._parse_market_flags(m)
                     if block_warning and f.get("warning"):
-                        logger.info("[SPOT_SELECT] %s 투자유의 종목 — 진입 차단", mk)
+                        logger.info("[SPOT_SELECT] %s investment-warning coin — entry blocked", mk)
                         continue
                     if block_caution and f.get("caution"):
-                        logger.info("[SPOT_SELECT] %s 주의환기(%s) — 진입 차단",
+                        logger.info("[SPOT_SELECT] %s caution-flagged (%s) — entry blocked",
                                     mk, ",".join(f.get("kinds", [])))
                         continue
                 except Exception:
@@ -704,7 +709,7 @@ def _source1_spot_volume(client: Any, top_n: int = 10, exclude: Any = None,
             return []
 
         tickers: List[Dict] = []
-        for i in range(0, len(codes), 100):  # URL 길이 방지 배치
+        for i in range(0, len(codes), 100):  # batch to avoid URL length limits
             try:
                 tickers.extend(client.get_tickers(codes[i:i + 100]))
             except Exception as exc:
@@ -715,7 +720,7 @@ def _source1_spot_volume(client: Any, top_n: int = 10, exclude: Any = None,
             if not isinstance(t, dict):
                 continue
             market = str(t.get("market", ""))
-            turnover = float(t.get("acc_trade_price_24h", 0) or 0)   # KRW(Upbit) / USDT(Bybit)
+            turnover = float(t.get("acc_trade_price_24h", 0) or 0)   # KRW (Upbit) / USDT (Bybit)
             change = float(t.get("signed_change_rate", 0) or 0)
             if turnover < _min_turnover(client):
                 continue

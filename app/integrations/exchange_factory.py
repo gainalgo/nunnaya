@@ -1,5 +1,5 @@
 """
-Exchange Factory — Bybit(선물) / Upbit(현물) / Binance(선물+현물)
+Exchange Factory — Bybit (futures) / Upbit (spot) / Binance (futures+spot)
 """
 
 import os
@@ -13,14 +13,14 @@ logger = logging.getLogger(__name__)
 
 def create_exchange_adapter(exchange: str = "BYBIT", **kwargs) -> ExchangeAdapter:
     """
-    거래소 어댑터 생성
+    Create an exchange adapter
 
     Args:
-        exchange: 거래소 이름 ("BYBIT" | "UPBIT")
-        **kwargs: 거래소별 설정
+        exchange: exchange name ("BYBIT" | "UPBIT")
+        **kwargs: per-exchange settings
 
     Returns:
-        ExchangeAdapter: 거래소 어댑터 인스턴스
+        ExchangeAdapter: exchange adapter instance
     """
     exchange = exchange.upper()
 

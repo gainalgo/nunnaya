@@ -28,7 +28,7 @@ _INTERVAL_MAP = {
 
 
 class CandleLoader:
-    """과거 캔들 데이터 로더 (Bybit V5)"""
+    """Historical candle data loader (Bybit V5)"""
 
     def __init__(self):
         self.max_429_retries = max(0, int(float(os.getenv("OMA_CANDLE_429_MAX_RETRIES", "4") or 4)))
@@ -41,7 +41,7 @@ class CandleLoader:
         interval_minutes: int = 60,
         max_count: int = 200,
     ) -> List[Dict[str, Any]]:
-        """과거 캔들 데이터 로드 (Bybit V5 kline)."""
+        """Load historical candle data (Bybit V5 kline)."""
         all_candles = []
         end_ms = int(time.time() * 1000)
         interval_str = _INTERVAL_MAP.get(interval_minutes, str(interval_minutes))

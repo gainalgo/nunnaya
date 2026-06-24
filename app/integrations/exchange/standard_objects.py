@@ -28,10 +28,10 @@ class StandardOrder:
     market: str             # "BTCUSDT"
     side: Side              # LONG | SHORT
     order_type: OrderType   # MARKET | LIMIT
-    price: float            # 주문 가격 (MARKET이면 0)
-    volume: float          # 주문 수량
-    leverage: int = 1       # 레버리지 (현물은 1 고정)
-    uuid: str = ""        # 거래소 주문 ID
+    price: float            # order price (0 for MARKET)
+    volume: float          # order quantity
+    leverage: int = 1       # leverage (fixed at 1 for spot)
+    uuid: str = ""        # exchange order ID
     status: OrderStatus = OrderStatus.PENDING
 
 
@@ -40,8 +40,8 @@ class StandardPosition:
     exchange: str
     market: str
     side: Side              # LONG | SHORT
-    entry_price: float      # 진입 가격
-    qty: float              # 보유 수량
+    entry_price: float      # entry price
+    qty: float              # held quantity
     leverage: int = 1
     margin_type: str = "isolated"  # "isolated" | "cross"
     unrealized_pnl: float = 0.0

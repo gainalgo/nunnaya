@@ -13,9 +13,9 @@ const I18N = (function () {
   let _data = {};           // { locale: { key: "translation", ... }, ... }
 
   /* ---------------------------------------------------------
-   *  t(key, params?) — 번역 문자열 반환
-   *  예: t("profit_label", { market: "BTC" })
-   *      "profit_label": "{market} 수익" → "BTC 수익"
+   *  t(key, params?) — returns the translated string
+   *  e.g.: t("profit_label", { market: "BTC" })
+   *        "profit_label": "{market} profit" → "BTC profit"
    * ------------------------------------------------------- */
   function t(key, params) {
     var dict = _data[_locale] || {};
@@ -28,7 +28,7 @@ const I18N = (function () {
   }
 
   /* ---------------------------------------------------------
-   *  apply() — DOM 전체에 번역 적용
+   *  apply() — apply translations across the whole DOM
    *    data-i18n            → textContent
    *    data-i18n-title      → title
    *    data-i18n-placeholder→ placeholder
@@ -57,14 +57,14 @@ const I18N = (function () {
   }
 
   /* ---------------------------------------------------------
-   *  load(locale) — JSON 로드 → 캐시 → apply
+   *  load(locale) — load JSON → cache → apply
    * ------------------------------------------------------- */
   function load(locale) {
     locale = locale || _locale;
     _locale = locale;
     localStorage.setItem(STORAGE_KEY, locale);
 
-    // 캐시 히트 → 재사용
+    // cache hit → reuse
     if (_data[locale]) {
       apply();
       return Promise.resolve();
@@ -92,7 +92,7 @@ const I18N = (function () {
   }
 
   /* ---------------------------------------------------------
-   *  DOMContentLoaded — 자동 초기화
+   *  DOMContentLoaded — auto-initialize
    * ------------------------------------------------------- */
   document.addEventListener("DOMContentLoaded", function () {
     var sel = document.getElementById("lang-select");

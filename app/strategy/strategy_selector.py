@@ -26,24 +26,24 @@ class SelectionResult:
 
 class StrategySelector:
     """
-    중앙 판단자 (Central Decision Maker)
+    Central Decision Maker
 
-    역할:
-    - 시장 상태(Context) → 전략 점수 계산
-    - 점수는 EMA로 누적
-    - Bias는 히스테리시스로 안정화
+    Role:
+    - Market state (Context) -> compute strategy scores
+    - Scores are accumulated via EMA
+    - Bias is stabilized with hysteresis
     """
 
     def __init__(self):
         self.alpha = 0.2               # EMA smoothing factor
-        self.min_hold_seconds = 30     # 최소 유지 시간
-        self.switch_margin = 5.0       # 전략 전환 임계 차이
+        self.min_hold_seconds = 30     # minimum hold time
+        self.switch_margin = 5.0       # strategy switch threshold difference
 
     # --------------------------------------------------
     def select(self, ctx: HyperEngineContext) -> SelectionResult:
         scores, features = self._score_all(ctx)
 
-        # EMA 누적
+        # EMA accumulation
         ctx.update_ema(scores, self.alpha)
 
         ranked = sorted(
@@ -58,7 +58,7 @@ class StrategySelector:
 
         now = time.time()
 
-        # 히스테리시스
+        # hysteresis
         if ctx.bias is None:
             ctx.bias = best
             ctx.bias_ts = now
@@ -88,12 +88,13 @@ class StrategySelector:
     # --------------------------------------------------
     def _score_all(self, ctx: HyperEngineContext) -> Tuple[Dict[str, float], Dict[str, Any]]:
         # NOTE:
-        # - price_buffer/history 에 비정상(0, 음수, NaN/inf) 값이 섞이면
-        #   change_pct 계산에서 ZeroDivisionError가 발생할 수 있다.
-        # - 실제로 TICK_LOOP_FATAL "float division by zero" 의 주요 원인.
-        # - 여기서 1차 방어(필터링)를 수행하여 TickLoop가 죽지 않도록 한다.
+        # - If abnormal values (0, negative, NaN/inf) are mixed into
+        #   price_buffer/history, a ZeroDivisionError can occur in the
+        #   change_pct calculation.
+        # - This is actually a major cause of TICK_LOOP_FATAL "float division by zero".
+        # - We perform a first line of defense (filtering) here so the TickLoop does not die.
 
-        # 너무 긴 히스토리를 매 tick마다 스캔하지 않도록, 최근 구간만 사용
+        # Use only the most recent segment so we don't scan an overly long history every tick
         raw_prices = list(ctx.price_buffer)[-200:]
 
         prices: list[float] = []
@@ -101,7 +102,7 @@ class StrategySelector:
             try:
                 fp = float(p)
             except (TypeError, ValueError) as exc:
-                logger.warning("[strategy_selector] %s: %s", '너무 긴 히스토리를 매 tick마다 스캔하지 않도록, 최근 구간만 사용 except-> continue', exc, exc_info=True)
+                logger.warning("[strategy_selector] %s: %s", 'price parse failed (non-numeric value) except-> continue', exc, exc_info=True)
                 continue
             if (not math.isfinite(fp)) or fp <= 0.0:
                 continue
@@ -115,7 +116,7 @@ class StrategySelector:
         last = prices[-1]
         p0 = prices[0]
 
-        # p0가 0이면 division-by-zero; 위에서 필터링했지만 안전하게 한 번 더 방어
+        # If p0 is 0 -> division-by-zero; already filtered above, but guard once more to be safe
         if p0 <= 0.0:
             return {s: 0.0 for s in STRATEGIES}, {"note": "invalid base price (p0<=0)"}
 
@@ -153,25 +154,25 @@ class StrategySelector:
         # --------------------------------------------------------
         # [PATCH] Performance-based Penalty (Anti-Whipsaw)
         # --------------------------------------------------------
-        # 최근 거래에서 손실이 많다면, 추세 추종형(돌파) 전략의 점수를 깎아서
-        # 횡보/역추세 전략(PingPong)이나 관망으로 유도한다.
+        # If recent trades have many losses, penalize trend-following (breakout) strategy
+        # scores to steer toward range/counter-trend strategies (PingPong) or standing aside.
         history = getattr(ctx, "trade_history", [])
         recent_losses = 0
         if history:
-            # 최근 5회 거래 확인
+            # Check the last 5 trades
             for _, profit, _ in list(history)[-5:]:
                 if profit < 0:
                     recent_losses += 1
-        
+
         if recent_losses >= 3:
-            # 최근 5번 중 3번 이상 손실이면 Lightning/Gazua 점수 대폭 차감 (50% 페널티)
+            # If 3+ of the last 5 are losses, heavily cut Lightning/Gazua scores (50% penalty)
             scores["lightning"] *= 0.5
             scores["gazua"] *= 0.5
 
         # --------------------------------------------------------
         # Squeeze Expansion Detection (Gazua Boost)
         # --------------------------------------------------------
-        # 볼린저 밴드 스퀴즈가 해소되면서(Expansion) 상방으로 튀면 Gazua 전략을 강력 추천한다.
+        # When a Bollinger Band squeeze resolves (Expansion) and breaks upward, strongly recommend the Gazua strategy.
         sq_res = indicators.bollinger_squeeze(prices, length=20, k=2.0, lookback=20)
         is_squeeze = False
         if sq_res:
@@ -181,15 +182,15 @@ class StrategySelector:
         squeeze_expansion = None
 
         if was_squeeze and not is_squeeze:
-            # Squeeze 해소 (Expansion)
+            # Squeeze resolved (Expansion)
             if mom > 0:
-                scores["gazua"] += 50.0  # 강력한 매수 추세 신호로 간주
+                scores["gazua"] += 50.0  # treated as a strong bullish trend signal
                 squeeze_expansion = "bull"
                 
                 # ----------------------------------------------------
                 # Notification Trigger
                 # ----------------------------------------------------
-                # 텔레그램 알림 큐에 메시지 추가
+                # Add message to the Telegram notification queue
                 msg = f"🚀 [Squeeze Breakout] {ctx.market} Volatility Expansion Detected! (Mom: {mom:.2f}%)"
                 ctx.notifications.append({"ts": time.time(), "level": "INFO", "message": msg})
 

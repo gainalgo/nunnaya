@@ -2,10 +2,10 @@
 # File: app/strategy/strategy_plugins.py
 # Autocoin OS v3-H — Strategy Plugin Re-export Hub
 # ------------------------------------------------------------
-# Phase 2 (file diet): 4,863줄 → re-export hub (~80줄)
+# Phase 2 (file diet): 4,863 lines → re-export hub (~80 lines)
 #
-# 모든 클래스/함수는 개별 모듈로 분리됨.
-# 이 파일은 하위 호환성을 위한 re-export만 담당한다.
+# All classes/functions are split into individual modules.
+# This file only handles re-exports for backward compatibility.
 # ============================================================
 
 from __future__ import annotations
@@ -76,9 +76,9 @@ _PLUGIN_SINGLETONS: Dict[str, StrategyPlugin] = {
 
 
 def get_plugin(name: str) -> StrategyPlugin:
-    """name에 해당하는 플러그인을 반환한다.
+    """Return the plugin corresponding to the given name.
 
-    - 미지정/미인식: pingpong 반환(현재 운영 baseline)
+    - Unspecified/unrecognized: returns pingpong (current operating baseline)
     """
     key = str(name or "").strip().upper()
     if not key:

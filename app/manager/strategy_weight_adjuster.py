@@ -2,10 +2,10 @@
 # File: app/manager/strategy_weight_adjuster.py
 # Autocoin OS v3-H — Strategy Weight Adjuster
 # ------------------------------------------------------------
-# 최근 성과 기반 전략 예산 가중치 자동 조정
-# - 최근 7일 성과 추적
-# - 성과 기반 예산 배율 계산
-# - 연패 전략 자동 축소
+# Auto-adjusts strategy budget weights based on recent performance
+# - Tracks the last 7 days of performance
+# - Computes performance-based budget multipliers
+# - Automatically scales down strategies on losing streaks
 # ============================================================
 
 from __future__ import annotations
@@ -23,19 +23,19 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# 데이터 클래스
+# Data classes
 # ============================================================
 
 @dataclass
 class StrategyWeight:
-    """전략 가중치"""
+    """Strategy weight"""
     strategy: str
-    base_weight: float = 1.0  # 기본 배율
-    performance_weight: float = 1.0  # 성과 기반 배율
-    final_weight: float = 1.0  # 최종 배율 (base * performance)
+    base_weight: float = 1.0  # base multiplier
+    performance_weight: float = 1.0  # performance-based multiplier
+    final_weight: float = 1.0  # final multiplier (base * performance)
     reason: str = ""
-    
-    # 성과 지표
+
+    # performance metrics
     win_rate: float = 0.0
     roi_pct: float = 0.0
     total_trades: int = 0
@@ -44,24 +44,24 @@ class StrategyWeight:
 
 @dataclass
 class WeightAdjustmentConfig:
-    """가중치 조정 설정"""
-    # 성과 지표 가중치
+    """Weight adjustment settings"""
+    # performance-metric weights
     win_rate_weight: float = 0.4
     roi_weight: float = 0.4
     trade_count_weight: float = 0.2
-    
-    # 배율 범위
-    min_weight: float = 0.3  # 최소 30% (완전 차단 방지)
-    max_weight: float = 2.0  # 최대 200% (과도한 집중 방지)
-    
-    # 연패 페널티
-    loss_streak_threshold: int = 3  # 3연패부터 페널티
-    loss_streak_penalty: float = 0.2  # 연패마다 -20%
-    
-    # 최소 샘플 수
-    min_trades_for_adjustment: int = 5  # 최소 5거래 이상
-    
-    # 성과 기간
+
+    # multiplier range
+    min_weight: float = 0.3  # min 30% (prevent full block)
+    max_weight: float = 2.0  # max 200% (prevent over-concentration)
+
+    # losing-streak penalty
+    loss_streak_threshold: int = 3  # penalty starts at 3 losses in a row
+    loss_streak_penalty: float = 0.2  # -20% per additional loss
+
+    # minimum sample size
+    min_trades_for_adjustment: int = 5  # at least 5 trades
+
+    # performance window
     lookback_days: int = 7
 
 
@@ -70,7 +70,7 @@ class WeightAdjustmentConfig:
 # ============================================================
 
 class StrategyWeightAdjuster:
-    """전략 가중치 조정기"""
+    """Strategy weight adjuster"""
     
     def __init__(
         self,
@@ -81,10 +81,10 @@ class StrategyWeightAdjuster:
         self.config = config or WeightAdjustmentConfig()
         self.performance_analyzer = performance_analyzer or PerformanceAnalyzer()
         
-        # 전략별 가중치
+        # weight per strategy
         self.strategy_weights: Dict[str, StrategyWeight] = {}
-        
-        # 연속 손실 추적
+
+        # consecutive-loss tracking
         self.consecutive_losses: Dict[str, int] = defaultdict(int)
         
         logger.info(
@@ -94,34 +94,34 @@ class StrategyWeightAdjuster:
         )
     
     # ============================================================
-    # 가중치 계산
+    # Weight calculation
     # ============================================================
-    
+
     def calculate_weights(
         self,
         ledger_records: List[Dict],
         strategies: List[str] = None
     ) -> Dict[str, StrategyWeight]:
-        """전략별 가중치 계산"""
-        
-        # 성과 분석
+        """Calculate weight per strategy"""
+
+        # performance analysis
         since_ts = time.time() - (self.config.lookback_days * 86400)
         perf_by_strategy = self.performance_analyzer.analyze_strategy_performance(
             ledger_records,
             since_ts=since_ts
         )
         
-        # 전략 목록
+        # strategy list
         if strategies is None:
             strategies = list(perf_by_strategy.keys())
-        
+
         weights = {}
-        
+
         for strategy in strategies:
             perf = perf_by_strategy.get(strategy)
-            
+
             if perf is None or perf.total_trades < self.config.min_trades_for_adjustment:
-                # 샘플 부족 - 기본 가중치
+                # insufficient samples - default weight
                 weights[strategy] = StrategyWeight(
                     strategy=strategy,
                     base_weight=1.0,
@@ -132,20 +132,20 @@ class StrategyWeightAdjuster:
                 )
                 continue
             
-            # 성과 기반 가중치 계산
+            # performance-based weight
             performance_weight = self._calculate_performance_weight(perf)
-            
-            # 연패 페널티 적용
+
+            # apply losing-streak penalty
             loss_streak_penalty = self._calculate_loss_streak_penalty(
-                strategy, 
+                strategy,
                 perf
             )
-            
-            # 최종 가중치
+
+            # final weight
             final_weight = performance_weight * loss_streak_penalty
             final_weight = max(self.config.min_weight, min(self.config.max_weight, final_weight))
-            
-            # 이유 설명
+
+            # reason text
             reason = self._generate_reason(perf, performance_weight, loss_streak_penalty)
             
             weights[strategy] = StrategyWeight(
@@ -164,27 +164,27 @@ class StrategyWeightAdjuster:
         return weights
     
     def _calculate_performance_weight(self, perf: StrategyPerformance) -> float:
-        """성과 기반 가중치 계산"""
-        
-        # 승률 점수 (0~1)
+        """Compute the performance-based weight"""
+
+        # win-rate score (0~1)
         win_rate_score = perf.win_rate / 100.0
-        
-        # ROI 점수 (-1~1, 정규화)
+
+        # ROI score (-1~1, normalized)
         # ROI 50% = 1.0, 0% = 0.5, -50% = 0.0
         roi_score = max(0.0, min(1.0, (perf.roi_pct + 50) / 100.0))
-        
-        # 거래 수 점수 (많을수록 신뢰도 높음)
-        # 10거래 = 0.5, 30거래 이상 = 1.0
+
+        # trade-count score (more trades = higher confidence)
+        # 10 trades = 0.5, 30+ trades = 1.0
         trade_score = min(1.0, perf.total_trades / 30.0)
-        
-        # 가중 평균
+
+        # weighted average
         score = (
             win_rate_score * self.config.win_rate_weight +
             roi_score * self.config.roi_weight +
             trade_score * self.config.trade_count_weight
         )
-        
-        # 배율로 변환 (0.5~1.5)
+
+        # convert to multiplier (0.5~1.5)
         weight = 0.5 + score * 1.0
         
         return weight
@@ -194,18 +194,18 @@ class StrategyWeightAdjuster:
         strategy: str, 
         perf: StrategyPerformance
     ) -> float:
-        """연패 페널티 계산"""
-        
+        """Compute the losing-streak penalty"""
+
         streak = self.consecutive_losses.get(strategy, 0)
-        
+
         if streak < self.config.loss_streak_threshold:
             return 1.0
-        
-        # 연패마다 페널티 누적
+
+        # accumulate penalty per loss in the streak
         excess_losses = streak - self.config.loss_streak_threshold + 1
         penalty = 1.0 - (excess_losses * self.config.loss_streak_penalty)
-        
-        return max(0.3, penalty)  # 최소 30%
+
+        return max(0.3, penalty)  # min 30%
     
     def _generate_reason(
         self,
@@ -213,45 +213,45 @@ class StrategyWeightAdjuster:
         performance_weight: float,
         loss_streak_penalty: float
     ) -> str:
-        """가중치 조정 이유 설명"""
-        
+        """Describe why the weight was adjusted"""
+
         parts = []
-        
-        # 성과
+
+        # performance
         if performance_weight > 1.2:
-            parts.append(f"우수 성과 (승률 {perf.win_rate:.0f}%, ROI {perf.roi_pct:+.1f}%)")
+            parts.append(f"strong performance (win rate {perf.win_rate:.0f}%, ROI {perf.roi_pct:+.1f}%)")
         elif performance_weight < 0.8:
-            parts.append(f"부진 성과 (승률 {perf.win_rate:.0f}%, ROI {perf.roi_pct:+.1f}%)")
+            parts.append(f"weak performance (win rate {perf.win_rate:.0f}%, ROI {perf.roi_pct:+.1f}%)")
         else:
-            parts.append(f"보통 성과 (승률 {perf.win_rate:.0f}%)")
-        
-        # 연패
+            parts.append(f"average performance (win rate {perf.win_rate:.0f}%)")
+
+        # losing streak
         if loss_streak_penalty < 1.0:
             streak = self.consecutive_losses.get(perf.strategy, 0)
-            parts.append(f"{streak}연패 페널티")
-        
+            parts.append(f"{streak}-loss streak penalty")
+
         return " | ".join(parts)
     
     # ============================================================
-    # 연속 손실 추적
+    # Consecutive-loss tracking
     # ============================================================
-    
+
     def track_trade_result(
         self,
         strategy: str,
         pnl_usdt: float
     ):
-        """거래 결과 추적 (연패 카운트)"""
-        
+        """Track a trade result (losing-streak count)"""
+
         if pnl_usdt < 0:
-            # 손실 - 연패 카운트 증가
+            # loss - increment streak count
             self.consecutive_losses[strategy] += 1
             logger.info(
                 f"Strategy {strategy} loss streak: "
                 f"{self.consecutive_losses[strategy]}"
             )
         elif pnl_usdt > 0:
-            # 승리 - 연패 리셋
+            # win - reset streak
             if self.consecutive_losses[strategy] > 0:
                 logger.info(
                     f"Strategy {strategy} streak broken: "
@@ -260,25 +260,25 @@ class StrategyWeightAdjuster:
             self.consecutive_losses[strategy] = 0
     
     # ============================================================
-    # 예산 배율 적용
+    # Budget multiplier application
     # ============================================================
-    
+
     def get_budget_multiplier(self, strategy: str) -> float:
-        """전략별 예산 배율 조회"""
-        
+        """Get the budget multiplier for a strategy"""
+
         weight = self.strategy_weights.get(strategy)
-        
+
         if weight is None:
-            return 1.0  # 기본값
-        
+            return 1.0  # default
+
         return weight.final_weight
-    
+
     def apply_to_budget(
         self,
         base_budget_usdt: float,
         strategy: str
     ) -> float:
-        """예산에 가중치 적용"""
+        """Apply the weight to a budget"""
         
         multiplier = self.get_budget_multiplier(strategy)
         adjusted = base_budget_usdt * multiplier
@@ -292,11 +292,11 @@ class StrategyWeightAdjuster:
         return adjusted
     
     # ============================================================
-    # 상태 조회
+    # Status query
     # ============================================================
-    
+
     def get_status(self) -> Dict:
-        """가중치 조정기 상태 조회"""
+        """Get the weight adjuster's status"""
         
         weights_dict = {}
         for strategy, weight in self.strategy_weights.items():
@@ -323,7 +323,7 @@ class StrategyWeightAdjuster:
         }
     
     def get_recommendations(self) -> List[Dict]:
-        """전략 조정 권장사항"""
+        """Strategy adjustment recommendations"""
         
         recommendations = []
         
@@ -349,13 +349,13 @@ class StrategyWeightAdjuster:
 
 
 # ============================================================
-# 싱글톤 인스턴스
+# Singleton instance
 # ============================================================
 _strategy_weight_adjuster: Optional[StrategyWeightAdjuster] = None
 
 
 def get_strategy_weight_adjuster() -> StrategyWeightAdjuster:
-    """전략 가중치 조정기 싱글톤"""
+    """Strategy weight adjuster singleton"""
     global _strategy_weight_adjuster
     if _strategy_weight_adjuster is None:
         _strategy_weight_adjuster = StrategyWeightAdjuster()

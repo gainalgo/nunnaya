@@ -1,10 +1,10 @@
 # ============================================================
 # File: app/manager/portfolio_risk_manager.py
-# Autocoin OS v3-H — 포트폴리오 레벨 리스크 관리
+# Autocoin OS v3-H — portfolio-level risk management
 # ------------------------------------------------------------
-# 1. 일일 손실 한도 (Daily Loss Limit)
-# 2. 코인 상관관계 체크 (Correlation Guard)
-# 3. Circuit Breaker 시스템
+# 1. Daily Loss Limit
+# 2. Correlation Guard (coin correlation check)
+# 3. Circuit Breaker system
 # ============================================================
 
 from __future__ import annotations
@@ -23,23 +23,23 @@ from app.core.constants import env_bool, env_float, env_int
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 환경변수 설정
+# Environment variable settings
 # ============================================================
 PORTFOLIO_RISK_ENABLED = env_bool("PORTFOLIO_RISK_ENABLED", default=True)
-DAILY_LOSS_LIMIT_PCT = env_float("DAILY_LOSS_LIMIT_PCT", default=5.0)  # 일일 -5% 한도
-CIRCUIT_BREAKER_LOSS_PCT = env_float("CIRCUIT_BREAKER_LOSS_PCT", default=10.0)  # -10% 전체 중단
+DAILY_LOSS_LIMIT_PCT = env_float("DAILY_LOSS_LIMIT_PCT", default=5.0)  # daily -5% limit
+CIRCUIT_BREAKER_LOSS_PCT = env_float("CIRCUIT_BREAKER_LOSS_PCT", default=10.0)  # -10% full halt
 CORRELATION_CHECK_ENABLED = env_bool("CORRELATION_CHECK_ENABLED", default=True)
-MAX_CORRELATED_POSITIONS = env_int("MAX_CORRELATED_POSITIONS", default=5)  # 동일 방향 최대 5개
-CORRELATION_THRESHOLD = env_float("CORRELATION_THRESHOLD", default=0.7)  # 상관계수 임계값
+MAX_CORRELATED_POSITIONS = env_int("MAX_CORRELATED_POSITIONS", default=5)  # max 5 in same direction
+CORRELATION_THRESHOLD = env_float("CORRELATION_THRESHOLD", default=0.7)  # correlation coefficient threshold
 
 
 # ============================================================
-# 데이터 클래스
+# Data classes
 # ============================================================
 
 @dataclass
 class DailyRiskStatus:
-    """일일 리스크 상태"""
+    """Daily risk status"""
     date: str  # YYYY-MM-DD
     starting_capital: float
     current_capital: float
@@ -54,18 +54,18 @@ class DailyRiskStatus:
 
 @dataclass
 class CircuitBreakerState:
-    """Circuit Breaker 상태"""
+    """Circuit Breaker status"""
     active: bool
     triggered_at: Optional[float]
     trigger_reason: str
     loss_pct_at_trigger: float
-    resume_at: Optional[float]  # 자동 재개 시각 (None = 수동 재개만)
+    resume_at: Optional[float]  # auto-resume time (None = manual resume only)
     cooldown_minutes: int = 30
 
 
 @dataclass
 class CorrelationGuard:
-    """상관관계 가드 상태"""
+    """Correlation guard status"""
     enabled: bool
     correlated_groups: Dict[str, List[str]] = field(default_factory=dict)  # sector -> [markets]
     position_count_by_group: Dict[str, int] = field(default_factory=dict)
@@ -79,12 +79,12 @@ class CorrelationGuard:
 
 class PortfolioRiskManager:
     """
-    포트폴리오 레벨 리스크 관리자
-    
-    기능:
-    1. 일일 손실 한도 모니터링
-    2. Circuit Breaker (과도한 손실 시 자동 중단)
-    3. 코인 상관관계 체크 (한 방향 몰빵 방지)
+    Portfolio-level risk manager
+
+    Features:
+    1. Daily loss limit monitoring
+    2. Circuit Breaker (auto-halt on excessive loss)
+    3. Coin correlation check (prevent over-concentration in one direction)
     """
     
     def __init__(
@@ -97,7 +97,7 @@ class PortfolioRiskManager:
         self.state_file = state_file or Path("runtime/portfolio_risk_state.json")
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         
-        # 상태
+        # state
         self.daily_status: Optional[DailyRiskStatus] = None
         self.circuit_breaker: CircuitBreakerState = CircuitBreakerState(
             active=False,
@@ -112,12 +112,12 @@ class PortfolioRiskManager:
             max_positions_per_group=MAX_CORRELATED_POSITIONS
         )
         
-        # 임계값 — system 속성이 있으면 UI 설정값 우선, 없으면 .env/기본값
+        # thresholds — if the system attribute exists, UI settings take priority; otherwise .env/defaults
         self.daily_loss_limit_pct = DAILY_LOSS_LIMIT_PCT
         self.circuit_breaker_loss_pct = CIRCUIT_BREAKER_LOSS_PCT
-        self._system_ref = None   # hyper_system 참조 (sync_from_system()으로 연결)
+        self._system_ref = None   # hyper_system reference (connected via sync_from_system())
 
-        # 상태 로드
+        # load state
         self._load_state()
 
         logger.info(
@@ -127,12 +127,12 @@ class PortfolioRiskManager:
         )
 
     def sync_from_system(self, system) -> None:
-        """UI에서 설정한 값을 PRM에 동기화.
+        """Sync values configured in the UI into the PRM.
 
-        hyper_system.__init__() 또는 guards_set() 후에 호출.
+        Call after hyper_system.__init__() or guards_set().
         - daily_loss_limit_pct: Guard Matrix → Daily Loss Limit
         - circuit_breaker_loss_pct: Demotion Rules → Circuit Breaker %
-        - circuit_breaker cooldown: Demotion Rules → Circuit Breaker 쿨다운(분)
+        - circuit_breaker cooldown: Demotion Rules → Circuit Breaker cooldown (minutes)
         """
         self._system_ref = system
         dl = getattr(system, "daily_loss_limit_pct", None)
@@ -151,14 +151,14 @@ class PortfolioRiskManager:
         )
     
     # ============================================================
-    # 일일 손실 한도
+    # Daily loss limit
     # ============================================================
-    
+
     def init_daily_status(self, total_capital: float) -> DailyRiskStatus:
-        """일일 리스크 상태 초기화"""
+        """Initialize daily risk status"""
         today = datetime.now().strftime("%Y-%m-%d")
-        
-        # 이미 오늘 데이터가 있으면 유지
+
+        # if today's data already exists, keep it
         if self.daily_status and self.daily_status.date == today:
             logger.info("Daily status already initialized for %s", today)
             return self.daily_status
@@ -186,17 +186,17 @@ class PortfolioRiskManager:
         realized_pnl: float,
         unrealized_pnl: float
     ) -> DailyRiskStatus:
-        """포트폴리오 손익 업데이트 및 리스크 체크"""
+        """Update portfolio PnL and run risk checks"""
         if not self.enabled:
             return self._get_dummy_status()
-        
-        # 날짜 체크 (자정 넘어가면 초기화)
+
+        # date check (reset when past midnight)
         today = datetime.now().strftime("%Y-%m-%d")
         if not self.daily_status or self.daily_status.date != today:
             self.init_daily_status(current_capital)
             return self.daily_status
-        
-        # 손익 업데이트
+
+        # update PnL
         self.daily_status.current_capital = current_capital
         self.daily_status.realized_pnl = realized_pnl
         self.daily_status.unrealized_pnl = unrealized_pnl
@@ -206,20 +206,20 @@ class PortfolioRiskManager:
             if self.daily_status.starting_capital > 0 else 0.0
         )
         self.daily_status.last_update = time.time()
-        
-        # 리스크 체크
+
+        # risk checks
         self._check_daily_loss_limit()
         self._check_circuit_breaker()
-        
+
         self._save_state()
         return self.daily_status
-    
+
     def _check_daily_loss_limit(self):
-        """일일 손실 한도 체크"""
+        """Check daily loss limit"""
         if not self.daily_status:
             return
-        
-        # 손실이 한도 초과 시 일시정지
+
+        # pause when loss exceeds the limit
         if self.daily_status.loss_pct < -self.daily_loss_limit_pct:
             if not self.daily_status.is_paused:
                 self.daily_status.is_paused = True
@@ -228,7 +228,7 @@ class PortfolioRiskManager:
                     f"(limit: -{self.daily_loss_limit_pct}%). New entries PAUSED."
                 )
         else:
-            # 손실이 완화되면 자동 재개
+            # auto-resume when the loss eases
             if self.daily_status.is_paused:
                 self.daily_status.is_paused = False
                 logger.info(
@@ -237,11 +237,11 @@ class PortfolioRiskManager:
                 )
     
     def _check_circuit_breaker(self):
-        """Circuit Breaker 체크"""
+        """Check Circuit Breaker"""
         if not self.daily_status:
             return
-        
-        # Circuit Breaker 트리거
+
+        # Circuit Breaker trigger
         if self.daily_status.loss_pct < -self.circuit_breaker_loss_pct:
             if not self.circuit_breaker.active:
                 self.circuit_breaker.active = True
@@ -262,13 +262,13 @@ class PortfolioRiskManager:
                     f"All trading HALTED for {self.circuit_breaker.cooldown_minutes} minutes."
                 )
         
-        # 자동 재개 체크
+        # auto-resume check
         if self.circuit_breaker.active and self.circuit_breaker.resume_at:
             if time.time() >= self.circuit_breaker.resume_at:
                 self._resume_circuit_breaker(auto=True)
-    
+
     def _resume_circuit_breaker(self, auto: bool = False):
-        """Circuit Breaker 재개"""
+        """Resume Circuit Breaker"""
         self.circuit_breaker.active = False
         self.circuit_breaker.resume_at = None
         
@@ -279,14 +279,14 @@ class PortfolioRiskManager:
         logger.warning("⚡ CIRCUIT BREAKER RESUMED: %s", reason)
     
     def can_enter_new_position(self) -> Tuple[bool, str]:
-        """신규 진입 가능 여부 체크"""
+        """Check whether a new entry is allowed"""
         if not self.enabled:
             return True, "Risk management disabled"
 
         if not self.daily_status:
             return True, "Daily status not initialized"
 
-        # [FIX 2026-03-24] 자정 넘으면 자동 리셋 — 어제 손실이 오늘 매수를 막는 버그 방지
+        # [FIX 2026-03-24] auto-reset past midnight — prevents a bug where yesterday's loss blocks today's entries
         today = datetime.now().strftime("%Y-%m-%d")
         if self.daily_status.date != today:
             equity = self.daily_status.current_capital or self.daily_status.starting_capital
@@ -296,20 +296,20 @@ class PortfolioRiskManager:
             logger.info("PRM auto-reset: date changed to %s", today)
             return True, "Daily reset"
 
-        # Circuit Breaker 쿨다운 자동 해제 (매 체크 시)
+        # Circuit Breaker cooldown auto-release (on every check)
         if self.circuit_breaker.active and self.circuit_breaker.resume_at:
             if time.time() >= self.circuit_breaker.resume_at:
                 self._resume_circuit_breaker(auto=True)
 
-        # Circuit Breaker 체크
+        # Circuit Breaker check
         if self.circuit_breaker.active:
             remaining = ""
             if self.circuit_breaker.resume_at:
                 remaining_sec = max(0, self.circuit_breaker.resume_at - time.time())
                 remaining = f" (resume in {remaining_sec/60:.1f} min)"
             return False, f"Circuit breaker active{remaining}"
-        
-        # 일일 손실 한도 체크
+
+        # daily loss limit check
         if self.daily_status.is_paused:
             return False, (
                 f"Daily loss limit exceeded: {self.daily_status.loss_pct:.2f}% "
@@ -319,18 +319,18 @@ class PortfolioRiskManager:
         return True, "OK"
 
     def get_size_multiplier(self) -> float:
-        """포트폴리오 PnL 기반 매수 규모 배수 반환 (0.0 ~ 1.0).
+        """Return the position-size multiplier based on portfolio PnL (0.0 ~ 1.0).
 
-        OMA_SIZE_MULT_HI_PCT(기본 -2.0%) ~ daily_loss_limit_pct(-5.0%) 구간에서
-        선형으로 감소. -2% 이상이면 1.0, -5% 이하이면 floor 반환.
+        Decreases linearly over the range OMA_SIZE_MULT_HI_PCT (default -2.0%) ~
+        daily_loss_limit_pct (-5.0%). Returns 1.0 at -2% or above, floor at -5% or below.
         """
         import os
         if not self.enabled or not self.daily_status:
             return 1.0
-        loss = self.daily_status.loss_pct                            # 음수 (예: -3.0)
-        hi = float(os.getenv("OMA_SIZE_MULT_HI_PCT", "-2.0"))       # 감소 시작점
-        lo = -float(self.daily_loss_limit_pct)                       # 완전 차단점 (-5.0)
-        floor = float(os.getenv("OMA_SIZE_MULT_FLOOR", "0.4"))       # 최솟값
+        loss = self.daily_status.loss_pct                            # negative (e.g. -3.0)
+        hi = float(os.getenv("OMA_SIZE_MULT_HI_PCT", "-2.0"))       # decrease start point
+        lo = -float(self.daily_loss_limit_pct)                       # full cutoff point (-5.0)
+        floor = float(os.getenv("OMA_SIZE_MULT_FLOOR", "0.4"))       # minimum
         if loss >= hi:
             return 1.0
         if loss <= lo:
@@ -339,20 +339,20 @@ class PortfolioRiskManager:
         return floor + ratio * (1.0 - floor)
 
     # ============================================================
-    # 코인 상관관계 체크
+    # Coin correlation check
     # ============================================================
-    
+
     def update_correlation_groups(self, market_sectors: Dict[str, str]):
         """
-        코인 섹터 정보 업데이트
-        
+        Update coin sector information
+
         Args:
-            market_sectors: {market: sector} 예) {"BTCUSDT": "L1", "ETHUSDT": "L1"}
+            market_sectors: {market: sector} e.g. {"BTCUSDT": "L1", "ETHUSDT": "L1"}
         """
         if not self.correlation_guard.enabled:
             return
-        
-        # 섹터별 그룹 재구성
+
+        # rebuild groups by sector
         groups = defaultdict(list)
         for market, sector in market_sectors.items():
             groups[sector].append(market)
@@ -369,26 +369,26 @@ class PortfolioRiskManager:
         active_markets: Set[str]
     ) -> Tuple[bool, str]:
         """
-        상관관계 한도 체크
-        
+        Check the correlation limit
+
         Args:
-            market: 진입하려는 마켓
-            sector: 해당 마켓의 섹터
-            active_markets: 현재 활성 포지션 마켓들
-        
+            market: the market being entered
+            sector: that market's sector
+            active_markets: markets with currently active positions
+
         Returns:
-            (허용 여부, 사유)
+            (allowed, reason)
         """
         if not self.correlation_guard.enabled:
             return True, "Correlation guard disabled"
-        
-        # 동일 섹터의 활성 포지션 수 카운트
+
+        # count active positions in the same sector
         sector_positions = [
             m for m in active_markets
             if m in self.correlation_guard.correlated_groups.get(sector, [])
         ]
-        
-        # 한도 체크
+
+        # limit check
         if len(sector_positions) >= self.correlation_guard.max_positions_per_group:
             return False, (
                 f"Sector '{sector}' limit reached: {len(sector_positions)}/{self.correlation_guard.max_positions_per_group} "
@@ -399,11 +399,11 @@ class PortfolioRiskManager:
     
     def get_sector_exposure(self, active_positions: Dict[str, dict]) -> Dict[str, float]:
         """
-        섹터별 익스포저 계산
-        
+        Compute exposure per sector
+
         Args:
             active_positions: {market: {"budget": float, "sector": str}}
-        
+
         Returns:
             {sector: total_exposure_usdt}
         """
@@ -417,31 +417,31 @@ class PortfolioRiskManager:
         return dict(exposure)
     
     # ============================================================
-    # 수동 제어
+    # Manual control
     # ============================================================
-    
+
     def manual_resume(self):
-        """수동으로 Circuit Breaker 재개"""
+        """Manually resume the Circuit Breaker"""
         if self.circuit_breaker.active:
             self._resume_circuit_breaker(auto=False)
             self._save_state()
-    
+
     def manual_pause(self, reason: str = "Manual pause"):
-        """수동으로 신규 진입 일시정지"""
+        """Manually pause new entries"""
         if self.daily_status:
             self.daily_status.is_paused = True
             logger.warning("📛 Manual pause activated: %s", reason)
             self._save_state()
-    
+
     def manual_unpause(self):
-        """수동으로 일시정지 해제"""
+        """Manually release the pause"""
         if self.daily_status:
             self.daily_status.is_paused = False
             logger.info("✅ Manual unpause: new entries allowed")
             self._save_state()
-    
+
     def reset_daily_status(self, new_capital: float):
-        """일일 상태 강제 리셋 (운영자 전용)"""
+        """Force-reset daily status (operator only)"""
         logger.warning(f"🔄 Daily status FORCE RESET: capital={new_capital:,.0f}")
         self.init_daily_status(new_capital)
         self.circuit_breaker.active = False
@@ -449,11 +449,11 @@ class PortfolioRiskManager:
         self._save_state()
     
     # ============================================================
-    # 상태 영속화
+    # State persistence
     # ============================================================
-    
+
     def _save_state(self):
-        """상태 파일 저장"""
+        """Save the state file"""
         try:
             state = {
                 "daily_status": asdict(self.daily_status) if self.daily_status else None,
@@ -472,7 +472,7 @@ class PortfolioRiskManager:
             logger.error("Failed to save portfolio risk state: %s", e)
     
     def _load_state(self):
-        """상태 파일 로드"""
+        """Load the state file"""
         if not self.state_file.exists():
             return
         
@@ -501,7 +501,7 @@ class PortfolioRiskManager:
             logger.error("Failed to load portfolio risk state: %s", e)
     
     def _get_dummy_status(self) -> DailyRiskStatus:
-        """비활성화 시 더미 상태 반환"""
+        """Return a dummy status when disabled"""
         return DailyRiskStatus(
             date=datetime.now().strftime("%Y-%m-%d"),
             starting_capital=0.0,
@@ -516,11 +516,11 @@ class PortfolioRiskManager:
         )
     
     # ============================================================
-    # 상태 조회
+    # Status query
     # ============================================================
-    
+
     def get_status_summary(self) -> dict:
-        """리스크 관리 상태 요약"""
+        """Risk-management status summary"""
         can_enter, entry_reason = self.can_enter_new_position()
         
         return {
@@ -550,13 +550,13 @@ class PortfolioRiskManager:
 
 
 # ============================================================
-# 싱글톤 인스턴스
+# Singleton instance
 # ============================================================
 _portfolio_risk_manager: Optional[PortfolioRiskManager] = None
 
 
 def get_portfolio_risk_manager() -> PortfolioRiskManager:
-    """포트폴리오 리스크 관리자 싱글톤 가져오기"""
+    """Get the portfolio risk manager singleton"""
     global _portfolio_risk_manager
     if _portfolio_risk_manager is None:
         _portfolio_risk_manager = PortfolioRiskManager()

@@ -222,55 +222,55 @@
                       <label class="form-label small" for="cfg-sl">SL mult</label>
                       <input type="number" class="form-control form-control-sm" id="cfg-sl" value="1.0" min="0.1" step="0.1">
                     </div>
-                    <!-- Row 3: 방향 분산 + 이익 보호 -->
+                    <!-- Row 3: Direction diversification + profit protection -->
                     <div class="col-12"><hr class="my-1"><small class="text-muted">Risk & Trailing</small></div>
                     <div class="col-4">
                       <label class="form-label small" for="cfg-maxdir">Same Dir Max</label>
-                      <input type="number" class="form-control form-control-sm" id="cfg-maxdir" value="3" min="1" max="5" title="같은 방향 최대 포지션 수">
+                      <input type="number" class="form-control form-control-sm" id="cfg-maxdir" value="3" min="1" max="5" title="Max positions in the same direction">
                     </div>
                     <div class="col-4">
                       <label class="form-label small" for="cfg-preserve">Preserve %</label>
-                      <input type="number" class="form-control form-control-sm" id="cfg-preserve" value="50" min="10" max="90" step="5" title="기본 보존율 (BE 이후 최고수익의 N%)">
+                      <input type="number" class="form-control form-control-sm" id="cfg-preserve" value="50" min="10" max="90" step="5" title="Base preservation rate (N% of peak profit after BE)">
                     </div>
                     <div class="col-4">
                       <label class="form-label small" for="cfg-accel">Accel %/1%</label>
-                      <input type="number" class="form-control form-control-sm" id="cfg-accel" value="10" min="0" max="30" step="5" title="수익 1% 증가마다 보존율 추가 (cap 90%)">
+                      <input type="number" class="form-control form-control-sm" id="cfg-accel" value="10" min="0" max="30" step="5" title="Added preservation rate per +1% profit (cap 90%)">
                     </div>
-                    <!-- Manual Exit Penalty (수동 탈출 쿨다운) -->
-                    <div class="col-12"><hr class="my-1"><small class="text-muted">Manual Exit Penalty (수동 탈출 시 재진입 쿨다운)</small></div>
+                    <!-- Manual Exit Penalty (reentry cooldown after manual exit) -->
+                    <div class="col-12"><hr class="my-1"><small class="text-muted">Manual Exit Penalty (reentry cooldown after manual exit)</small></div>
                     <div class="col-8">
                       <label class="form-label small" for="cfg-manual-penalty-enabled">Penalty</label>
-                      <select class="form-select form-select-sm" id="cfg-manual-penalty-enabled" title="ON: 손실 탈출 시에만 쿨다운, 수익 탈출은 면제 / OFF: 수동 탈출 항상 면제">
-                        <option value="true">ON (손실만 쿨다운, 익절 면제)</option>
-                        <option value="false">OFF (수동 탈출 항상 면제)</option>
+                      <select class="form-select form-select-sm" id="cfg-manual-penalty-enabled" title="ON: cooldown only on loss exits, profit exits exempt / OFF: manual exits always exempt">
+                        <option value="true">ON (cooldown on loss only, take-profit exempt)</option>
+                        <option value="false">OFF (manual exits always exempt)</option>
                       </select>
                     </div>
                     <div class="col-4">
                       <label class="form-label small" for="cfg-manual-penalty-hours">Hours</label>
-                      <input type="number" class="form-control form-control-sm" id="cfg-manual-penalty-hours" value="4" min="0" max="24" step="0.5" title="손실 탈출 시 재진입 금지 시간">
+                      <input type="number" class="form-control form-control-sm" id="cfg-manual-penalty-hours" value="4" min="0" max="24" step="0.5" title="Reentry lockout duration after a loss exit">
                     </div>
-                    <!-- Context Engine (시장 맥락 판정 - entry conviction 페널티) -->
-                    <div class="col-12"><hr class="my-1"><small class="text-muted">Context Engine (시장 맥락 entry 페널티, 2026-04-19)</small></div>
+                    <!-- Context Engine (market context evaluation - entry conviction penalty) -->
+                    <div class="col-12"><hr class="my-1"><small class="text-muted">Context Engine (market context entry penalty, 2026-04-19)</small></div>
                     <div class="col-12">
                       <div class="form-check form-switch mb-1">
                         <input class="form-check-input" type="checkbox" id="cfg-session-profile">
-                        <label class="form-check-label small" for="cfg-session-profile" title="KST 01~06 quiet -1 / 21~24 active +1">Session Profile <span class="text-muted">(시간대 ±)</span></label>
+                        <label class="form-check-label small" for="cfg-session-profile" title="KST 01~06 quiet -1 / 21~24 active +1">Session Profile <span class="text-muted">(time-of-day ±)</span></label>
                       </div>
                       <div class="form-check form-switch mb-1">
                         <input class="form-check-input" type="checkbox" id="cfg-direction-memory">
-                        <label class="form-check-label small" for="cfg-direction-memory" title="같은 코인+방향 최근 N회 중 K회 손실 → -2 soft penalty">Direction Memory <span class="text-muted">(코인+방향 연패 -2)</span></label>
+                        <label class="form-check-label small" for="cfg-direction-memory" title="K of last N losses on same coin+direction → -2 soft penalty">Direction Memory <span class="text-muted">(coin+direction losing streak -2)</span></label>
                       </div>
                       <div class="form-check form-switch mb-1" style="padding-left:3rem;">
                         <input class="form-check-input" type="checkbox" id="cfg-dm-streak-block">
-                        <label class="form-check-label small text-warning" for="cfg-dm-streak-block" title="연속 N회 패 시 hard block — 진입 차단. 공격적 설정.">↳ Hard Block <span class="text-muted">(연패 차단 — 위험)</span></label>
+                        <label class="form-check-label small text-warning" for="cfg-dm-streak-block" title="Hard block after N consecutive losses — blocks entry. Aggressive setting.">↳ Hard Block <span class="text-muted">(block on losing streak — risky)</span></label>
                       </div>
                       <div class="form-check form-switch mb-1">
                         <input class="form-check-input" type="checkbox" id="cfg-btc-regime">
-                        <label class="form-check-label small" for="cfg-btc-regime" title="BTC H4 EMA20/EMA50 레짐 판정. BULL/BEAR 역방향 -2">BTC Regime <span class="text-muted">(레짐 역방향 -2)</span></label>
+                        <label class="form-check-label small" for="cfg-btc-regime" title="BTC H4 EMA20/EMA50 regime detection. Counter to BULL/BEAR -2">BTC Regime <span class="text-muted">(counter-regime -2)</span></label>
                       </div>
                       <div class="form-check form-switch mb-1">
                         <input class="form-check-input" type="checkbox" id="cfg-market-bias">
-                        <label class="form-check-label small" for="cfg-market-bias" title="최근 12건 EXIT 쏠림 판정. 쏠림 역행 -1">Market Bias <span class="text-muted">(쏠림 역행 -1)</span></label>
+                        <label class="form-check-label small" for="cfg-market-bias" title="Detects skew in last 12 EXITs. Counter to skew -1">Market Bias <span class="text-muted">(counter-skew -1)</span></label>
                       </div>
                     </div>
                   </div>

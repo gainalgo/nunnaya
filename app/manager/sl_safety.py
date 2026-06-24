@@ -1,9 +1,9 @@
 # ============================================================
-# SL Safety — naked 포지션(서버측 SL 미확정) 보호 결정 (순수 함수)
+# SL Safety — protection decision for naked positions (server-side SL unconfirmed) (pure function)
 # ------------------------------------------------------------
-# "SL 낮은 부분 무사통과 → 청산" 방지. 서버 SL write-only 갭의 최후 안전망.
+# Prevents "price slips past a low SL unnoticed -> liquidation". Last-resort safety net for the server SL write-only gap.
 #   (DIAGNOSIS_bybit_naked_sl_liquidation_20260617.md)
-# 순수 — I/O·상태 없음. 단위테스트 100%.
+# Pure — no I/O, no state. 100% unit-tested.
 # ============================================================
 from __future__ import annotations
 
@@ -16,11 +16,11 @@ def naked_sl_should_cut(
     buffer_pct: float,
     in_grace: bool,
 ) -> bool:
-    """서버 SL 미확정(naked) 포지션을 지금 즉시 시장가 청산할지.
+    """Whether to immediately market-close a naked (server SL unconfirmed) position right now.
 
-    - breach(진짜 SL 통과): grace 무관 *항상* 컷 (무사통과→청산 방지, 최우선).
-    - near(버퍼 근접): 진입 직후 grace 동안은 미발동(슬리피지 노이즈), grace 후 선제 컷.
-    호출자는 _tp_sl_confirmed=False 일 때만 이 함수를 호출(서버 SL 있으면 거래소가 막음).
+    - breach (true SL crossed): *always* cut regardless of grace (prevents slip-past -> liquidation, top priority).
+    - near (within buffer): suppressed during the grace window right after entry (slippage noise), pre-emptive cut after grace.
+    The caller only invokes this function when _tp_sl_confirmed=False (if a server SL exists, the exchange handles it).
     """
     if sl <= 0 or price <= 0:
         return False

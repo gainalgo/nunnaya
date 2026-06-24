@@ -2,7 +2,7 @@
 # File: app/api/strategy_weight_router.py
 # Autocoin OS v3-H — Strategy Weight API
 # ------------------------------------------------------------
-# 전략 가중치 조정 API 엔드포인트
+# Strategy weight adjustment API endpoints
 # ============================================================
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/strategy-weight", tags=["strategy-weight"])
 
 @router.get("/status")
 def get_strategy_weight_status(request: Request) -> Dict:
-    """전략 가중치 조정기 상태 조회"""
+    """Get strategy weight adjuster status"""
     
     system = request.app.state.system
     if not hasattr(system, "strategy_weight_adjuster") or not system.strategy_weight_adjuster:
@@ -31,7 +31,7 @@ def get_strategy_weight_status(request: Request) -> Dict:
 
 @router.get("/weights")
 def get_strategy_weights(request: Request) -> Dict:
-    """전략별 가중치 조회"""
+    """Get per-strategy weights"""
     
     system = request.app.state.system
     if not hasattr(system, "strategy_weight_adjuster") or not system.strategy_weight_adjuster:
@@ -56,7 +56,7 @@ def get_strategy_weights(request: Request) -> Dict:
 
 @router.post("/recalculate")
 def recalculate_weights(request: Request) -> Dict:
-    """가중치 즉시 재계산"""
+    """Recalculate weights immediately"""
     
     system = request.app.state.system
     if not hasattr(system, "strategy_weight_adjuster") or not system.strategy_weight_adjuster:
@@ -85,7 +85,7 @@ def recalculate_weights(request: Request) -> Dict:
 
 @router.get("/recommendations")
 def get_recommendations(request: Request) -> Dict:
-    """전략 조정 권장사항"""
+    """Strategy adjustment recommendations"""
     
     system = request.app.state.system
     if not hasattr(system, "strategy_weight_adjuster") or not system.strategy_weight_adjuster:
@@ -102,7 +102,7 @@ def get_recommendations(request: Request) -> Dict:
 
 @router.get("/multiplier/{strategy}")
 def get_budget_multiplier(request: Request, strategy: str) -> Dict:
-    """특정 전략의 예산 배율 조회"""
+    """Get budget multiplier for a specific strategy"""
     
     system = request.app.state.system
     if not hasattr(system, "strategy_weight_adjuster") or not system.strategy_weight_adjuster:

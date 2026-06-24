@@ -2,10 +2,10 @@
 # File: app/manager/performance_budget.py
 # Autocoin OS v3-H — Performance-Based Budget Rebalancer
 # ------------------------------------------------------------
-# 목적:
-# - 성과 기반 예산 자동 조정
-# - 수익률 좋은 코인 → 예산 증액
-# - 연속 손실 코인 → 예산 감액 또는 퇴출
+# Purpose:
+# - Performance-based automatic budget adjustment
+# - High-return coins -> increase budget
+# - Consecutive-loss coins -> reduce budget or remove
 # ============================================================
 
 from __future__ import annotations
@@ -19,25 +19,25 @@ from app.manager.ledger_pnl import MarketFillAgg
 
 @dataclass
 class PerformanceMetrics:
-    """마켓별 성과 메트릭."""
+    """Per-market performance metrics."""
     market: str
     strategy: str = ""
-    
-    # PnL 데이터
+
+    # PnL data
     net_cash_usdt: float = 0.0
     trade_count: int = 0
     sell_count: int = 0
     fees_usdt: float = 0.0
-    
-    # 예산 정보
+
+    # Budget info
     current_budget_usdt: float = 0.0
-    
-    # 성과 지표
+
+    # Performance indicators
     roi_pct: float = 0.0          # Return on Investment %
-    net_per_trade: float = 0.0    # 거래당 순수익
-    win_rate: float = 0.0         # 승률 (추정)
-    
-    # 시간 정보
+    net_per_trade: float = 0.0    # net profit per trade
+    win_rate: float = 0.0         # win rate (estimated)
+
+    # Time info
     active_age_sec: float = 0.0
     first_ts: float = 0.0
     last_ts: float = 0.0
@@ -45,7 +45,7 @@ class PerformanceMetrics:
 
 @dataclass
 class BudgetAdjustment:
-    """예산 조정 결과."""
+    """Budget adjustment result."""
     market: str
     strategy: str
     old_budget_usdt: float
@@ -57,38 +57,38 @@ class BudgetAdjustment:
 
 
 class PerformanceBudgetRebalancer:
-    """성과 기반 예산 리밸런서.
-    
-    알고리즘:
-    1. 마켓별 성과 메트릭 수집
-    2. ROI 및 거래당 수익 계산
-    3. 성과 등급 분류:
-       - STAR: 상위 20% → 예산 +20%
-       - GOOD: 상위 40% → 예산 +10%
-       - NORMAL: 중간 → 유지
-       - POOR: 하위 30% → 예산 -20%
-       - FAIL: 하위 10% 또는 연속 손실 → 예산 -50% 또는 퇴출
-    4. 총 예산 제약 내에서 조정
+    """Performance-based budget rebalancer.
+
+    Algorithm:
+    1. Collect per-market performance metrics
+    2. Compute ROI and profit per trade
+    3. Classify performance grades:
+       - STAR: top 20% -> budget +20%
+       - GOOD: top 40% -> budget +10%
+       - NORMAL: middle -> hold
+       - POOR: bottom 30% -> budget -20%
+       - FAIL: bottom 10% or consecutive losses -> budget -50% or remove
+    4. Adjust within the total budget constraint
     """
 
     def __init__(
         self,
-        # 성과 기준
+        # Performance thresholds
         min_trades_for_eval: int = 3,
         min_age_minutes: int = 60,
-        
-        # 예산 조정 비율
+
+        # Budget adjustment ratios
         star_increase_pct: float = 20.0,
         good_increase_pct: float = 10.0,
         poor_decrease_pct: float = 20.0,
         fail_decrease_pct: float = 50.0,
-        
-        # 제약
+
+        # Constraints
         min_budget_usdt: float = 50.0,
         max_budget_usdt: float = 5000.0,
         max_single_increase_pct: float = 30.0,
-        
-        # 퇴출 조건
+
+        # Removal conditions
         remove_threshold_roi_pct: float = -30.0,
         remove_min_trades: int = 5,
     ):
@@ -114,7 +114,7 @@ class PerformanceBudgetRebalancer:
         strategy: str = "",
         active_since_ts: float = 0.0,
     ) -> PerformanceMetrics:
-        """PnL 데이터에서 성과 메트릭 계산."""
+        """Compute performance metrics from PnL data."""
         now = time.time()
         age_sec = now - active_since_ts if active_since_ts > 0 else 0.0
         
@@ -131,15 +131,15 @@ class PerformanceBudgetRebalancer:
             last_ts=pnl_agg.last_ts,
         )
         
-        # ROI 계산
+        # ROI calculation
         if current_budget_usdt > 0:
             m.roi_pct = (pnl_agg.net_cash_usdt / current_budget_usdt) * 100
-        
-        # 거래당 수익
+
+        # Profit per trade
         if pnl_agg.trade_n > 0:
             m.net_per_trade = pnl_agg.net_cash_usdt / pnl_agg.trade_n
-        
-        # 승률 추정 (sell 수익 기반)
+
+        # Win rate estimate (based on sell proceeds)
         if pnl_agg.sell_n > 0:
             avg_sell = pnl_agg.sell_funds_usdt / pnl_agg.sell_n
             avg_buy = pnl_agg.buy_funds_usdt / pnl_agg.buy_n if pnl_agg.buy_n > 0 else 0
@@ -152,17 +152,17 @@ class PerformanceBudgetRebalancer:
         self,
         metrics: List[PerformanceMetrics],
     ) -> Dict[str, str]:
-        """성과 등급 분류.
-        
+        """Classify performance grades.
+
         Returns:
             {market: grade} where grade in ["STAR", "GOOD", "NORMAL", "POOR", "FAIL", "SKIP"]
         """
         result: Dict[str, str] = {}
         
-        # 평가 가능한 마켓만 필터
+        # Filter to only evaluable markets
         evaluable = []
         for m in metrics:
-            # 최소 조건 미충족 → SKIP
+            # Minimum conditions not met -> SKIP
             if m.trade_count < self.min_trades_for_eval:
                 result[m.market] = "SKIP"
                 continue
@@ -174,14 +174,14 @@ class PerformanceBudgetRebalancer:
         if not evaluable:
             return result
         
-        # ROI 기준 정렬
+        # Sort by ROI
         evaluable.sort(key=lambda x: x.roi_pct, reverse=True)
         n = len(evaluable)
-        
+
         for i, m in enumerate(evaluable):
-            percentile = i / n  # 0.0 = 최상위, 1.0 = 최하위
-            
-            # 퇴출 조건 체크
+            percentile = i / n  # 0.0 = top, 1.0 = bottom
+
+            # Check removal condition
             if m.roi_pct <= self.remove_threshold_roi_pct and m.trade_count >= self.remove_min_trades:
                 result[m.market] = "FAIL"
             elif percentile < 0.20:
@@ -203,15 +203,15 @@ class PerformanceBudgetRebalancer:
         total_capital_usdt: float,
         grades: Optional[Dict[str, str]] = None,
     ) -> Tuple[List[BudgetAdjustment], Dict[str, Any]]:
-        """예산 조정 계산.
-        
+        """Compute budget adjustments.
+
         Args:
-            metrics: 마켓별 성과 메트릭
-            total_capital_usdt: 총 가용 자본
-            grades: 미리 계산된 등급 (없으면 자동 계산)
-            
+            metrics: per-market performance metrics
+            total_capital_usdt: total available capital
+            grades: pre-computed grades (auto-computed if omitted)
+
         Returns:
-            (조정 리스트, 요약 정보)
+            (list of adjustments, summary info)
         """
         if grades is None:
             grades = self.classify_performance(metrics)
@@ -259,7 +259,7 @@ class PerformanceBudgetRebalancer:
                     action = "decrease"
                     reason = f"fail_performer:-{self.fail_decrease_pct:.0f}%"
             
-            # 제약 적용
+            # Apply constraints
             if action != "remove" and new_budget_usdt > 0:
                 new_budget_usdt = max(self.min_budget_usdt, min(self.max_budget_usdt, new_budget_usdt))
                 if new_budget_usdt >= 1000:
@@ -286,7 +286,7 @@ class PerformanceBudgetRebalancer:
                 },
             ))
         
-        # 총 예산 제약 체크
+        # Check total budget constraint
         total_new = sum(a.new_budget_usdt for a in adjustments if a.action != "skip")
         scale = 1.0
         if total_new > total_capital_usdt and total_new > 0:
@@ -320,8 +320,8 @@ def get_budget_adjustment_recommendation(
     roi_pct: float,
     min_trades: int = 3,
 ) -> Tuple[str, float, str]:
-    """단순 예산 조정 추천.
-    
+    """Simple budget adjustment recommendation.
+
     Returns:
         (action, multiplier, reason)
     """

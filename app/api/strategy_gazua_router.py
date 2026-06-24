@@ -2,7 +2,7 @@
 # File: app/api/strategy_gazua_router.py
 # Extracted from strategy_router.py — Phase 1-D (file diet)
 #
-# GAZUA 전략 셋업/조회/중지 엔드포인트
+# GAZUA strategy setup/query/stop endpoints
 # ============================================================
 
 from fastapi import APIRouter, Request, Query
@@ -39,13 +39,13 @@ class GazuaSetupRequest(BaseModel):
     tp_price: float = 0.0
     sl_pct: float = -10.0
     sl_price: float = 0.0
-    hold_sell: bool = False  # True면 TP 도달해도 자동 매도 안 함
-    user_sell_only: bool = False  # [2026-01-26] True면 사용자만 매도 가능 (TP/SL 완전 비활성화)
-    deep_sl: bool = False  # [2026-02-01] True면 SL을 -50%로 설정 (장기 보유용)
-    buy_now: bool = False    # True면 즉시 매수, False면 AI 판단
+    hold_sell: bool = False  # If True, do not auto-sell even when TP is reached
+    user_sell_only: bool = False  # [2026-01-26] If True, only the user can sell (TP/SL fully disabled)
+    deep_sl: bool = False  # [2026-02-01] If True, set SL to -50% (for long-term holding)
+    buy_now: bool = False    # If True, buy immediately; if False, let AI decide
     buy_limit: bool = False
-    trail_tp_enabled: bool = True   # Trailing TP: TP 도달 후 최고가 추적
-    trail_dist_pct: float = 4.0     # Trail 거리 (%): 최고가 대비 하락 허용폭
+    trail_tp_enabled: bool = True   # Trailing TP: track the high after TP is reached
+    trail_dist_pct: float = 4.0     # Trail distance (%): allowed drawdown from the high
 
     @property
     def budget(self) -> float:
@@ -73,7 +73,7 @@ def setup_gazua_market(req: GazuaSetupRequest, request: Request):
         system = request.app.state.system
         market = req.market.strip().upper()
 
-        # [2026-03-07] 수동 주문 슬롯 초과 체크 (+2 한도)
+        # [2026-03-07] Check manual order slot overflow (+2 limit)
         overflow_check = _check_manual_overflow(system, "GAZUA", market)
         coin_warnings = _generate_coin_warnings(system, market, "GAZUA")
         if not overflow_check["allowed"]:
@@ -115,14 +115,14 @@ def setup_gazua_market(req: GazuaSetupRequest, request: Request):
         buy_result = {}
 
         # 3. Buy Now (Optional)
-        # [2026-01-28] 이미 포지션이 있으면 buy_now 무시 (중복 매수 방지)
+        # [2026-01-28] Ignore buy_now if a position already exists (prevent duplicate buys)
         has_position = False
         try:
             pos = getattr(ctx, "position", None)
             if pos and float(pos.get("qty", 0.0) or 0.0) > 0:
                 has_position = True
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[strategy_gazua_router] %s: %s", '[2026-01-28] 이미 포지션이 있으면 buy_now 무시 (중복 매수 방지)', exc, exc_info=True)
+            logger.warning("[strategy_gazua_router] %s: %s", '[2026-01-28] Ignore buy_now if a position already exists (prevent duplicate buys)', exc, exc_info=True)
 
         if req.buy_now and req.budget > 0 and not has_position:
             current_price = price_store.get_price(market) or 0.0
@@ -158,7 +158,7 @@ def setup_gazua_market(req: GazuaSetupRequest, request: Request):
                     ok, msg = system.order_fsm.submit_limit_buy(
                         ctx=ctx,
                         market=market,
-                        quote_amount=req.budget,  # quote_amount는 레거시 이름, 실제로는 USDT
+                        quote_amount=req.budget,  # quote_amount is a legacy name; actually USDT
                         limit_price=current_price,
                         reason="gazua:buy_now_limit_ui"
                     )
@@ -167,13 +167,13 @@ def setup_gazua_market(req: GazuaSetupRequest, request: Request):
                     ok, msg = system.order_fsm.submit_market_buy(
                         ctx=ctx,
                         market=market,
-                        quote_amount=req.budget,  # quote_amount는 레거시 이름, 실제로는 USDT
+                        quote_amount=req.budget,  # quote_amount is a legacy name; actually USDT
                         expected_price=current_price,
                         reason="gazua:buy_now_ui"
                     )
                 buy_result = {"ok": ok, "msg": str(msg)}
 
-                # 주문 성공 시 포지션 즉시 기록 (폴링 전에 UI 반영용)
+                # On order success, record the position immediately (for UI before polling)
                 if ok and current_price > 0:
                     try:
                         qty = req.budget / current_price
@@ -181,7 +181,7 @@ def setup_gazua_market(req: GazuaSetupRequest, request: Request):
                         system._save_context_state()
                     except (KeyError, IndexError, AttributeError, TypeError, ValueError, RuntimeError, OSError) as e:
                         logger.warning("strategy_gazua_router.setup_gazua_market L180: %s", e)
-                        # [FIX] 포지션 기록 실패해도 매수는 성공했으므로 경고만 기록
+                        # [FIX] Even if position recording fails, the buy succeeded, so just log a warning
                         import logging
                         logging.getLogger("strategy_router").warning(f"[gazua/setup] position record failed: {e}")
             elif system.trading_mode == "PAPER":
@@ -217,8 +217,8 @@ def list_gazua_markets(request: Request):
     system = request.app.state.system
     items = []
 
-    # ★ [2026-06-02 부모] 진입 근접도 = compute_scope_score 실시간 (5분봉 6-stage rank_score 0~100, 10s 캔들 캐시 → 폴링 부담 적음)
-    #   부모님 통찰: 고정/수동 아니라 자동 평가로 점수가 살아 변동해야. market만 주면 매 호출 실시간 계산 (5분봉 따라 변동).
+    # ★ [2026-06-02 owner] Entry proximity = compute_scope_score in real time (5m 6-stage rank_score 0~100, 10s candle cache → low polling overhead)
+    #   Owner insight: the score should be live and dynamic via automatic evaluation, not fixed/manual. Given only market, it computes in real time on each call (varies with the 5m candle).
     try:
         from app.api.strategy_router import compute_scope_score as _scope_fn
     except (ImportError, AttributeError):
@@ -255,7 +255,7 @@ def list_gazua_markets(request: Request):
             trade_count = getattr(ctx, "win_count", 0) + getattr(ctx, "loss_count", 0)
             total_profit = getattr(ctx, "total_profit", 0.0)
 
-            # ★ [2026-06-02 부모] 진입 근접도 실시간 계산 (compute_scope_score 5분봉 rank_score). 0=캔들 부족/실패
+            # ★ [2026-06-02 owner] Real-time entry proximity (compute_scope_score 5m rank_score). 0 = insufficient candles/failure
             _entry_score = 0.0
             if _scope_fn is not None:
                 try:
@@ -291,7 +291,7 @@ def list_gazua_markets(request: Request):
                     "count": trade_count,
                     "realized_profit": total_profit
                 },
-                # ★ [2026-06-02 부모] 진입 근접도 (compute_scope_score 실시간 rank_score 0~100). 0=캔들 부족/계산 실패
+                # ★ [2026-06-02 owner] Entry proximity (compute_scope_score real-time rank_score 0~100). 0 = insufficient candles/computation failure
                 "entry_score": _entry_score,
             })
         except (KeyError, AttributeError, TypeError, ValueError) as exc:

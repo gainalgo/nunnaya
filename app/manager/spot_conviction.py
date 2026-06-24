@@ -1,25 +1,25 @@
 # ============================================================
-# Spot Base Conviction — 선물 FOCUS _compute_conviction_score 차트코어 *충실* 이식
+# Spot Base Conviction — *faithful* port of the futures FOCUS _compute_conviction_score chart core
 # ------------------------------------------------------------
-# 부모 지시 / 설계: docs/plan_spot_base_conviction_2026-06-19.md
-#   "선물은 base conviction + guard modifier 체계가 살아있는데 현물은 base 가 미완성."
-#   → 선물식 base conviction(0~100, 차트 컴포넌트 합)을 현물용 client-agnostic 으로 포팅.
+# Owner directive / design: docs/plan_spot_base_conviction_2026-06-19.md
+#   "Futures has a live base conviction + guard modifier system, but spot's base is unfinished."
+#   -> Port the futures-style base conviction (0~100, sum of chart components) to a client-agnostic spot version.
 #
-# 원본: app/manager/focus_manager.py:9124-9543 (_compute_conviction_score, ★라이브 선물 보물 = READ-ONLY)
-#   + 헬퍼 _coin_baseline_stats / _fetch_primary_adx / _compute_rsi_score / _compute_pa_weight /
+# Source: app/manager/focus_manager.py:9124-9543 (_compute_conviction_score, ★live futures treasure = READ-ONLY)
+#   + helpers _coin_baseline_stats / _fetch_primary_adx / _compute_rsi_score / _compute_pa_weight /
 #     _compute_pa_5step_score / _compute_mtf_alignment_matrix / _compute_tf_change_rate /
 #     _compute_sr_position_v2 / _compute_volume_pattern_score / _compute_phase3_context_bonus.
 #
-# 포팅 정책 (분석 스펙 기준):
-#   port  = 순수 kline 차트 컴포넌트 — 수식 verbatim. (ADX·MACD·RSI·BB·PA·5STEP·MTF·변화율·SR·H4추세·반전·Vol·시간/코인보너스)
-#   skip(0점·미포함) = 선물 전용 인프라 (market_breadth 대표10·news·macro_compass·decouple·CFID·regime·context_engine·reentry·momentum_reversal).
+# Porting policy (per analysis spec):
+#   port  = pure kline chart components — formulas verbatim. (ADX/MACD/RSI/BB/PA/5STEP/MTF/change-rate/SR/H4 trend/reversal/Vol/time-coin bonus)
+#   skip(0 points, excluded) = futures-only infra (market_breadth top10, news, macro_compass, decouple, CFID, regime, context_engine, reentry, momentum_reversal).
 #
-# ★ 현물 long_only — direction 기본 "LONG". 모든 SHORT 분기는 거울로 보존(무해)하되 호출은 LONG.
-# ★ closed-candle: 모든 캔들 fetch 후 *마지막(진행 중) 봉 제외* 하고 계산 (친구 발견 흔들림 방지).
-# ★ 가중치/임계는 전부 SpotGazuaConfig(672) 의 getattr — 미주입 시 선물 기본값 fallback.
-# ★ 순수/모듈 함수: self 상태 0. import = app.strategy.indicators / app.strategy.greenpen / client.get_kline 만.
-#     선물 전용 메서드(_linear_last_price·day_direction·_compute_market_breadth·peer 등) 절대 호출 X.
-# ★ 배선 금지 — 본 모듈은 Phase 1(작성)만. 어디서도 호출 추가 X (Phase 2 별도).
+# ★ Spot long_only — direction defaults to "LONG". All SHORT branches are preserved as mirrors (harmless) but callers use LONG.
+# ★ closed-candle: after every candle fetch, *exclude the last (forming) candle* before computing (avoids forming-candle flicker).
+# ★ Weights/thresholds all come from SpotGazuaConfig(672) via getattr — fall back to futures defaults when not injected.
+# ★ Pure/module functions: zero self state. imports = only app.strategy.indicators / app.strategy.greenpen / client.get_kline.
+#     Never call futures-only methods (_linear_last_price, day_direction, _compute_market_breadth, peer, etc.).
+# ★ No wiring — this module is Phase 1 (authoring) only. Do not add calls anywhere (Phase 2 is separate).
 # ============================================================
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────
-# piecewise linear 보간 (선물 _compute_conviction_score 내장 _pwl verbatim)
+# piecewise linear interpolation (verbatim from the futures _compute_conviction_score embedded _pwl)
 # ──────────────────────────────────────────────────────────────
 def _pwl(v: float, points: list) -> float:
     if v <= points[0][0]:
@@ -47,10 +47,10 @@ def _pwl(v: float, points: list) -> float:
 
 
 # ──────────────────────────────────────────────────────────────
-# 캔들 유틸 (get_kline = oldest-first [ts,open,high,low,close,vol,turnover])
-#   ※ 선물·현물 get_kline 모두 oldest-first → raw[-1]=forming(진행 중 봉).
-#   ★ closed-candle 정책: _closed() 로 마지막 진행봉을 잘라 마감 캔들만 사용.
-#     spot_guard_chain._kl / _ohlcv 패턴 재사용.
+# Candle utils (get_kline = oldest-first [ts,open,high,low,close,vol,turnover])
+#   * Both futures and spot get_kline are oldest-first -> raw[-1]=forming (in-progress candle).
+#   ★ closed-candle policy: _closed() trims the last forming candle so only closed candles are used.
+#     Reuses the spot_guard_chain._kl / _ohlcv pattern.
 # ──────────────────────────────────────────────────────────────
 def _kl(client: Any, market: str, interval: str, limit: int) -> List[list]:
     try:
@@ -62,14 +62,14 @@ def _kl(client: Any, market: str, interval: str, limit: int) -> List[list]:
 
 
 def _closed(raw: List[list]) -> List[list]:
-    """진행 중(마지막) 봉 제외 — 마감 캔들만. forming 흔들림 방지."""
+    """Exclude the in-progress (last) candle — closed candles only. Avoids forming-candle flicker."""
     if raw and len(raw) >= 2:
         return raw[:-1]
     return raw or []
 
 
 def _ohlcv(raw: List[list]):
-    """raw kline → greenpen OHLCV 리스트(oldest-first 그대로)."""
+    """raw kline -> greenpen OHLCV list (oldest-first, unchanged)."""
     from app.strategy.greenpen.pa_detector import OHLCV
     out = []
     for r in raw:
@@ -85,16 +85,16 @@ def _closes_of(raw: List[list]) -> List[float]:
 
 
 # ──────────────────────────────────────────────────────────────
-# MTF kline — 선물 _get_mtf_kline 의 client-agnostic 대체 (TTL 캐시 생략 = 매번 fetch 허용).
-#   closed-candle 적용해 반환. 선물 인프라(_mtf_kline_cache) 미사용.
+# MTF kline — client-agnostic replacement for the futures _get_mtf_kline (no TTL cache = fetch every time).
+#   Returns with closed-candle applied. Does not use futures infra (_mtf_kline_cache).
 # ──────────────────────────────────────────────────────────────
 def _mtf_kline(client: Any, market: str, interval: str, limit: int = 40) -> List[list]:
     return _closed(_kl(client, market, interval, max(limit + 1, 11)))
 
 
 # ──────────────────────────────────────────────────────────────
-# zones_from_candles — 선물 _zones_for_pa / _compute_zones_for_symbol 의 순수 대체.
-#   candles(closed primary) → greenpen.full_analysis → (support, resistance) tuple. 선물 self.zones 미사용.
+# zones_from_candles — pure replacement for the futures _zones_for_pa / _compute_zones_for_symbol.
+#   candles(closed primary) -> greenpen.full_analysis -> (support, resistance) tuple. Does not use futures self.zones.
 # ──────────────────────────────────────────────────────────────
 def _zones_from_candles(candles) -> Optional[Tuple[float, float]]:
     try:
@@ -126,10 +126,10 @@ def _zones_from_candles(candles) -> Optional[Tuple[float, float]]:
 
 
 # ──────────────────────────────────────────────────────────────
-# _coin_baseline_stats — 선물 focus_manager.py:8185-8283 순수 이식.
-#   코인 평소 변동성(H4 100봉) bb/macd/atr/adx 평균 → 정규화 분모.
-#   ★필수 — ADX/MACD/BB 3 컴포넌트 정규화 분모. baseline None 시 각 컴포넌트 절대값 fallback.
-#   client.get_kline(primary_tf) 로 ADX baseline 별도 fetch. 캐시는 단순 dict.
+# _coin_baseline_stats — pure port of futures focus_manager.py:8185-8283.
+#   Coin's typical volatility (H4 100 candles) bb/macd/atr/adx averages -> normalization denominators.
+#   ★required — normalization denominators for the ADX/MACD/BB components. When baseline is None, each component falls back to its absolute value.
+#   Fetches the ADX baseline separately via client.get_kline(primary_tf). Cache is a simple dict.
 # ──────────────────────────────────────────────────────────────
 _BASELINE_CACHE: dict = {}  # {market: (ts, stats)}
 
@@ -160,7 +160,7 @@ def _coin_baseline_stats(client: Any, market: str, candles_primary, cfg: Any) ->
         N = min(100, len(closes))
         recent = closes[-N:]
 
-        # BB 밴드폭% 평균 (슬라이딩 윈도우)
+        # BB bandwidth% average (sliding window)
         bb_widths = []
         for i in range(20, N):
             bb = bollinger_bands(recent[max(0, i - 19):i + 1], 20, 2.0)
@@ -168,7 +168,7 @@ def _coin_baseline_stats(client: Any, market: str, candles_primary, cfg: Any) ->
                 bb_widths.append(bb["bandwidth"] * 100)
         bb_avg = sum(bb_widths) / len(bb_widths) if bb_widths else 1.0
 
-        # MACD hist% 평균 (격칸 = 부담 절반)
+        # MACD hist% average (every other bar = half the load)
         macd_hists = []
         for i in range(35, N, 2):
             h, _ = macd_hist_pair(recent[:i + 1])
@@ -176,7 +176,7 @@ def _coin_baseline_stats(client: Any, market: str, candles_primary, cfg: Any) ->
                 macd_hists.append(abs(h) / recent[i] * 100)
         macd_avg = sum(macd_hists) / len(macd_hists) if macd_hists else 0.1
 
-        # ATR% 평균 (atr_simplified — closes 기반 근사)
+        # ATR% average (atr_simplified — closes-based approximation)
         atr_pcts = []
         for i in range(14, N, 2):
             a = atr_simplified(recent[:i + 1], length=14)
@@ -184,8 +184,8 @@ def _coin_baseline_stats(client: Any, market: str, candles_primary, cfg: Any) ->
                 atr_pcts.append(a / recent[i] * 100)
         atr_avg_pct = sum(atr_pcts) / len(atr_pcts) if atr_pcts else 1.0
 
-        # ADX 평균 — primary_tf 100 캔들 adx_series 마지막 50개 평균
-        adx_baseline = 25.0  # fallback (안정 코인 평균)
+        # ADX average — mean of the last 50 of adx_series over primary_tf 100 candles
+        adx_baseline = 25.0  # fallback (average for a stable coin)
         try:
             from app.strategy.indicators import adx_series
             raw_p = _kl(client, market, str(getattr(cfg, "primary_tf", "240")), 101)
@@ -218,8 +218,8 @@ def _coin_baseline_stats(client: Any, market: str, candles_primary, cfg: Any) ->
 
 
 # ──────────────────────────────────────────────────────────────
-# _fetch_primary_adx — 선물 focus_manager.py:7417-7453 순수 이식 (캐시·레거시 attr 부수효과 제거).
-#   primary_tf ADX 조회. closed-candle 적용.
+# _fetch_primary_adx — pure port of futures focus_manager.py:7417-7453 (cache and legacy-attr side effects removed).
+#   Queries primary_tf ADX. closed-candle applied.
 # ──────────────────────────────────────────────────────────────
 def _fetch_primary_adx(client: Any, market: str, cfg: Any) -> Optional[dict]:
     try:
@@ -238,8 +238,8 @@ def _fetch_primary_adx(client: Any, market: str, cfg: Any) -> Optional[dict]:
 
 
 # ──────────────────────────────────────────────────────────────
-# _compute_rsi_score — 선물 focus_manager.py:9013-9051 verbatim 이식.
-#   LONG: RSI 30~50=+4 / 50~70=+2 / <30=+2 / ≥70=0. SHORT 대칭(미러).
+# _compute_rsi_score — verbatim port of futures focus_manager.py:9013-9051.
+#   LONG: RSI 30~50=+4 / 50~70=+2 / <30=+2 / ≥70=0. SHORT symmetric (mirror).
 # ──────────────────────────────────────────────────────────────
 def _compute_rsi_score(market: str, direction: str, candles_primary, cfg: Any) -> Tuple[int, str]:
     if not getattr(cfg, "phase4_rsi_enabled", True):
@@ -271,8 +271,8 @@ def _compute_rsi_score(market: str, direction: str, candles_primary, cfg: Any) -
             elif rsi_val < 30:
                 score = 2
             else:
-                score = 0  # ≥70 과매수
-        else:  # SHORT (미러, LONG-only 미사용)
+                score = 0  # ≥70 overbought
+        else:  # SHORT (mirror, unused in LONG-only)
             if 50 <= rsi_val < 70:
                 score = 4
             elif 30 <= rsi_val < 50:
@@ -288,8 +288,8 @@ def _compute_rsi_score(market: str, direction: str, candles_primary, cfg: Any) -
 
 
 # ──────────────────────────────────────────────────────────────
-# _compute_pa_weight — 선물 focus_manager.py:7626-7757 (caller="focus" 분기만) 이식.
-#   672 pa_weight_* getattr. candles=closed primary OHLCV. zones=_zones_from_candles.
+# _compute_pa_weight — port of futures focus_manager.py:7626-7757 (caller="focus" branch only).
+#   getattr of 672 pa_weight_*. candles=closed primary OHLCV. zones=_zones_from_candles.
 # ──────────────────────────────────────────────────────────────
 def _compute_pa_weight(candles_primary, direction: str, zones, cfg: Any) -> Tuple[int, str]:
     if not getattr(cfg, "pa_weight_enabled", False):
@@ -379,14 +379,14 @@ def _compute_pa_weight(candles_primary, direction: str, zones, cfg: Any) -> Tupl
 
 
 # ──────────────────────────────────────────────────────────────
-# _compute_pa_5step_score — 선물 focus_manager.py:9060-9095 이식.
-#   entry_tf(M5) fetch → _pa_5step_score_impl. closed-candle.
+# _compute_pa_5step_score — port of futures focus_manager.py:9060-9095.
+#   entry_tf(M5) fetch -> _pa_5step_score_impl. closed-candle.
 # ──────────────────────────────────────────────────────────────
 def _compute_pa_5step_score(client: Any, market: str, direction: str, zones, cfg: Any) -> Tuple[int, str]:
     try:
         from app.strategy.greenpen.pa_5step import _pa_5step_score_impl
         entry_tf = str(getattr(cfg, "entry_tf", "5"))
-        raw = _mtf_kline(client, market, entry_tf, limit=30)  # ★ closed-candle 적용됨
+        raw = _mtf_kline(client, market, entry_tf, limit=30)  # ★ closed-candle applied
         if not raw or len(raw) < 8:
             return (0, f"entry_tf({entry_tf})_short:{len(raw) if raw else 0}")
         candles = []
@@ -405,8 +405,8 @@ def _compute_pa_5step_score(client: Any, market: str, direction: str, zones, cfg
 
 
 # ──────────────────────────────────────────────────────────────
-# _compute_mtf_alignment_matrix — 선물 focus_manager.py:8718-8800 이식.
-#   6 TF(D1/H4/H1/M30/M15/M5) analyze_structure → net×4. closed-candle.
+# _compute_mtf_alignment_matrix — port of futures focus_manager.py:8718-8800.
+#   6 TF (D1/H4/H1/M30/M15/M5) analyze_structure -> net×4. closed-candle.
 # ──────────────────────────────────────────────────────────────
 def _compute_mtf_alignment_matrix(client: Any, market: str, direction: str,
                                   candles_primary, cfg: Any) -> Tuple[int, str]:
@@ -479,8 +479,8 @@ def _compute_mtf_alignment_matrix(client: Any, market: str, direction: str,
 
 
 # ──────────────────────────────────────────────────────────────
-# _compute_tf_change_rate — 선물 focus_manager.py:8802-8914 이식.
-#   각 TF 변화율 (속도+일관성). BEAT 가드 3종 getattr(default OFF). tf_weight ×. closed-candle.
+# _compute_tf_change_rate — port of futures focus_manager.py:8802-8914.
+#   Per-TF change rate (speed + consistency). Three BEAT guards via getattr (default OFF). × tf_weight. closed-candle.
 # ──────────────────────────────────────────────────────────────
 def _compute_tf_change_rate(client: Any, market: str, tf_str: str, direction: str,
                             candles_primary, cfg: Any, baseline: Optional[dict] = None) -> Tuple[int, str]:
@@ -515,13 +515,13 @@ def _compute_tf_change_rate(client: Any, market: str, tf_str: str, direction: st
         consistency = dominant_count / N
         dominant_dir = "UP" if up_count > down_count else ("DOWN" if down_count > up_count else "FLAT")
 
-        # BEAT Fix A — 방향개수 vs 실제 speed 부호 괴리 교정 (default OFF)
+        # BEAT Fix A — correct divergence between direction count and actual speed sign (default OFF)
         if getattr(cfg, "cr_speed_sign_guard_enabled", False) and dominant_dir != "FLAT":
             _speed_dir = "UP" if speed_pct > 0 else ("DOWN" if speed_pct < 0 else "FLAT")
             if _speed_dir != dominant_dir:
                 dominant_dir = "FLAT"
 
-        # BEAT Fix C — 큰 추세 동의 가드 (default OFF)
+        # BEAT Fix C — larger-trend agreement guard (default OFF)
         if getattr(cfg, "cr_trend_agree_guard_enabled", False) and dominant_dir != "FLAT":
             _long_n = int(getattr(cfg, "cr_trend_agree_lookback", 20))
             if len(closes) > _long_n and closes[-_long_n - 1] > 0:
@@ -536,7 +536,7 @@ def _compute_tf_change_rate(client: Any, market: str, tf_str: str, direction: st
         atr_ref = baseline['atr_avg_pct'] if baseline else 0.5
         speed_ratio = abs(speed_pct) / atr_ref if atr_ref > 0 else 1.0
 
-        # BEAT Fix B — 극단 폭등/폭락(blow-off) 끝물 → 중립 (default OFF)
+        # BEAT Fix B — extreme blow-off spike/crash tail-end -> neutral (default OFF)
         if getattr(cfg, "cr_blowoff_extreme_guard_enabled", False) and dominant_dir != "FLAT":
             _ext_ratio = float(getattr(cfg, "cr_blowoff_extreme_ratio", 4.0))
             if speed_ratio >= _ext_ratio:
@@ -563,7 +563,7 @@ def _compute_tf_change_rate(client: Any, market: str, tf_str: str, direction: st
         else:
             score = 0
 
-        # 전환 신호 — 반대 우세인데 최근 1~2 캔들 진입 방향으로 급변
+        # Reversal signal — opposite is dominant but the last 1~2 candles flipped sharply toward the entry direction
         if entry_opposite and len(closes) >= 3:
             recent_up = closes[-1] > closes[-2] and closes[-2] > closes[-3]
             recent_down = closes[-1] < closes[-2] and closes[-2] < closes[-3]
@@ -582,8 +582,8 @@ def _compute_tf_change_rate(client: Any, market: str, tf_str: str, direction: st
 
 
 # ──────────────────────────────────────────────────────────────
-# _compute_sr_position_v2 — 선물 focus_manager.py:8916-8960 이식.
-#   가격↔S/R 거리 위치 점수 (0~8, 페널티 X). zones=_zones_from_candles.
+# _compute_sr_position_v2 — port of futures focus_manager.py:8916-8960.
+#   Price↔S/R distance position score (0~8, no penalty). zones=_zones_from_candles.
 # ──────────────────────────────────────────────────────────────
 def _compute_sr_position_v2(market: str, direction: str, candles_primary, zones_tuple, cfg: Any) -> Tuple[int, str]:
     if not getattr(cfg, "phase4_sr_position_enabled", True):
@@ -619,7 +619,7 @@ def _compute_sr_position_v2(market: str, direction: str, candles_primary, zones_
             if dist_to_resistance_pct <= 5.0:
                 return 0, f"near_R({dist_to_resistance_pct:.1f}%)+0"
             return 3, f"between(S:{dist_to_support_pct:.1f}/R:{dist_to_resistance_pct:.1f}%)+3"
-        else:  # SHORT (미러)
+        else:  # SHORT (mirror)
             if dist_to_resistance_pct <= 2.0:
                 return 8, f"near_R({dist_to_resistance_pct:.1f}%)+8"
             if dist_to_resistance_pct <= 5.0:
@@ -633,10 +633,10 @@ def _compute_sr_position_v2(market: str, direction: str, candles_primary, zones_
 
 
 # ──────────────────────────────────────────────────────────────
-# _compute_volume_pattern_score — 선물 focus_manager.py:8962-9011 이식.
-#   M5 마감 직전봉 vol/avg. 큰봉&진입방향=+5. closed-candle (vols[-2]=마감직전봉, 마지막은 forming).
-#   ★ _mtf_kline 이 이미 forming 제외 → vols[-1]=마지막 마감봉, vols[-2]=그 전봉.
-#     선물 원본은 forming 포함 raw 에서 [-2] 를 잡았으나, 여기선 closed list 의 [-1]=마감직전봉으로 동등.
+# _compute_volume_pattern_score — port of futures focus_manager.py:8962-9011.
+#   M5 last-closed candle vol/avg. Big candle & entry direction = +5. closed-candle (vols[-2]=last closed candle, last is forming).
+#   ★ _mtf_kline already excludes forming -> vols[-1]=last closed candle, vols[-2]=the one before.
+#     The futures original grabbed [-2] from forming-inclusive raw; here, [-1] of the closed list (the last closed candle) is equivalent.
 # ──────────────────────────────────────────────────────────────
 def _compute_volume_pattern_score(client: Any, market: str, direction: str, cfg: Any) -> Tuple[int, str]:
     if not getattr(cfg, "phase4_volume_pattern_enabled", True):
@@ -645,7 +645,7 @@ def _compute_volume_pattern_score(client: Any, market: str, direction: str, cfg:
     if dir_up not in ("LONG", "SHORT"):
         return 0, "no-dir"
     try:
-        raw = _mtf_kline(client, market, "5")  # forming 제외된 마감봉 리스트
+        raw = _mtf_kline(client, market, "5")  # list of closed candles (forming excluded)
         if not raw or len(raw) < 10:
             return 0, "no-vol-data"
         vols = []
@@ -656,9 +656,9 @@ def _compute_volume_pattern_score(client: Any, market: str, direction: str, cfg:
                 opens_closes.append((float(r[1]), float(r[4])))
         if len(vols) < 6:
             return 0, "short-vol"
-        # closed list → 마지막=마감 직전봉 (선물 forming raw 의 [-2] 등가)
-        avg_vol = sum(vols[-6:-1]) / 5  # 그 이전 마감 5봉 평균
-        current_vol = vols[-1]           # 마감 직전봉
+        # closed list -> last = last closed candle (equivalent to [-2] of the futures forming-inclusive raw)
+        avg_vol = sum(vols[-6:-1]) / 5  # average of the 5 closed candles before it
+        current_vol = vols[-1]           # last closed candle
         if avg_vol <= 0:
             return 0, "zero-avg"
         ratio = current_vol / avg_vol
@@ -681,8 +681,8 @@ def _compute_volume_pattern_score(client: Any, market: str, direction: str, cfg:
 
 
 # ──────────────────────────────────────────────────────────────
-# _compute_phase3_context_bonus — 선물 focus_manager.py:9097-9122 이식.
-#   KST 시간대 EV ±4 + 코인 보너스 +2. (분석 'adapt(선택)' — 미러 보존, config 게이트로 ON/OFF.)
+# _compute_phase3_context_bonus — port of futures focus_manager.py:9097-9122.
+#   KST hour-of-day EV ±4 + coin bonus +2. (Analysis 'adapt (optional)' — preserved as mirror, ON/OFF via config gate.)
 # ──────────────────────────────────────────────────────────────
 def _compute_phase3_context_bonus(market: str, ts: Optional[float] = None) -> int:
     import time as _time
@@ -707,41 +707,41 @@ def _compute_phase3_context_bonus(market: str, ts: Optional[float] = None) -> in
 
 # ══════════════════════════════════════════════════════════════
 # PUBLIC — compute_base_conviction
-#   선물 _compute_conviction_score 차트코어 합산. port 컴포넌트만 (skip=미포함=0).
-#   합산 후 clamp(0,100). breakdown 에 컴포넌트별 기여.
+#   Sum of the futures _compute_conviction_score chart core. Ported components only (skip=excluded=0).
+#   After summing, clamp(0,100). breakdown holds each component's contribution.
 # ══════════════════════════════════════════════════════════════
 def compute_base_conviction(client: Any, market: str, cfg: Any,
                             direction: str = "LONG",
                             btc_dir: str = "NEUTRAL") -> Tuple[float, List[str]]:
-    """현물 base conviction (0~100) — 선물 FOCUS 차트코어 미러.
+    """Spot base conviction (0~100) — mirror of the futures FOCUS chart core.
 
     Args:
-        client: get_kline(market, interval, limit) 를 가진 거래소 client (선물/현물 무관, oldest-first).
-        market: 심볼 (예 "BTCUSDT" / "KRW-BTC").
-        cfg:    SpotGazuaConfig (672) — 가중치/임계 getattr.
-        direction: "LONG"(기본) / "SHORT"(미러, LONG-only 운영선 미사용).
-        btc_dir:   BTC 거시 방향 힌트 ("UP"/"DOWN"/"NEUTRAL"). 현재 base 미사용 (skip된 breadth 자리 — 인터페이스 보존).
+        client: exchange client with get_kline(market, interval, limit) (futures/spot agnostic, oldest-first).
+        market: symbol (e.g. "BTCUSDT" / "KRW-BTC").
+        cfg:    SpotGazuaConfig (672) — weights/thresholds via getattr.
+        direction: "LONG" (default) / "SHORT" (mirror, unused on the LONG-only operating line).
+        btc_dir:   BTC macro direction hint ("UP"/"DOWN"/"NEUTRAL"). Currently unused by base (placeholder for the skipped breadth — interface preserved).
 
     Returns:
         (base[0~100] float, breakdown[list[str]]).
 
-    skip(미포함): market_breadth(대표10)·news·macro_compass·decouple·regime·macro_short·CFID·
-                  context_engine·reentry_penalty·momentum_reversal — 선물 전용 인프라.
+    skip(excluded): market_breadth(top10), news, macro_compass, decouple, regime, macro_short, CFID,
+                  context_engine, reentry_penalty, momentum_reversal — futures-only infra.
     """
     score = 0.0
     bd: List[str] = []
     _dir = (direction or "LONG").upper()
-    _ = btc_dir  # 인터페이스 보존 (Phase2 breadth-adapt 후크)
+    _ = btc_dir  # interface preserved (Phase2 breadth-adapt hook)
 
-    # ── primary_tf candles (closed) — 다수 컴포넌트 공유 ──
+    # ── primary_tf candles (closed) — shared by many components ──
     raw_primary = _closed(_kl(client, market, str(getattr(cfg, "primary_tf", "240")), 121))
     candles_primary = _ohlcv(raw_primary)
     closes = _closes_of(raw_primary)
 
-    # ── baseline (ADX/MACD/BB 정규화 분모) ──
+    # ── baseline (ADX/MACD/BB normalization denominators) ──
     baseline = _coin_baseline_stats(client, market, candles_primary, cfg)
 
-    # ── 6) ADX 강도 (0~10) — 코인 baseline 정규화 ──
+    # ── 6) ADX strength (0~10) — normalized by coin baseline ──
     try:
         adx_data = _fetch_primary_adx(client, market, cfg)
         if adx_data:
@@ -757,7 +757,7 @@ def compute_base_conviction(client: Any, market: str, cfg: Any,
     except Exception as exc:
         logger.debug("[SPOT_CONV] adx component error %s: %s", market, exc)
 
-    # ── 9) BB 밴드폭% (0~4) — 코인 baseline 정규화 ──
+    # ── 9) BB bandwidth% (0~4) — normalized by coin baseline ──
     try:
         from app.strategy.indicators import bollinger_bands
         if len(closes) >= 20:
@@ -775,7 +775,7 @@ def compute_base_conviction(client: Any, market: str, cfg: Any,
     except Exception as exc:
         logger.debug("[SPOT_CONV] bb component error %s: %s", market, exc)
 
-    # ── 7) MACD hist% (0~8) — 방향정렬·코인 baseline 정규화 ──
+    # ── 7) MACD hist% (0~8) — direction-aligned, normalized by coin baseline ──
     try:
         from app.strategy.indicators import macd_hist_pair
         if len(closes) >= 35:
@@ -800,20 +800,20 @@ def compute_base_conviction(client: Any, market: str, cfg: Any,
     except Exception as exc:
         logger.debug("[SPOT_CONV] macd component error %s: %s", market, exc)
 
-    # ── H4 추세 점수 + H4 반전(M/W/H&S) — primary struct 1회 공유 ──
+    # ── H4 trend score + H4 reversal (M/W/H&S) — primary struct shared once ──
     try:
         if candles_primary and len(candles_primary) >= 10:
             from app.strategy.greenpen.market_structure import analyze_structure as _as
             struct = _as(candles_primary)
             trend_val = struct.trend.value if hasattr(struct.trend, 'value') else str(struct.trend)
             conf = struct.confidence if hasattr(struct, 'confidence') else 0
-            # H4 추세 점수
+            # H4 trend score
             _h4_dir = 1 if trend_val == "UPTREND" else -1 if trend_val == "DOWNTREND" else 0
             _h4_sign = 1 if _dir == "LONG" else -1
             _h4_s = _h4_dir * _h4_sign * float(conf) * float(getattr(cfg, "h4_trend_weight", 6.0))
             score += _h4_s
             bd.append(f"H4trend {trend_val}xconf{conf:.2f}={_h4_s:+.1f}")
-            # H4 반전
+            # H4 reversal
             try:
                 from app.strategy.greenpen.market_structure import detect_reversal as _drev
                 _rev = _drev(struct)
@@ -844,7 +844,7 @@ def compute_base_conviction(client: Any, market: str, cfg: Any,
         _zones = None
         logger.debug("[SPOT_CONV] pa weight error %s: %s", market, exc)
 
-    # ── 10.5) 5 STEP 완성도 (0~12) ──
+    # ── 10.5) 5 STEP completeness (0~12) ──
     try:
         _5s_score, _5s_label = _compute_pa_5step_score(client, market, _dir, _zones, cfg)
         if _5s_score > 0:
@@ -853,7 +853,7 @@ def compute_base_conviction(client: Any, market: str, cfg: Any,
     except Exception as exc:
         logger.debug("[SPOT_CONV] 5step error %s: %s", market, exc)
 
-    # ── 1) 멀티 TF 정렬 매트릭스 (±18 = net6×4 ×0.75) ──
+    # ── 1) Multi-TF alignment matrix (±18 = net6×4 ×0.75) ──
     try:
         mtf_s, mtf_label = _compute_mtf_alignment_matrix(client, market, _dir, candles_primary, cfg)
         mtf_v5 = mtf_s * 0.75
@@ -862,7 +862,7 @@ def compute_base_conviction(client: Any, market: str, cfg: Any,
     except Exception as exc:
         logger.debug("[SPOT_CONV] mtf alignment error %s: %s", market, exc)
 
-    # ── 2~5) 각 TF 변화율 (±, 6TF ×tf_weight ×0.75) ──
+    # ── 2~5) Per-TF change rate (±, 6TF ×tf_weight ×0.75) ──
     for tf in ("D1", "H4", "H1", "30", "15", "5"):
         try:
             cr_s, cr_label = _compute_tf_change_rate(client, market, tf, _dir, candles_primary, cfg, baseline)
@@ -880,7 +880,7 @@ def compute_base_conviction(client: Any, market: str, cfg: Any,
     except Exception as exc:
         logger.debug("[SPOT_CONV] rsi error %s: %s", market, exc)
 
-    # ── 11) S/R 가격 위치 v2 (0~8) ──
+    # ── 11) S/R price position v2 (0~8) ──
     try:
         sr_s, sr_label = _compute_sr_position_v2(market, _dir, candles_primary, _zones, cfg)
         score += sr_s
@@ -888,7 +888,7 @@ def compute_base_conviction(client: Any, market: str, cfg: Any,
     except Exception as exc:
         logger.debug("[SPOT_CONV] sr v2 error %s: %s", market, exc)
 
-    # ── 12) Volume 패턴 (0~5) ──
+    # ── 12) Volume pattern (0~5) ──
     try:
         vol_s, vol_label = _compute_volume_pattern_score(client, market, _dir, cfg)
         score += vol_s
@@ -896,19 +896,19 @@ def compute_base_conviction(client: Any, market: str, cfg: Any,
     except Exception as exc:
         logger.debug("[SPOT_CONV] vol pattern error %s: %s", market, exc)
 
-    # ── 14+15) Phase 3 Play C — 시간 ±4 + 코인 +2 (config 게이트) ──
+    # ── 14+15) Phase 3 Play C — time ±4 + coin +2 (config gate) ──
     if getattr(cfg, "phase3_context_bonus_enabled", True):
         try:
             _ctx_bonus = _compute_phase3_context_bonus(market)
             if _ctx_bonus != 0:
-                # LONG 우호 시간/코인 = 가점, SHORT 면 대칭 (미러)
+                # LONG-favorable time/coin = bonus, SHORT is symmetric (mirror)
                 _cb = _ctx_bonus if _dir == "LONG" else -_ctx_bonus
                 score += _cb
                 bd.append(f"Phase3 {_cb:+d}")
         except Exception as exc:
             logger.debug("[SPOT_CONV] phase3 ctx bonus error %s: %s", market, exc)
 
-    # ── 정규화: 합산 후 clamp(0,100) (선물 미러 — 게이트/cap 은 별도 단계) ──
+    # ── Normalization: clamp(0,100) after summing (futures mirror — gates/cap are a separate stage) ──
     base = max(0.0, min(100.0, float(score)))
     bd.insert(0, f"BASE={base:.1f} (raw_sum={score:.1f}, dir={_dir})")
     return base, bd

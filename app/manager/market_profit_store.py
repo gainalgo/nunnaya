@@ -2,8 +2,8 @@
 # File: app/manager/market_profit_store.py
 # ------------------------------------------------------------
 # MarketProfitStore
-# - 각 시장별 신호 통계를 저장하고 관리하는 모듈.
-# - buy/sell/hold 횟수를 카운트하여 UI/분석에 활용.
+# - Module that stores and manages per-market signal statistics.
+# - Counts buy/sell/hold occurrences for use in the UI/analysis.
 # ============================================================
 
 from __future__ import annotations
@@ -12,8 +12,8 @@ from typing import Dict, Any
 
 class MarketProfitStore:
     """
-    시장별 신호 통계를 기록하는 저장소.
-    구조 예시:
+    Store that records per-market signal statistics.
+    Example structure:
         stats = {
             "XRPUSDT": { "buy": 10, "sell": 9, "hold": 21 }
         }
@@ -23,14 +23,14 @@ class MarketProfitStore:
         self.stats: Dict[str, Dict[str, int]] = {}
 
     # --------------------------------------------------------
-    # 시장 초기화
+    # Initialize market
     # --------------------------------------------------------
     def _ensure(self, market: str):
         if market not in self.stats:
             self.stats[market] = {"buy": 0, "sell": 0, "hold": 0}
 
     # --------------------------------------------------------
-    # 신호 업데이트
+    # Update signal
     # --------------------------------------------------------
     def update(self, market: str, signal: str):
         self._ensure(market)
@@ -41,20 +41,20 @@ class MarketProfitStore:
         self.stats[market][signal] += 1
 
     # --------------------------------------------------------
-    # 조회
+    # Query
     # --------------------------------------------------------
     def get(self, market: str) -> Dict[str, int]:
         self._ensure(market)
         return dict(self.stats[market])
 
     # --------------------------------------------------------
-    # 전체 조회
+    # Query all
     # --------------------------------------------------------
     def all(self) -> Dict[str, Dict[str, int]]:
         return {m: dict(v) for m, v in self.stats.items()}
 
 
 # ------------------------------------------------------------
-# 글로벌 인스턴스
+# Global instance
 # ------------------------------------------------------------
 market_profit_store = MarketProfitStore()

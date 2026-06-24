@@ -1,27 +1,27 @@
 # ============================================================
 # PA 5 STEP Completeness Scorer
 # ------------------------------------------------------------
-# [Phase 5 — 2026-05-17] 부모님 비전: "PA = 추세 본체. 다른 추세
-# 지표 (MTF/변화율/ADX) = PA 의 간접 검증."
+# [Phase 5 — 2026-05-17] owner's vision: "PA = the trend body. Other
+# trend indicators (MTF/rate-of-change/ADX) = indirect validation of PA."
 #
-# PDF 출처: XAUUSD 88 (ครูลูกแก้ว 녹색 펜 시스템) p84-91 EP.6
-#  "M5 백만 브레이크" — 진입 자리 검증 5 단계
+# PDF source: XAUUSD 88 (ครูลูกแก้ว green-pen system) p84-91 EP.6
+#  "M5 million break" — 5-step entry-location validation
 #
-# ★ TF 정책 (2026-05-17 부모님 정정):
-#   봉 입력 = config.entry_tf (default M5) — 진입봉 패턴 검증.
-#   primary_tf(H1) 봉 사용 X. wrapper 가 entry_tf 자동 fetch + 변환.
-#   zones 는 primary_tf 기반 S/R (큰 흐름) 유지.
+# ★ TF policy (2026-05-17 corrected by owner):
+#   candle input = config.entry_tf (default M5) — entry-candle pattern check.
+#   Does NOT use primary_tf(H1) candles. The wrapper auto-fetches + converts entry_tf.
+#   zones stay as primary_tf-based S/R (the larger flow).
 #
-# 5 단계 + OVL 보너스 = 최대 12점:
-#   STEP 1  큰 캔들 + 강한 볼륨 (body 1.5×, vol 1.5×)   +2
-#   STEP 2  다음 작은 캔들 (body 0.6×, vol 감소)         +2
-#   STEP 3  ZONE REJECT (zone 가까이 + wick)             +2
-#   STEP 4  색 반대 변경 (직전 ≠ 진입색)                  +2
-#   STEP 5  RETEST (break 후 zone 재거부)                +2
-#   OVL     2차 break 자리 (1차 함정, 2차 진짜)          +2
+# 5 steps + OVL bonus = max 12 points:
+#   STEP 1  big candle + strong volume (body 1.5×, vol 1.5×)   +2
+#   STEP 2  next small candle (body 0.6×, vol decreasing)      +2
+#   STEP 3  ZONE REJECT (close to zone + wick)                 +2
+#   STEP 4  color flip (previous ≠ entry color)                +2
+#   STEP 5  RETEST (zone re-rejection after break)             +2
+#   OVL     second break location (first is a trap, second real) +2
 #
-# 부모님 격언 (PDF):
-#   "1차 서두르지 말 것 — 2차가 항상 더 멀리 간다"
+# owner's adage (PDF):
+#   "Don't rush the first — the second always goes farther"
 # ============================================================
 from __future__ import annotations
 
@@ -31,8 +31,8 @@ from typing import List, Optional, Tuple
 def _normalize_candles(candles: list) -> List[dict]:
     """OHLCV object / [o,h,l,c,v] tuple / dict → uniform dict list.
 
-    focus_manager 의 candles_primary 는 _compute_pa_weight 패턴과 동일하게
-    OHLCV-like (c[0]=open) 형식으로 들어옴.
+    focus_manager's candles_primary arrives in OHLCV-like (c[0]=open) form,
+    identical to the _compute_pa_weight pattern.
     """
     out: List[dict] = []
     for c in candles:
@@ -80,7 +80,7 @@ def _is_red(k: dict) -> bool:
 
 
 def _atr_est(candles: List[dict], n: int = 14) -> float:
-    """ATR 근사 — 최근 n봉 (H - L) 평균."""
+    """ATR approximation — average of (H - L) over the last n candles."""
     if not candles:
         return 0.0
     sample = candles[-n:] if len(candles) >= n else candles
@@ -90,15 +90,15 @@ def _atr_est(candles: List[dict], n: int = 14) -> float:
     return sum(hl) / len(hl)
 
 
-# ── STEP 1: 큰 캔들 + 강한 볼륨 ──────────────────────────────
+# ── STEP 1: big candle + strong volume ──────────────────────
 
 def step1_big_candle(candles: List[dict], body_mult: float = 1.5,
                       vol_mult: float = 1.5) -> Tuple[bool, int, float, float]:
-    """직전 2~3봉 중 가장 큰 캔들이 baseline (이전 5봉) 평균 대비
-    body 1.5× + volume 1.5× 만족하는지.
+    """Whether the biggest of the last 2~3 candles satisfies
+    body 1.5× + volume 1.5× vs the baseline (previous 5 candles) average.
 
     Returns: (pass, big_idx, big_body, big_vol)
-      big_idx: 0 if 패스 X, else 인덱스 (-3 또는 -2)
+      big_idx: 0 if not passed, else the index (-3 or -2)
     """
     if len(candles) < 8:
         return False, 0, 0.0, 0.0
@@ -123,7 +123,7 @@ def step1_big_candle(candles: List[dict], body_mult: float = 1.5,
 
     body_ok = best_body >= avg_body * body_mult
     if avg_vol <= 0:
-        vol_ok = True  # volume 없는 데이터 = 검증 면제
+        vol_ok = True  # data without volume = check exempted
     else:
         vol_ok = best_vol >= avg_vol * vol_mult
 
@@ -132,12 +132,12 @@ def step1_big_candle(candles: List[dict], body_mult: float = 1.5,
     return False, 0, best_body, best_vol
 
 
-# ── STEP 2: 다음 작은 캔들 (약함) ────────────────────────────
+# ── STEP 2: next small candle (weak) ────────────────────────
 
 def step2_small_next(candles: List[dict], big_idx: int, big_body: float,
                       big_vol: float, body_ratio: float = 0.6) -> bool:
-    """STEP 1 큰 캔들 *다음 봉* 이 body 0.6× 이하 + volume 감소.
-    big_idx == 0 (STEP 1 fail) 이면 무조건 False.
+    """The candle *after* the STEP 1 big candle has body 0.6× or less + decreasing volume.
+    Always False if big_idx == 0 (STEP 1 fail).
     """
     if big_idx == 0 or big_body <= 0:
         return False
@@ -159,10 +159,10 @@ def step2_small_next(candles: List[dict], big_idx: int, big_body: float,
 def step3_zone_reject(candles: List[dict], direction: str,
                        zones: Optional[Tuple[float, float]],
                        atr_proximity: float = 0.5) -> bool:
-    """최근 봉 [-2] 또는 [-1] 이 zone (지지/저항) 0.5×ATR 안에서 wick 거부.
+    """Recent candle [-2] or [-1] rejects with a wick within 0.5×ATR of the zone (support/resistance).
 
-    LONG : low 가 support 근처 + lower_wick > body (아래 거부)
-    SHORT: high 가 resistance 근처 + upper_wick > body (위 거부)
+    LONG : low near support + lower_wick > body (rejection from below)
+    SHORT: high near resistance + upper_wick > body (rejection from above)
     """
     if not zones or len(zones) < 2 or len(candles) < 4:
         return False
@@ -195,13 +195,13 @@ def step3_zone_reject(candles: List[dict], direction: str,
     return False
 
 
-# ── STEP 4: 색 반대 변경 ─────────────────────────────────────
+# ── STEP 4: color flip ───────────────────────────────────────
 
 def step4_color_flip(candles: List[dict], direction: str) -> bool:
-    """직전 2~3봉 평균 색 ≠ 최근 봉 진입 색.
+    """Average color of the last 2~3 candles ≠ the latest candle's entry color.
 
-    LONG  진입 색 = GREEN — 직전 RED 이상 → 최근 GREEN
-    SHORT 진입 색 = RED   — 직전 GREEN 이상 → 최근 RED
+    LONG  entry color = GREEN — previous mostly RED → latest GREEN
+    SHORT entry color = RED   — previous mostly GREEN → latest RED
     """
     if len(candles) < 4:
         return False
@@ -223,15 +223,15 @@ def step4_color_flip(candles: List[dict], direction: str) -> bool:
     return False
 
 
-# ── STEP 5: RETEST (break 후 zone 재거부) ───────────────────
+# ── STEP 5: RETEST (zone re-rejection after break) ──────────
 
 def step5_retest(candles: List[dict], direction: str,
                   zones: Optional[Tuple[float, float]],
                   lookback: int = 10, atr_proximity: float = 0.5) -> bool:
-    """최근 lookback 봉 안에서 break + retest 시퀀스 인식.
+    """Recognize a break + retest sequence within the last lookback candles.
 
-    LONG : support 위에서 close → 하향 retest (low 가 support 근처) → 거부 (close 위)
-    SHORT: resistance 아래 close → 상향 retest (high 가 resistance 근처) → 거부 (close 아래)
+    LONG : close above support → downward retest (low near support) → rejection (close above)
+    SHORT: close below resistance → upward retest (high near resistance) → rejection (close below)
     """
     if not zones or len(zones) < 2 or len(candles) < 5:
         return False
@@ -254,7 +254,7 @@ def step5_retest(candles: List[dict], direction: str,
             for j in range(i + 1, len(window)):
                 cj = window[j]
                 if abs(cj['l'] - support) <= atr * atr_proximity:
-                    # 거부: lower_wick > body OR (close>=open AND lower_wick > 0)
+                    # rejection: lower_wick > body OR (close>=open AND lower_wick > 0)
                     body = abs(cj['c'] - cj['o'])
                     lower_wick = min(cj['o'], cj['c']) - cj['l']
                     if cj['c'] > support and (lower_wick > body or (cj['c'] >= cj['o'] and lower_wick > 0)):
@@ -275,16 +275,16 @@ def step5_retest(candles: List[dict], direction: str,
     return False
 
 
-# ── OVL 보너스: 2차 break 자리 ───────────────────────────────
+# ── OVL bonus: second break location ─────────────────────────
 
 def ovl_bonus(candles: List[dict], direction: str,
               zones: Optional[Tuple[float, float]],
               lookback: int = 12) -> bool:
-    """1차 break 후 retest → 2차 break (더 멀리). 부모님 격언:
-    "1차 서두르지 말 것 — 2차가 항상 더 멀리 간다"
+    """First break → retest → second break (farther). owner's adage:
+    "Don't rush the first — the second always goes farther"
 
-    LONG : support 위 close 2회 + 2번째가 1번째보다 더 높음
-    SHORT: resistance 아래 close 2회 + 2번째가 1번째보다 더 낮음
+    LONG : close above support twice + second higher than first
+    SHORT: close below resistance twice + second lower than first
     """
     if not zones or len(zones) < 2 or len(candles) < 6:
         return False
@@ -295,7 +295,7 @@ def ovl_bonus(candles: List[dict], direction: str,
     window = candles[-lookback:] if len(candles) >= lookback else candles
 
     if dir_up == "LONG":
-        # break = 실제 돌파 봉 (close > support AND open/low 가 zone 아래)
+        # break = actual breakout candle (close > support AND open/low below zone)
         breaks = [c['c'] for c in window
                   if c['c'] > support and (c['o'] <= support or c['l'] <= support)]
         if len(breaks) < 2:
@@ -318,11 +318,11 @@ def ovl_bonus(candles: List[dict], direction: str,
 
 def _pa_5step_score_impl(direction: str, candles_primary: list,
                           zones: Optional[Tuple[float, float]] = None) -> Tuple[int, str]:
-    """5 STEP 완성도 점수 + 라벨 — focus_manager 의 self._compute_pa_5step_score 의 순수 구현체.
+    """5-STEP completeness score + label — the pure implementation behind focus_manager's self._compute_pa_5step_score.
 
     Returns: (score 0~12, label)
       score: int 0~12
-      label: "S1+/S2+/S3-/S4+/S5+/OVL- → 8"  (- 는 표기만, 점수는 0)
+      label: "S1+/S2+/S3-/S4+/S5+/OVL- → 8"  (- is display-only, scores 0)
     """
     dir_up = (direction or "").upper()
     if dir_up not in ("LONG", "SHORT"):
@@ -347,7 +347,7 @@ def _pa_5step_score_impl(direction: str, candles_primary: list,
     s5_pass = step5_retest(candles, dir_up, zones)
     s5_score = 2 if s5_pass else 0
 
-    # OVL 보너스 — STEP 1+5 양쪽 OK 일 때만 가산 (단순 break 누적 방지)
+    # OVL bonus — added only when both STEP 1+5 pass (prevents simple break accumulation)
     ovl_pass = ovl_bonus(candles, dir_up, zones) if (s1_pass and s5_pass) else False
     ovl_score = 2 if ovl_pass else 0
 

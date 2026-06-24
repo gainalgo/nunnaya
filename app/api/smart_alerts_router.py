@@ -2,7 +2,7 @@
 # File: app/api/smart_alerts_router.py
 # Autocoin OS v3-H — Smart Alerts API
 # ------------------------------------------------------------
-# 스마트 알림 시스템 API 엔드포인트
+# Smart alert system API endpoints
 # ============================================================
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/smart-alerts", tags=["smart-alerts"])
 
 @router.get("/status")
 def get_smart_alerts_status(request: Request) -> Dict:
-    """스마트 알림 시스템 상태 조회"""
+    """Get smart alert system status"""
     
     system = request.app.state.system
     if not hasattr(system, "smart_alert_manager") or not system.smart_alert_manager:
@@ -32,7 +32,7 @@ def get_smart_alerts_status(request: Request) -> Dict:
 
 @router.get("/loss-streaks")
 def get_loss_streaks(request: Request) -> Dict:
-    """연속 손실 현황"""
+    """Consecutive loss status"""
     
     system = request.app.state.system
     if not hasattr(system, "smart_alert_manager") or not system.smart_alert_manager:
@@ -56,7 +56,7 @@ def get_loss_streaks(request: Request) -> Dict:
 
 @router.post("/daily-report/send")
 def send_daily_report_now(request: Request) -> Dict:
-    """일일 리포트 즉시 발송"""
+    """Send daily report immediately"""
     
     system = request.app.state.system
     if not hasattr(system, "smart_alert_manager") or not system.smart_alert_manager:
@@ -86,7 +86,7 @@ def send_daily_report_now(request: Request) -> Dict:
 
 @router.get("/daily-report")
 def get_daily_report(request: Request) -> Dict:
-    """일일 리포트 조회 (발송 안함)"""
+    """Get daily report (without sending)"""
     
     system = request.app.state.system
     if not hasattr(system, "smart_alert_manager") or not system.smart_alert_manager:
@@ -113,11 +113,11 @@ def get_daily_report(request: Request) -> Dict:
 
 @router.post("/test-alert")
 def test_alert(request: Request) -> Dict:
-    """테스트 알림 발송"""
+    """Send test alert"""
     
     from app.notify.telegram import send_telegram
     
-    msg = "🔔 테스트 알림\n\nAutocoin OS v3-H Smart Alert System이 정상 작동 중입니다."
+    msg = "🔔 Test Alert\n\nAutocoin OS v3-H Smart Alert System is working normally."
     send_telegram(msg, cooldown_key="test_alert")
     
     return {"success": True, "message": "Test alert sent"}

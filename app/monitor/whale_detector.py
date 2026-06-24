@@ -1,10 +1,10 @@
 """
 Whale Activity Detector
-고래 거래량 감지 — 비정상적 거래량 + 가격 변동 패턴으로 대형 플레이어 활동 추정
+Detects whale volume — estimates large-player activity from abnormal volume + price-move patterns
 
-사용처:
-  1. hyper_system.py Smart Allocation — whale_mult로 예산 가중치 조절
-  2. reserved_selector.py — 전략별 코인 선발 스코어 가감점
+Used by:
+  1. hyper_system.py Smart Allocation — adjusts budget weight via whale_mult
+  2. reserved_selector.py — per-strategy coin selection score bonus/penalty
 """
 
 import logging
@@ -17,23 +17,23 @@ logger = logging.getLogger(__name__)
 
 
 class WhaleSignal(Enum):
-    """고래 신호 유형"""
-    NONE = "none"              # 정상 거래량
-    WHALE_BUY = "whale_buy"    # 거래량 폭증 + 가격 상승 → 고래 매수 추정
-    WHALE_SELL = "whale_sell"  # 거래량 폭증 + 가격 하락 → 고래 매도 추정
-    WHALE_CHURN = "whale_churn"  # 거래량 폭증 + 가격 횡보 → 고래 교체/세탁
+    """Whale signal types"""
+    NONE = "none"              # normal volume
+    WHALE_BUY = "whale_buy"    # volume surge + price up → estimated whale buy
+    WHALE_SELL = "whale_sell"  # volume surge + price down → estimated whale sell
+    WHALE_CHURN = "whale_churn"  # volume surge + price flat → whale rotation/wash
 
 
 @dataclass
 class WhaleInfo:
-    """고래 감지 결과"""
+    """Whale detection result"""
     signal: WhaleSignal = WhaleSignal.NONE
-    spike_ratio: float = 0.0       # 거래량 / 평균 거래량
-    price_change_pct: float = 0.0  # 가격 변화율 (%)
+    spike_ratio: float = 0.0       # volume / average volume
+    price_change_pct: float = 0.0  # price change rate (%)
     confidence: float = 0.0        # 0.0 ~ 1.0
 
 
-# 전략별 고래 신호 스코어 가감점
+# Per-strategy whale signal score bonus/penalty
 # (whale_buy_bonus, whale_sell_bonus, whale_churn_bonus)
 STRATEGY_WHALE_SCORES: Dict[str, Dict[str, float]] = {
     "LIGHTNING": {"whale_buy": +5.0, "whale_sell": +5.0, "whale_churn": +2.0},
@@ -48,24 +48,24 @@ STRATEGY_WHALE_SCORES: Dict[str, Dict[str, float]] = {
 
 class WhaleDetector:
     """
-    고래 활동 감지기
+    Whale activity detector
 
-    판단 기준:
-    - 거래량이 평균 대비 3배 이상 → 고래 활동 의심
-    - 거래량 3배 이상 + 가격 +3% 이상 → whale_buy
-    - 거래량 3배 이상 + 가격 -3% 이하 → whale_sell
-    - 거래량 3배 이상 + 가격 변동 ±3% 이내 → whale_churn
-    - 거래량 2~3배 → 낮은 confidence로 같은 판단
+    Decision criteria:
+    - volume >= 3x average → suspected whale activity
+    - volume >= 3x + price >= +3% → whale_buy
+    - volume >= 3x + price <= -3% → whale_sell
+    - volume >= 3x + price move within ±3% → whale_churn
+    - volume 2~3x → same decision with lower confidence
     """
 
-    STRONG_SPIKE = 3.0    # 강한 거래량 급등 배율
-    MEDIUM_SPIKE = 2.0    # 중간 거래량 급등 배율
-    PRICE_THRESHOLD = 3.0  # 가격 변동 판단 기준 (%)
+    STRONG_SPIKE = 3.0    # strong volume-spike multiple
+    MEDIUM_SPIKE = 2.0    # medium volume-spike multiple
+    PRICE_THRESHOLD = 3.0  # price-move decision threshold (%)
 
     def __init__(self):
-        # 마켓별 최근 감지 결과 캐시
+        # cache of recent detection results per market
         self._cache: Dict[str, tuple] = {}  # market -> (timestamp, WhaleInfo)
-        self._cache_ttl = 300  # 5분 캐시
+        self._cache_ttl = 300  # 5-minute cache
         logger.info("WhaleDetector initialized")
 
     def detect(
@@ -76,18 +76,18 @@ class WhaleDetector:
         market: str = "",
     ) -> WhaleInfo:
         """
-        고래 활동 감지
+        Detect whale activity
 
         Args:
-            vol_24h: 24시간 거래량 (USDT)
-            avg_vol: 평균 거래량 (USDT) — 7일 평균 또는 시장 평균
-            price_change_pct: 24시간 가격 변화율 (%)
-            market: 마켓 코드 (캐시용, 선택)
+            vol_24h: 24-hour volume (USDT)
+            avg_vol: average volume (USDT) — 7-day average or market average
+            price_change_pct: 24-hour price change rate (%)
+            market: market code (for cache, optional)
 
         Returns:
             WhaleInfo
         """
-        # 캐시 확인
+        # check cache
         if market:
             cached = self._cache.get(market)
             if cached and (time.time() - cached[0]) < self._cache_ttl:
@@ -102,18 +102,18 @@ class WhaleDetector:
         info.spike_ratio = round(spike_ratio, 2)
 
         if spike_ratio < self.MEDIUM_SPIKE:
-            # 거래량 정상 → 고래 아님
+            # normal volume → not a whale
             if market:
                 self._cache[market] = (time.time(), info)
             return info
 
-        # confidence: 2배=0.3, 3배=0.6, 5배+=1.0
+        # confidence: 2x=0.3, 3x=0.6, 5x+=1.0
         if spike_ratio >= self.STRONG_SPIKE:
             info.confidence = min(1.0, 0.6 + (spike_ratio - self.STRONG_SPIKE) * 0.1)
         else:
             info.confidence = 0.3 + (spike_ratio - self.MEDIUM_SPIKE) * 0.3
 
-        # 신호 판단
+        # determine signal
         if price_change_pct >= self.PRICE_THRESHOLD:
             info.signal = WhaleSignal.WHALE_BUY
         elif price_change_pct <= -self.PRICE_THRESHOLD:
@@ -133,19 +133,19 @@ class WhaleDetector:
 
     def get_budget_weight(self, info: WhaleInfo) -> float:
         """
-        예산 배분 가중치 반환 (hyper_system Smart Allocation용)
+        Return budget allocation weight (for hyper_system Smart Allocation)
 
-        - whale_buy: 예산 소폭 확대 (세력 매집 = 추세 추종)
-        - whale_sell: 예산 소폭 축소 (위험)
-        - whale_churn: 중립
-        - none: 1.0 (변화 없음)
+        - whale_buy: slightly increase budget (smart-money accumulation = trend following)
+        - whale_sell: slightly decrease budget (risk)
+        - whale_churn: neutral
+        - none: 1.0 (no change)
         """
         if info.signal == WhaleSignal.NONE:
             return 1.0
         if info.signal == WhaleSignal.WHALE_BUY:
-            return 1.0 + (0.2 * info.confidence)  # 최대 1.2
+            return 1.0 + (0.2 * info.confidence)  # max 1.2
         if info.signal == WhaleSignal.WHALE_SELL:
-            return 1.0 - (0.15 * info.confidence)  # 최소 0.85
+            return 1.0 - (0.15 * info.confidence)  # min 0.85
         # CHURN
         return 1.0
 
@@ -155,14 +155,14 @@ class WhaleDetector:
         strategy: str,
     ) -> float:
         """
-        전략별 코인 선발 스코어 가감점 (reserved_selector용)
+        Per-strategy coin selection score bonus/penalty (for reserved_selector)
 
         Args:
-            info: WhaleInfo 감지 결과
-            strategy: 전략명 (LIGHTNING, SNIPER, etc.)
+            info: WhaleInfo detection result
+            strategy: strategy name (LIGHTNING, SNIPER, etc.)
 
         Returns:
-            스코어 가감점 (양수=가점, 음수=감점)
+            score adjustment (positive=bonus, negative=penalty)
         """
         if info.signal == WhaleSignal.NONE:
             return 0.0
@@ -170,16 +170,16 @@ class WhaleDetector:
         scores = STRATEGY_WHALE_SCORES.get(strategy.upper(), {})
         base_bonus = scores.get(info.signal.value, 0.0)
 
-        # confidence 반영
+        # apply confidence
         return round(base_bonus * info.confidence, 2)
 
 
-# 싱글톤
+# singleton
 _INSTANCE: Optional[WhaleDetector] = None
 
 
 def get_whale_detector() -> WhaleDetector:
-    """WhaleDetector 싱글톤 인스턴스"""
+    """WhaleDetector singleton instance"""
     global _INSTANCE
     if _INSTANCE is None:
         _INSTANCE = WhaleDetector()

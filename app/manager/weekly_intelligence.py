@@ -1,9 +1,9 @@
-"""Weekly Intelligence Report — 형 서버가 동생 서버에게 주는 주간 분석 선물.
+"""Weekly Intelligence Report — a weekly analysis gift from this agent's server to the sibling server.
 
-매주 월요일 07:00 KST 자동 생성. 일별 스냅샷(focus_daily_snapshots/)을
-집계하여 패턴 발견 + 실행 가능한 추천을 생성.
+Auto-generated every Monday 07:00 KST. Aggregates daily snapshots
+(focus_daily_snapshots/) to discover patterns + produce actionable recommendations.
 
-runtime/focus_weekly_reports/YYYY-WNN.json 형태로 누적.
+Accumulated as runtime/focus_weekly_reports/YYYY-WNN.json.
 """
 import json
 import os
@@ -23,11 +23,11 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 유틸
+# Utilities
 # ---------------------------------------------------------------------------
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
-    """스냅샷에서 누락/None 방어."""
+    """Guard against missing/None values in snapshots."""
     if val is None:
         return default
     try:
@@ -56,8 +56,8 @@ def _iso_week_label(date_str: str) -> str:
 
 
 def _week_dates(year: int, week: int) -> Tuple[_dt.date, _dt.date]:
-    """ISO year+week → (월요일, 일요일) 범위."""
-    # ISO week 1의 월요일 구하기
+    """ISO year+week → (Monday, Sunday) range."""
+    # Find the Monday of ISO week 1
     jan4 = _dt.date(year, 1, 4)
     start_of_w1 = jan4 - _dt.timedelta(days=jan4.weekday())
     monday = start_of_w1 + _dt.timedelta(weeks=week - 1)
@@ -66,7 +66,7 @@ def _week_dates(year: int, week: int) -> Tuple[_dt.date, _dt.date]:
 
 
 def _parse_week_label(week_label: str) -> Tuple[int, int]:
-    """'2026-W16' → (2026, 16). 실패 시 (0, 0)."""
+    """'2026-W16' → (2026, 16). Returns (0, 0) on failure."""
     try:
         parts = week_label.split("-W")
         return int(parts[0]), int(parts[1])
@@ -79,10 +79,10 @@ def _parse_week_label(week_label: str) -> Tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 def build_weekly_report(snapshots: List[Dict], week_label: str) -> Dict[str, Any]:
-    """일별 스냅샷 리스트 → 주간 리포트 dict.
+    """List of daily snapshots → weekly report dict.
 
-    빈 snapshots도 허용 (거래 없는 주).
-    스냅샷 필드 누락에 안전.
+    Empty snapshots are allowed (a week with no trades).
+    Safe against missing snapshot fields.
     """
     year, week = _parse_week_label(week_label)
     if year and week:
@@ -96,7 +96,7 @@ def build_weekly_report(snapshots: List[Dict], week_label: str) -> Dict[str, Any
     if not snapshots:
         return _empty_report(week_label, period_start, period_end)
 
-    # --- 기본 집계 ---
+    # --- Base aggregation ---
     daily_pnls: List[float] = []
     total_pnl = 0.0
     total_trades = 0
@@ -108,13 +108,13 @@ def build_weekly_report(snapshots: List[Dict], week_label: str) -> Dict[str, Any
     best_day: Dict[str, Any] = {"date": "", "pnl": float("-inf")}
     worst_day: Dict[str, Any] = {"date": "", "pnl": float("inf")}
 
-    # 시간대별 집계 (KST 0~23)
+    # Per-hour aggregation (KST 0~23)
     hourly_agg: Dict[int, float] = {h: 0.0 for h in range(24)}
 
-    # 코인별 집계
+    # Per-coin aggregation
     coin_agg: Dict[str, Dict[str, Any]] = {}
 
-    # 방향별 집계
+    # Per-direction aggregation
     long_pnl = 0.0
     long_trades = 0
     long_wins = 0
@@ -122,13 +122,13 @@ def build_weekly_report(snapshots: List[Dict], week_label: str) -> Dict[str, Any
     short_trades = 0
     short_wins = 0
 
-    # DT 비교 집계
+    # DT comparison aggregation
     dt_pnl = 0.0
     dt_trades = 0
     no_dt_pnl = 0.0
     no_dt_trades = 0
 
-    # 청산 사유 집계
+    # Exit-reason aggregation
     exit_reasons: Dict[str, int] = {}
 
     for snap in snapshots:
@@ -148,14 +148,14 @@ def build_weekly_report(snapshots: List[Dict], week_label: str) -> Dict[str, Any
             profitable_days += 1
         elif pnl < 0:
             losing_days += 1
-        # pnl == 0: 수익일도 손실일도 아님
+        # pnl == 0: neither a profitable nor a losing day
 
         if pnl > best_day["pnl"]:
             best_day = {"date": date, "pnl": round(pnl, 4)}
         if pnl < worst_day["pnl"]:
             worst_day = {"date": date, "pnl": round(pnl, 4)}
 
-        # 시간대별 PnL (hourly_kst: {"0": {"pnl": ..., "trades": ...}, ...})
+        # Per-hour PnL (hourly_kst: {"0": {"pnl": ..., "trades": ...}, ...})
         hourly = snap.get("hourly_kst", {})
         for h_str, h_data in hourly.items():
             try:
@@ -164,7 +164,7 @@ def build_weekly_report(snapshots: List[Dict], week_label: str) -> Dict[str, Any
             except (ValueError, AttributeError):
                 continue
 
-        # 코인별 (by_market: {"BTCUSDT": {"pnl": ..., "trades": ..., "wins": ..., "losses": ...}})
+        # Per-coin (by_market: {"BTCUSDT": {"pnl": ..., "trades": ..., "wins": ..., "losses": ...}})
         by_market = snap.get("by_market", {})
         for coin, cdata in by_market.items():
             if not isinstance(cdata, dict):
@@ -176,48 +176,48 @@ def build_weekly_report(snapshots: List[Dict], week_label: str) -> Dict[str, Any
             coin_agg[coin]["wins"] += _safe_int(cdata.get("wins"))
             coin_agg[coin]["losses"] += _safe_int(cdata.get("losses"))
 
-        # 방향별
+        # Per-direction
         long_pnl += _safe_float(snap.get("long_pnl"))
         long_trades += _safe_int(snap.get("long_trades"))
         short_pnl += _safe_float(snap.get("short_pnl"))
         short_trades += _safe_int(snap.get("short_trades"))
 
-        # 일별 승수에서 방향별 승 구분은 스냅샷에 없으므로 hourly wins 근사 사용 불가
-        # → 코인별 wins에서 LONG/SHORT 재분리 불가 → 전체 승률로 대체
-        # (실제 방향별 win 필드가 스냅샷에 없으므로 거래 건수 기반 비율 추정)
+        # Snapshots lack per-direction win counts, so hourly-wins approximation is unusable
+        # → cannot re-split LONG/SHORT from per-coin wins → fall back to overall win rate
+        # (no actual per-direction win field in snapshots, so estimate a ratio from trade counts)
 
-        # DT 비교
+        # DT comparison
         dt_pnl += _safe_float(snap.get("dt_pnl"))
         dt_trades += _safe_int(snap.get("dt_trades"))
         no_dt_pnl += _safe_float(snap.get("no_dt_pnl"))
         no_dt_trades += _safe_int(snap.get("no_dt_trades"))
 
-        # 청산 사유 집계
+        # Exit-reason aggregation
         by_reason = snap.get("by_exit_reason", {})
         for reason, rdata in by_reason.items():
             if isinstance(rdata, dict):
                 exit_reasons[reason] = exit_reasons.get(reason, 0) + _safe_int(rdata.get("count"))
 
-    # --- 파생 지표 ---
+    # --- Derived metrics ---
     days_count = len(snapshots)
     avg_daily_pnl = round(total_pnl / days_count, 4) if days_count > 0 else 0.0
     overall_win_rate = round(total_wins / total_trades * 100, 1) if total_trades > 0 else 0.0
 
-    # consistency_score: 수익일 비율(60%) + PnL 안정성(40%)
+    # consistency_score: profitable-day ratio (60%) + PnL stability (40%)
     consistency_score = _calc_consistency(daily_pnls, profitable_days, days_count)
 
-    # best_day / worst_day 정리 (빈 데이터 방어)
+    # Clean up best_day / worst_day (guard against empty data)
     if best_day["pnl"] == float("-inf"):
         best_day = {"date": "", "pnl": 0.0}
     if worst_day["pnl"] == float("inf"):
         worst_day = {"date": "", "pnl": 0.0}
 
-    # 시간대별 TOP/BOTTOM 3
+    # TOP/BOTTOM 3 hours
     sorted_hours = sorted(hourly_agg.items(), key=lambda x: x[1], reverse=True)
     best_hours = [{"hour": h, "pnl": round(p, 4)} for h, p in sorted_hours[:3]]
     worst_hours = [{"hour": h, "pnl": round(p, 4)} for h, p in sorted_hours[-3:]]
 
-    # 코인 순위
+    # Coin ranking
     sorted_coins = sorted(coin_agg.items(), key=lambda x: x[1]["pnl"], reverse=True)
     best_coins = [
         {
@@ -246,7 +246,7 @@ def build_weekly_report(snapshots: List[Dict], week_label: str) -> Dict[str, Any
         for c, d in sorted_coins
     ]
 
-    # 방향별 승률 추정 (코인별 세부 방향 없으므로 전체 비율로 안분)
+    # Estimate per-direction win rate (no per-coin direction detail, so apportion by overall ratio)
     long_win_rate = _estimate_direction_wr(long_trades, total_trades, overall_win_rate)
     short_win_rate = _estimate_direction_wr(short_trades, total_trades, overall_win_rate)
 
@@ -290,52 +290,52 @@ def build_weekly_report(snapshots: List[Dict], week_label: str) -> Dict[str, Any
             },
             "exit_reasons": exit_reasons,
         },
-        "recommendations": [],  # generate_recommendations 로 채움
+        "recommendations": [],  # filled in by generate_recommendations
         "generated_ts": time.time(),
     }
 
-    # 추천 생성 + 삽입
+    # Generate + insert recommendations
     report["recommendations"] = generate_recommendations(report)
     return report
 
 
 def _calc_consistency(daily_pnls: List[float], profitable_days: int, days_count: int) -> float:
-    """일관성 점수 (0~100).
+    """Consistency score (0~100).
 
-    구성:
-    - 수익일 비율 60% (전체일 대비 수익일 비율 × 60)
-    - PnL 안정성 40% (변동계수 역수 기반, 낮을수록 좋음)
+    Composition:
+    - Profitable-day ratio 60% (profitable days / total days × 60)
+    - PnL stability 40% (based on inverse coefficient of variation; lower is better)
     """
     if days_count == 0:
         return 0.0
 
-    # 수익일 점수 (60점 만점)
+    # Profitable-day score (max 60 points)
     profit_ratio_score = (profitable_days / days_count) * 60.0
 
-    # PnL 안정성 점수 (40점 만점)
+    # PnL stability score (max 40 points)
     if len(daily_pnls) < 2:
-        stability_score = 20.0  # 데이터 부족 시 중간값
+        stability_score = 20.0  # mid value when data is insufficient
     else:
         mean_pnl = statistics.mean(daily_pnls)
         stdev_pnl = statistics.stdev(daily_pnls)
 
         if abs(mean_pnl) < 0.001:
-            # 평균 0에 가까우면 stdev만으로 판단
+            # When mean is near zero, judge by stdev alone
             stability_score = max(0, 40.0 - stdev_pnl * 2)
         else:
-            # 변동계수 (CV = stdev / |mean|): 낮을수록 안정적
+            # Coefficient of variation (CV = stdev / |mean|): lower is more stable
             cv = stdev_pnl / abs(mean_pnl) if abs(mean_pnl) > 0 else 10.0
-            # CV 0 → 40점, CV 2+ → 0점 (선형 감소)
+            # CV 0 → 40 points, CV 2+ → 0 points (linear decline)
             stability_score = max(0, min(40.0, (1 - cv / 2.0) * 40.0))
 
     return min(100.0, profit_ratio_score + stability_score)
 
 
 def _estimate_direction_wr(dir_trades: int, total_trades: int, overall_wr: float) -> float:
-    """방향별 승률 추정 (스냅샷에 방향별 win_count 미포함 시).
+    """Estimate per-direction win rate (when snapshots lack a per-direction win_count).
 
-    방향별 거래 비중이 전체의 60% 이상이면 전체 승률에 가깝다고 가정.
-    실제 데이터 없으면 전체 승률을 그대로 반환.
+    Assume that if a direction's trade share is 60%+ of the total, its win rate
+    is close to the overall win rate. Without actual data, return the overall win rate as-is.
     """
     if dir_trades == 0 or total_trades == 0:
         return 0.0
@@ -343,7 +343,7 @@ def _estimate_direction_wr(dir_trades: int, total_trades: int, overall_wr: float
 
 
 def _empty_report(week_label: str, period_start: str, period_end: str) -> Dict[str, Any]:
-    """거래 없는 주간 빈 리포트."""
+    """Empty report for a week with no trades."""
     return {
         "week": week_label,
         "period": {"start": period_start, "end": period_end},
@@ -371,7 +371,7 @@ def _empty_report(week_label: str, period_start: str, period_end: str) -> Dict[s
             "dt_stats": {"dt_pnl": 0.0, "dt_trades": 0, "no_dt_pnl": 0.0, "no_dt_trades": 0},
             "exit_reasons": {},
         },
-        "recommendations": ["📭 이번 주 거래 데이터가 없습니다."],
+        "recommendations": ["📭 No trade data for this week."],
         "generated_ts": time.time(),
     }
 
@@ -381,7 +381,7 @@ def _empty_report(week_label: str, period_start: str, period_end: str) -> Dict[s
 # ---------------------------------------------------------------------------
 
 def save_weekly_report(report: Dict[str, Any], week_label: str) -> str:
-    """주간 리포트 저장. 반환: 파일 경로."""
+    """Save the weekly report. Returns: file path."""
     path = os.path.join(REPORT_DIR, f"{week_label}.json")
     safe_write_json(path, report)
     pnl = report.get("summary", {}).get("total_pnl", 0)
@@ -395,7 +395,7 @@ def save_weekly_report(report: Dict[str, Any], week_label: str) -> str:
 # ---------------------------------------------------------------------------
 
 def load_weekly_report(week_label: str) -> Optional[Dict]:
-    """특정 주간 리포트 로드."""
+    """Load a specific weekly report."""
     path = os.path.join(REPORT_DIR, f"{week_label}.json")
     data = safe_load_json(path, default=None)
     return data
@@ -406,7 +406,7 @@ def load_weekly_report(week_label: str) -> Optional[Dict]:
 # ---------------------------------------------------------------------------
 
 def get_all_weekly_reports() -> List[Dict]:
-    """전체 주간 리포트 (날짜순 오름차순)."""
+    """All weekly reports (ascending by date)."""
     if not os.path.isdir(REPORT_DIR):
         return []
 
@@ -430,9 +430,9 @@ def get_all_weekly_reports() -> List[Dict]:
 # ---------------------------------------------------------------------------
 
 def generate_current_week_report() -> Dict[str, Any]:
-    """현재 ISO 주의 일별 스냅샷을 읽어 리포트 생성.
+    """Read the current ISO week's daily snapshots and generate a report.
 
-    오늘이 화요일이면 월~화 스냅샷만 포함 (진행중인 주).
+    If today is Tuesday, only Mon~Tue snapshots are included (week in progress).
     """
     today = _dt.date.today()
     iso = today.isocalendar()
@@ -445,7 +445,7 @@ def generate_current_week_report() -> Dict[str, Any]:
 
 
 def _load_snapshots_range(start: _dt.date, end: _dt.date) -> List[Dict]:
-    """날짜 범위의 일별 스냅샷 로드."""
+    """Load daily snapshots for a date range."""
     snapshots: List[Dict] = []
     current = start
     while current <= end:
@@ -463,9 +463,9 @@ def _load_snapshots_range(start: _dt.date, end: _dt.date) -> List[Dict]:
 # ---------------------------------------------------------------------------
 
 def generate_recommendations(report: Dict[str, Any]) -> List[str]:
-    """리포트 기반 한국어 실행 추천 생성.
+    """Generate actionable recommendations based on the report.
 
-    매주 핵심 인사이트를 즉시 활용 가능한 형태로 제공.
+    Provides each week's key insights in an immediately usable form.
     """
     recs: List[str] = []
     summary = report.get("summary", {})
@@ -473,9 +473,9 @@ def generate_recommendations(report: Dict[str, Any]) -> List[str]:
     total_trades = summary.get("total_trades", 0)
 
     if total_trades == 0:
-        return ["📭 이번 주 거래 데이터가 없습니다."]
+        return ["📭 No trade data for this week."]
 
-    # --- MVP 코인 ---
+    # --- MVP coin ---
     best_coins = patterns.get("best_coins", [])
     if best_coins:
         mvp = best_coins[0]
@@ -483,34 +483,34 @@ def generate_recommendations(report: Dict[str, Any]) -> List[str]:
         pnl = mvp.get("pnl", 0)
         wr = mvp.get("win_rate", 0)
         recs.append(
-            f"🏆 금주 MVP: {coin} (PnL ${pnl:+.2f}, 승률 {wr:.0f}%) — 다음 주에도 주력 감시 추천"
+            f"🏆 This week's MVP: {coin} (PnL ${pnl:+.2f}, win rate {wr:.0f}%) — recommend keeping it on the main watchlist next week"
         )
 
-    # --- 최악 코인 경고 ---
+    # --- Worst coin warning ---
     worst_coins = patterns.get("worst_coins", [])
     if worst_coins:
         villain = worst_coins[-1] if len(worst_coins) > 0 else None
         if villain and villain.get("pnl", 0) < 0:
             recs.append(
-                f"⚠️ 주의 코인: {villain['coin']} (PnL ${villain['pnl']:+.2f}, "
-                f"승률 {villain.get('win_rate', 0):.0f}%) — conviction 기준 강화 고려"
+                f"⚠️ Coin to watch: {villain['coin']} (PnL ${villain['pnl']:+.2f}, "
+                f"win rate {villain.get('win_rate', 0):.0f}%) — consider tightening the conviction threshold"
             )
 
-    # --- 최적 시간대 (KST) ---
+    # --- Best hours (KST) ---
     best_hours = patterns.get("best_hours_kst", [])
     if best_hours:
-        hour_strs = [f"{h['hour']:02d}시(${h['pnl']:+.2f})" for h in best_hours if h.get("pnl", 0) > 0]
+        hour_strs = [f"{h['hour']:02d}:00 (${h['pnl']:+.2f})" for h in best_hours if h.get("pnl", 0) > 0]
         if hour_strs:
-            recs.append(f"⏰ 최고 수익 시간대(KST): {', '.join(hour_strs)} — 이 시간대 적극 진입 추천")
+            recs.append(f"⏰ Most profitable hours (KST): {', '.join(hour_strs)} — recommend entering aggressively in these windows")
 
-    # --- 최악 시간대 (KST) ---
+    # --- Worst hours (KST) ---
     worst_hours = patterns.get("worst_hours_kst", [])
     if worst_hours:
-        bad_strs = [f"{h['hour']:02d}시(${h['pnl']:+.2f})" for h in worst_hours if h.get("pnl", 0) < 0]
+        bad_strs = [f"{h['hour']:02d}:00 (${h['pnl']:+.2f})" for h in worst_hours if h.get("pnl", 0) < 0]
         if bad_strs:
-            recs.append(f"🚫 손실 집중 시간대(KST): {', '.join(bad_strs)} — SL 타이트닝 또는 진입 자제 권장")
+            recs.append(f"🚫 Loss-concentrated hours (KST): {', '.join(bad_strs)} — recommend tightening SL or holding off on entries")
 
-    # --- LONG vs SHORT 편향 ---
+    # --- LONG vs SHORT bias ---
     long_stats = patterns.get("long_stats", {})
     short_stats = patterns.get("short_stats", {})
     l_pnl = long_stats.get("pnl", 0)
@@ -521,24 +521,24 @@ def generate_recommendations(report: Dict[str, Any]) -> List[str]:
     if l_trades > 0 and s_trades > 0:
         if l_pnl > 0 and s_pnl < 0:
             recs.append(
-                f"📈 LONG 우세 주간 (L: ${l_pnl:+.2f}/{l_trades}건, S: ${s_pnl:+.2f}/{s_trades}건) "
-                f"— SHORT 진입 기준 상향 고려"
+                f"📈 LONG-favored week (L: ${l_pnl:+.2f}/{l_trades} trades, S: ${s_pnl:+.2f}/{s_trades} trades) "
+                f"— consider raising the SHORT entry threshold"
             )
         elif s_pnl > 0 and l_pnl < 0:
             recs.append(
-                f"📉 SHORT 우세 주간 (S: ${s_pnl:+.2f}/{s_trades}건, L: ${l_pnl:+.2f}/{l_trades}건) "
-                f"— LONG 진입 기준 상향 고려"
+                f"📉 SHORT-favored week (S: ${s_pnl:+.2f}/{s_trades} trades, L: ${l_pnl:+.2f}/{l_trades} trades) "
+                f"— consider raising the LONG entry threshold"
             )
         else:
             recs.append(
-                f"↔️ 방향 균형: LONG ${l_pnl:+.2f}/{l_trades}건, SHORT ${s_pnl:+.2f}/{s_trades}건"
+                f"↔️ Directional balance: LONG ${l_pnl:+.2f}/{l_trades} trades, SHORT ${s_pnl:+.2f}/{s_trades} trades"
             )
     elif l_trades > 0:
-        recs.append(f"📈 LONG 전용 주간: ${l_pnl:+.2f}/{l_trades}건 — SHORT 기회 탐색 필요")
+        recs.append(f"📈 LONG-only week: ${l_pnl:+.2f}/{l_trades} trades — need to scout for SHORT opportunities")
     elif s_trades > 0:
-        recs.append(f"📉 SHORT 전용 주간: ${s_pnl:+.2f}/{s_trades}건 — LONG 기회 탐색 필요")
+        recs.append(f"📉 SHORT-only week: ${s_pnl:+.2f}/{s_trades} trades — need to scout for LONG opportunities")
 
-    # --- DT(Dynamic Trailing) 효과 ---
+    # --- DT (Dynamic Trailing) effect ---
     dt = patterns.get("dt_stats", {})
     dt_pnl = dt.get("dt_pnl", 0)
     dt_trades = dt.get("dt_trades", 0)
@@ -550,42 +550,42 @@ def generate_recommendations(report: Dict[str, Any]) -> List[str]:
         no_dt_avg = no_dt_pnl / no_dt_trades
         if dt_avg > no_dt_avg:
             recs.append(
-                f"🎯 DT 효과 긍정적: DT 평균 ${dt_avg:+.4f} vs 일반 ${no_dt_avg:+.4f} — DT 유지 권장"
+                f"🎯 DT effect positive: DT avg ${dt_avg:+.4f} vs normal ${no_dt_avg:+.4f} — recommend keeping DT"
             )
         else:
             recs.append(
-                f"⚡ DT 효과 미미/부정적: DT 평균 ${dt_avg:+.4f} vs 일반 ${no_dt_avg:+.4f} — DT 설정 재검토"
+                f"⚡ DT effect negligible/negative: DT avg ${dt_avg:+.4f} vs normal ${no_dt_avg:+.4f} — review DT settings"
             )
     elif dt_trades > 0:
-        recs.append(f"🎯 DT 전용 운영: {dt_trades}건 ${dt_pnl:+.2f} — 비교 대조군 부재")
+        recs.append(f"🎯 DT-only operation: {dt_trades} trades ${dt_pnl:+.2f} — no comparison control group")
 
-    # --- 청산 사유 인사이트 ---
+    # --- Exit-reason insight ---
     exit_reasons = patterns.get("exit_reasons", {})
     if exit_reasons:
         total_exits = sum(exit_reasons.values())
-        # 가장 빈번한 사유
+        # Most frequent reason
         top_reason = max(exit_reasons.items(), key=lambda x: x[1])
         pct = round(top_reason[1] / total_exits * 100, 0) if total_exits > 0 else 0
-        recs.append(f"🔍 주요 청산 사유: {top_reason[0]} ({top_reason[1]}건, {pct:.0f}%)")
+        recs.append(f"🔍 Top exit reason: {top_reason[0]} ({top_reason[1]} trades, {pct:.0f}%)")
 
-    # --- 일관성 등급 ---
+    # --- Consistency grade ---
     score = summary.get("consistency_score", 0)
     if score >= 80:
-        grade = "A (매우 안정)"
+        grade = "A (very stable)"
     elif score >= 60:
-        grade = "B (양호)"
+        grade = "B (good)"
     elif score >= 40:
-        grade = "C (보통)"
+        grade = "C (fair)"
     elif score >= 20:
-        grade = "D (불안정)"
+        grade = "D (unstable)"
     else:
-        grade = "F (위험)"
+        grade = "F (risky)"
     total_pnl = summary.get("total_pnl", 0)
     profitable_days = summary.get("profitable_days", 0)
     days_count = report.get("days_count", 0)
     recs.append(
-        f"📊 일관성 등급: {grade} (점수 {score:.0f}/100, "
-        f"수익일 {profitable_days}/{days_count}일, 총 PnL ${total_pnl:+.2f})"
+        f"📊 Consistency grade: {grade} (score {score:.0f}/100, "
+        f"profitable days {profitable_days}/{days_count}, total PnL ${total_pnl:+.2f})"
     )
 
     return recs
@@ -596,33 +596,33 @@ def generate_recommendations(report: Dict[str, Any]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 def auto_generate_weekly(force: bool = False) -> Optional[Dict]:
-    """월요일 07:00 KST에 호출 — 지난 주 리포트 자동 생성.
+    """Called Monday 07:00 KST — auto-generate the previous week's report.
 
-    force=True: 이미 존재해도 재생성.
-    반환: 생성된 리포트 dict 또는 None(스킵 시).
+    force=True: regenerate even if one already exists.
+    Returns: the generated report dict, or None (when skipped).
     """
-    # 지난 주 = 현재 ISO 주 - 1
+    # Previous week = current ISO week - 1
     today = _dt.date.today()
     iso = today.isocalendar()
 
-    # 지난 주 계산 (연말/연초 경계 처리)
+    # Compute the previous week (handles year-end/year-start boundary)
     last_week_date = today - _dt.timedelta(days=7)
     last_iso = last_week_date.isocalendar()
     week_label = f"{last_iso[0]}-W{last_iso[1]:02d}"
 
-    # 이미 존재 체크
+    # Check if it already exists
     if not force:
         existing = load_weekly_report(week_label)
         if existing:
-            logger.info("[WeeklyIntel] %s 이미 존재, 스킵 (force=False)", week_label)
+            logger.info("[WeeklyIntel] %s already exists, skipping (force=False)", week_label)
             return None
 
-    # 지난 주 범위 스냅샷 로드
+    # Load snapshots for the previous week's range
     monday, sunday = _week_dates(last_iso[0], last_iso[1])
     snapshots = _load_snapshots_range(monday, sunday)
 
     if not snapshots:
-        logger.info("[WeeklyIntel] %s 스냅샷 없음 — 빈 리포트 생성", week_label)
+        logger.info("[WeeklyIntel] %s no snapshots — generating empty report", week_label)
 
     report = build_weekly_report(snapshots, week_label)
     path = save_weekly_report(report, week_label)

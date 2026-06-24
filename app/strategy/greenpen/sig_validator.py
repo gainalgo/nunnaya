@@ -40,7 +40,7 @@ def validate_sig(
 
     Green Pen rule:
       - After PA pattern, the NEXT candle(s) must form a "post-SIG wick"
-        (꼬리) in the signal direction.
+        (tail) in the signal direction.
       - If the wick is NOT destroyed by subsequent price action,
         the SIG is valid and cycle counting starts.
       - If the wick IS destroyed, it's a SIG vs SIG conflict → Sideways.

@@ -1,10 +1,10 @@
 """
-SNIPER 전략 백테스트 모듈.
-과거 캔들 데이터를 사용하여 SNIPER 파라미터 성능을 검증합니다.
+SNIPER strategy backtest module.
+Validates SNIPER parameter performance using historical candle data.
 
-[FIX L3] 2026-03-05: 수수료/슬리피지 반영, trailing stop 지원 추가.
-실제 SNIPER 상태머신(WATCH→PROBE→CONFIRM)과는 여전히 차이가 있으나,
-손익 계산에서 실거래 비용이 반영됨.
+[FIX L3] 2026-03-05: Added fee/slippage accounting and trailing stop support.
+Still differs from the real SNIPER state machine (WATCH->PROBE->CONFIRM),
+but PnL calculation now reflects real trading costs.
 """
 
 import logging
@@ -16,14 +16,14 @@ from app.core.constants import BYBIT_MARKET_KLINE, bybit_v5_rest_category, parse
 
 logger = logging.getLogger(__name__)
 
-# 실거래 비용 기본값 (업비트 기준)
-DEFAULT_FEE_RATE = 0.0005   # 0.05% 매수 + 0.05% 매도 = 편도 기준
-DEFAULT_SLIPPAGE = 0.001    # 0.1% 슬리피지 (체결 불확실성)
+# Default real trading costs (Upbit basis)
+DEFAULT_FEE_RATE = 0.0005   # 0.05% buy + 0.05% sell = per-side basis
+DEFAULT_SLIPPAGE = 0.001    # 0.1% slippage (fill uncertainty)
 
 
 @dataclass
 class BacktestResult:
-    """백테스트 결과."""
+    """Backtest result."""
     total_trades: int
     wins: int
     losses: int
@@ -35,7 +35,7 @@ class BacktestResult:
 
 
 def fetch_candles(market: str, count: int = 200, unit: int = 1) -> List[Dict[str, Any]]:
-    """Bybit V5에서 캔들 데이터를 가져옵니다."""
+    """Fetches candle data from Bybit V5."""
     try:
         resp = bybit_get(BYBIT_MARKET_KLINE, params={"category": bybit_v5_rest_category(), "symbol": market, "interval": str(unit), "limit": count}, timeout=10)
         if resp.ok:
@@ -64,25 +64,25 @@ def run_sniper_backtest(
     candle_unit: int = 1,
 ) -> BacktestResult:
     """
-    SNIPER 전략 백테스트를 실행합니다.
-    
+    Runs the SNIPER strategy backtest.
+
     Args:
-        market: 마켓 코드 (예: BTCUSDT)
-        entry_lookback_min: Entry 룩백 기간 (분)
-        entry_threshold_pct: Entry 임계값 (%)
-        exit_lookback_min: Exit 룩백 기간 (분)
-        exit_threshold_pct: Exit 임계값 (%)
-        tp_pct: 익절 비율 (%)
-        sl_pct: 손절 비율 (%)
-        trail_tp: Trailing stop 활성화 여부 (True 시 trail_dist_pct 사용)
-        trail_dist_pct: Trailing stop 거리 (%)
-        fee_rate: 편도 수수료 (기본 0.05%)
-        slippage: 슬리피지 (기본 0.1%)
-        candle_count: 캔들 개수
-        candle_unit: 캔들 단위 (분)
-    
+        market: Market code (e.g. BTCUSDT)
+        entry_lookback_min: Entry lookback period (minutes)
+        entry_threshold_pct: Entry threshold (%)
+        exit_lookback_min: Exit lookback period (minutes)
+        exit_threshold_pct: Exit threshold (%)
+        tp_pct: Take-profit ratio (%)
+        sl_pct: Stop-loss ratio (%)
+        trail_tp: Whether to enable trailing stop (uses trail_dist_pct when True)
+        trail_dist_pct: Trailing stop distance (%)
+        fee_rate: Per-side fee (default 0.05%)
+        slippage: Slippage (default 0.1%)
+        candle_count: Number of candles
+        candle_unit: Candle unit (minutes)
+
     Returns:
-        BacktestResult: 백테스트 결과 (수수료/슬리피지 반영)
+        BacktestResult: Backtest result (with fee/slippage applied)
     """
     candles = fetch_candles(market, candle_count, candle_unit)
     if not candles or len(candles) < max(entry_lookback_min, exit_lookback_min) + 10:
@@ -95,14 +95,14 @@ def run_sniper_backtest(
     highs = [float(c.get("high_price", 0)) for c in candles]
     lows = [float(c.get("low_price", 0)) for c in candles]
     
-    # 수수료 + 슬리피지 합산 (매수 + 매도 왕복)
+    # Sum of fee + slippage (buy + sell round trip)
     round_trip_cost_pct = (fee_rate + slippage) * 2 * 100
     
     trades: List[Dict[str, Any]] = []
     position: Dict[str, Any] | None = None
     equity_curve = [0.0]
 
-    # [FIX N4] lookback 분(minutes) → 캔들 수(candles)로 변환 (candle_unit 반영)
+    # [FIX N4] Convert lookback minutes -> number of candles (accounting for candle_unit)
     entry_lookback_candles = max(1, entry_lookback_min // candle_unit) if candle_unit > 0 else entry_lookback_min
     exit_lookback_candles = max(1, exit_lookback_min // candle_unit) if candle_unit > 0 else exit_lookback_min
 
@@ -121,13 +121,13 @@ def run_sniper_backtest(
         else:
             entry_price = position["entry_price"]
             gross_profit_pct = (price - entry_price) / entry_price * 100
-            # 실제 손익 = 총손익 - 왕복 비용
+            # Actual PnL = gross PnL - round trip cost
             profit_pct = gross_profit_pct - round_trip_cost_pct
             
             exit_signal = False
             exit_reason = ""
             
-            # Trailing stop 업데이트
+            # Trailing stop update
             if trail_tp and gross_profit_pct >= tp_pct:
                 if price > position["trail_peak"]:
                     position["trail_peak"] = price
@@ -159,7 +159,7 @@ def run_sniper_backtest(
                     "entry_price": entry_price,
                     "exit_price": price,
                     "gross_profit_pct": round(gross_profit_pct, 4),
-                    "profit_pct": round(profit_pct, 4),  # 수수료/슬리피지 반영
+                    "profit_pct": round(profit_pct, 4),  # fee/slippage applied
                     "cost_pct": round(round_trip_cost_pct, 4),
                     "reason": exit_reason,
                 })
@@ -184,7 +184,7 @@ def run_sniper_backtest(
     
     total_trades = len(trades)
     wins = len([t for t in trades if t["profit_pct"] > 0])
-    losses = len([t for t in trades if t["profit_pct"] < 0])  # [FIX #12] break-even(=0)은 loss에서 제외
+    losses = len([t for t in trades if t["profit_pct"] < 0])  # [FIX #12] break-even(=0) excluded from loss
     win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
     total_profit_pct = sum(t["profit_pct"] for t in trades)
     avg_profit_pct = (total_profit_pct / total_trades) if total_trades > 0 else 0.0

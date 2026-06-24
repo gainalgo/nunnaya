@@ -1,33 +1,34 @@
-"""Market Bias — 다중 코인 최근 EXIT 결과로 시장 방향 쏠림 감지.
+"""Market Bias — detect market direction skew from recent multi-coin EXIT results.
 
-관찰:
-- 최근 N분 / M건 EXIT 에서 LONG 수익이 압도적 = 상승장 → SHORT 는 거스름
-- 반대로 SHORT 수익이 압도적 = 하락장 → LONG 은 거스름
-- BTC Regime 과 부분 중복이지만 **실전 결과 기반** (이론 EMA 말고 실제 먹힌 방향)
+Observations:
+- Recent N min / M EXITs where LONG profit dominates = uptrend → SHORT goes against it
+- Conversely, SHORT profit dominating = downtrend → LONG goes against it
+- Partly overlaps BTC Regime but is **based on real results** (the direction that
+  actually worked, not theoretical EMA)
 
-계산:
-    최근 lookback_trades 건의 EXIT 레코드에서
-        long_wins  = (direction=LONG, pnl_net>0) 건수
-        long_loses = (direction=LONG, pnl_net<0)
-        short_wins, short_loses 동일
+Computation:
+    From the most recent lookback_trades EXIT records:
+        long_wins  = count of (direction=LONG, pnl_net>0)
+        long_loses = count of (direction=LONG, pnl_net<0)
+        short_wins, short_loses likewise
     long_score  = long_wins - long_loses
     short_score = short_wins - short_loses
-    bias = sign(long_score - short_score)  -- 양수=LONG 우세, 음수=SHORT 우세
+    bias = sign(long_score - short_score)  -- positive=LONG dominant, negative=SHORT dominant
     dominance = |long_score - short_score| / total
 
-    dominance > threshold 이고 direction 이 반대면 → 페널티
+    If dominance > threshold and direction is opposite → penalty
 
-효과:
-    LONG 우세 장 × LONG 진입 = +0 (이미 우세)
-    LONG 우세 장 × SHORT 진입 = -1 (거스름)
-    SHORT 우세 장 × LONG 진입 = -1
-    SHORT 우세 장 × SHORT 진입 = +0
+Effect:
+    LONG-dominant market × LONG entry = +0 (already dominant)
+    LONG-dominant market × SHORT entry = -1 (against it)
+    SHORT-dominant market × LONG entry = -1
+    SHORT-dominant market × SHORT entry = +0
 
-BTC Regime 과 차이:
-    - BTC: 이론 지표 (EMA / structure)
-    - Market Bias: 실전 결과 (직전 EXIT 로그)
-    - 둘 다 같은 방향을 가리키면 확실 → double penalty (합산)
-    - 엇갈리면 어느 쪽도 신뢰 못함 → 부분 페널티만
+Difference from BTC Regime:
+    - BTC: theoretical indicators (EMA / structure)
+    - Market Bias: real results (recent EXIT logs)
+    - When both point the same way it's certain → double penalty (combined)
+    - When they diverge, neither is trustworthy → partial penalty only
 """
 from __future__ import annotations
 
@@ -51,16 +52,16 @@ class MarketBiasModule:
     def _load_recent_all_exits(
         self, lookback_count: int, lookback_hours: float, now_ts: float
     ) -> List[Dict[str, Any]]:
-        """모든 코인의 최근 EXIT 레코드 (최신순).
+        """Recent EXIT records across all coins (newest first).
 
-        now_ts: 테스트 주입 가능 (실측 검증용)
+        now_ts: injectable for tests (for real-data verification)
         """
         out: List[Dict[str, Any]] = []
         if not os.path.exists(JOURNAL_PATH):
             return out
         cutoff = now_ts - lookback_hours * 3600.0
 
-        # 파일 크기가 크면(>8MB) 끝에서 역순 읽기 — 여기선 단순 forward
+        # If the file is large (>8MB), read backward from the end — here just forward
         try:
             with open(JOURNAL_PATH, "r", encoding="utf-8") as f:
                 for line in f:
@@ -74,8 +75,8 @@ class MarketBiasModule:
                     if rec.get("event") != "EXIT":
                         continue
                     ts = rec.get("ts", 0)
-                    # lower bound: cutoff (lookback 경계)
-                    # upper bound: now_ts (테스트 과거 시뮬레이션 정확성)
+                    # lower bound: cutoff (lookback boundary)
+                    # upper bound: now_ts (accuracy for past-time test simulation)
                     if ts < cutoff or ts > now_ts:
                         continue
                     out.append(rec)
@@ -86,7 +87,7 @@ class MarketBiasModule:
         return out[:lookback_count]
 
     def _compute_bias(self, exits: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """EXIT 레코드에서 bias 지표 계산."""
+        """Compute bias metrics from EXIT records."""
         long_wins = long_loses = short_wins = short_loses = 0
         for r in exits:
             d = (r.get("direction") or "").upper()
@@ -124,7 +125,7 @@ class MarketBiasModule:
         }
 
     def evaluate(self, market: str, direction: str, now_ts: float) -> Dict[str, Any]:
-        """direction 이 market bias 에 반하면 페널티.
+        """Penalize when direction goes against the market bias.
 
         Returns:
             {"delta": int, "bias": str, "dominance": float, "details": {...}}
@@ -152,13 +153,13 @@ class MarketBiasModule:
         out["details"] = bias_info.get("breakdown", {})
 
         threshold = float(getattr(cfg, "mb_dominance_threshold", 0.5))
-        penalty_delta = float(getattr(cfg, "mb_against_delta", -10.0))  # [2026-05-17 100점 ×10] -1→-10
+        penalty_delta = float(getattr(cfg, "mb_against_delta", -10.0))  # [2026-05-17 100-pt scale ×10] -1→-10
         min_total = int(getattr(cfg, "mb_min_total", 4))
 
         if bias_info["total"] < min_total:
-            return out  # sample 부족
+            return out  # insufficient sample
         if bias_info["dominance"] < threshold:
-            return out  # dominance 미달
+            return out  # dominance below threshold
 
         dir_u = direction.upper()
         if bias_info["bias"] == "LONG" and dir_u == "SHORT":
