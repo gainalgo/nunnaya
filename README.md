@@ -45,19 +45,6 @@ New exchanges start in paper mode — live trading is an explicit per-exchange o
 ### Defaults = safe
 Out of the box: every engine OFF, paper mode, single server. Nothing trades for real automatically.
 
-## ⚠️ Paper ≠ Live (슬리피지 / slippage)
-
-페이퍼(모의) 수익을 실거래 수익으로 믿지 마세요. 페이퍼는 신호가에 즉시 체결되지만, 실거래는
-매수=비싸게·매도=싸게(슬리피지)에 수수료가 양방향으로 붙어 작은 수익을 갉아먹습니다. 그래서
-"봇 단독은 본전"입니다. `paper_slippage_bps`(기본 5bp/편도, env `PAPER_SLIPPAGE_BPS`)로 페이퍼에
-슬리피지를 반영해 실거래에 가깝게 만들 수 있습니다(얇은 알트는 10~20bp 현실적). 실전 전 소액 검증 필수.
-
-Don't trust paper (simulated) profit as if it were real. Paper fills instantly at the signal price, but
-live trading pays slippage (buy higher / sell lower) plus fees on both sides, which eats small edges —
-this is why "the bot alone is roughly break-even." `paper_slippage_bps` (default 5 bps/side, env
-`PAPER_SLIPPAGE_BPS`) makes paper model slippage so it approximates live (10–20 bps is realistic for
-thin alts). Always validate with small real funds first.
-
 ## 라이선스 / License
 MIT (LICENSE) — 자유롭게 수정·배포·상업적 사용 가능, 저작권 표시(gainalgo.ai)만 유지.
 MIT — free to modify, distribute, and use commercially; just keep the copyright notice (gainalgo.ai).
