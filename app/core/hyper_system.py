@@ -611,6 +611,7 @@ class HyperSystem(StateIOMixin, UISettingsMixin, ReconcileMixin, GuardsMixin, Bu
             self.trade_client = PaperTradeClient(
                 initial_usdt=float(os.getenv("DRY_INITIAL_USDT", "1000")),
                 fee_rate=_env_float("PAPER_FEE_RATE", 0.001),
+                slippage_bps=_env_float("PAPER_SLIPPAGE_BPS", 5.0),  # ★ [2026-06-24] paper 슬리피지 모델
             )
             self.order_fsm = OrderStateMachine(client=self.trade_client, ledger=self.ledger)
             self.order_fsm._sell_fill_callbacks.append(self._on_sell_filled)

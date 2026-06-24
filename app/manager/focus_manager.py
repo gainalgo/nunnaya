@@ -746,6 +746,10 @@ class FocusConfig:
     caution_min_hold_sec: float = 1800.0              # 발동 최소 보유 (초, 30분)
     caution_fee_rate: float = 0.00055                 # 수수료율 (taker per side)
     caution_min_profit_multiplier: float = 3.0        # 최소 순이익 = 수수료 × N배
+    # ── paper 슬리피지 (2026-06-24 부모) — paper 가 live 처럼 불리하게 체결되도록 모델링 ──
+    #   선물 paper(FocusDryClient)는 신호가에 즉시 체결 → 슬리피지 0 = 낙관적(가짜 수익). 이 값만큼
+    #   진입=불리/청산=불리 체결로 가정해 paper PnL ≈ live. 편도 bps(5=0.05%). LIVE 엔 무관(실client).
+    paper_slippage_bps: float = 5.0
     quick_tp_enabled: bool = False                    # 시간 기반 빠른 TP (default OFF, Long Hold 충돌)
     quick_tp_min_hold_hours: float = 8.0              # 발동 최소 보유 (h)
     quick_tp_min_pnl_pct: float = 1.0                 # 발동 최소 pnl (%)
@@ -1915,7 +1919,8 @@ class FocusManager:
             else:
                 from app.integrations.focus_dry_client import FocusDryClient
                 _vusdt = float(os.getenv("DRY_INITIAL_USDT", "1000") or "1000")
-                self._client = FocusDryClient(_real, virtual_usdt=_vusdt)
+                _slip_bps = max(0.0, float(getattr(self.config, "paper_slippage_bps", 0.0) or 0.0))
+                self._client = FocusDryClient(_real, virtual_usdt=_vusdt, slippage_bps=_slip_bps)
         return self._client
 
     # ── [2026-05-26 부모] TF 라운드 앵커 TP/SL + 견딤 (교재 충실) ──

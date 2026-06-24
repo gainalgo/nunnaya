@@ -25,12 +25,13 @@ logger = logging.getLogger(__name__)
 class FocusDryClient:
     """실제 Bybit client 를 감싸 주문만 가상 처리하는 dry-run wrapper."""
 
-    def __init__(self, real_client: Any, virtual_usdt: float = 1000.0):
+    def __init__(self, real_client: Any, virtual_usdt: float = 1000.0, slippage_bps: float = 0.0):
         # __dict__ 직접 설정 (─ __getattr__ 무한루프 방지)
         object.__setattr__(self, "_real", real_client)
         object.__setattr__(self, "_virtual_usdt", float(virtual_usdt))
-        logger.info("[FOCUS-DRY] 🧪 Dry-run client 활성 — 시세=실제 / 주문=가상 / 잔고=$%.2f",
-                    float(virtual_usdt))
+        object.__setattr__(self, "_slip_bps", max(0.0, float(slippage_bps)))
+        logger.info("[FOCUS-DRY] 🧪 Dry-run client 활성 — 시세=실제 / 주문=가상 / 잔고=$%.2f / 슬리피지=%.0fbp",
+                    float(virtual_usdt), max(0.0, float(slippage_bps)))
 
     # ── 시세: 실제 Bybit 위임 (정확한 데이터 필수) ──
     def get_kline(self, *args, **kwargs):
@@ -47,10 +48,28 @@ class FocusDryClient:
     def place_order(self, *args, **kwargs) -> Dict[str, Any]:
         oid = f"DRY-{uuid.uuid4().hex[:12]}"
         _mkt = kwargs.get("market") or (args[0] if args else "?")
-        _side = kwargs.get("side", "")
+        _side = str(kwargs.get("side", "")).lower()
         _qty = kwargs.get("volume", "")
-        logger.info("[FOCUS-DRY] 🧪 place_order 가상 (실거래 X): %s %s qty=%s", _mkt, _side, _qty)
-        return {"ok": True, "orderId": oid, "result": {"orderId": oid}, "_dry": True}
+        # ★ [2026-06-24] paper 슬리피지 — 체결가를 불리하게(매수 비싸게/매도 싸게) 잡아 avg_price 로 반환.
+        #   FocusManager._extract_fill 이 avg_price 를 진입/청산가로 쓰므로(live=실 avg_price 와 동일 경로),
+        #   이 한 곳이 진입·청산 양쪽 paper 슬리피지를 커버. slippage_bps=0 이면 avg_price 미반환=옛 동작.
+        _fill = 0.0
+        if self._slip_bps > 0:
+            try:
+                _px = float(self._real._linear_last_price(_mkt) or 0)
+                if _px > 0:
+                    _is_buy = _side in ("buy", "bid", "long")
+                    _s = self._slip_bps / 10000.0
+                    _fill = _px * (1.0 + _s) if _is_buy else _px * (1.0 - _s)
+            except Exception:
+                _fill = 0.0
+        logger.info("[FOCUS-DRY] 🧪 place_order 가상 (실거래 X): %s %s qty=%s slip=%.0fbp", _mkt, _side, _qty, self._slip_bps)
+        res: Dict[str, Any] = {"ok": True, "orderId": oid, "result": {"orderId": oid}, "_dry": True, "state": "done"}
+        if _fill > 0:
+            res["avg_price"] = _fill
+            res["avgPrice"] = _fill
+            res["result"]["avgPrice"] = _fill
+        return res
 
     def set_trading_stop(self, *args, **kwargs) -> Dict[str, Any]:
         logger.debug("[FOCUS-DRY] 🧪 set_trading_stop 가상 (실거래 X)")
@@ -85,6 +104,6 @@ class FocusDryClient:
     def __getattr__(self, name: str):
         # _real / _virtual_usdt 는 __dict__ 에 있어 여기 안 옴.
         # 그 외 못 찾은 속성/메서드는 실제 client 로 위임.
-        if name in ("_real", "_virtual_usdt"):
+        if name in ("_real", "_virtual_usdt", "_slip_bps"):
             raise AttributeError(name)
         return getattr(self._real, name)

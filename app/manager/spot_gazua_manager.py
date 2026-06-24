@@ -138,6 +138,11 @@ class SpotGazuaConfig:
     #   매수+매도 각각 부과 → 왕복 = fee_rate_pct × 2. journal PnL/ROE·미실현 PnL 이 net(수수료 차감).
     #   Upbit KRW 마켓 표준 0.05%/측. 쿠폰/이벤트로 다를 수 있어 부모님이 UI 에서 직접 조정.
     fee_rate_pct: float = 0.05                  # 한쪽(매수 또는 매도) 수수료율 %. 0=수수료 무시(gross).
+    # ── paper 슬리피지 (2026-06-24 부모) — paper 가 live 처럼 *불리하게* 체결되도록 모델링 ──
+    #   paper 는 client 호출 없이 신호가에 즉시 체결 → 슬리피지 0 = 낙관적(거짓 수익). 이 값만큼
+    #   매수=비싸게/매도=싸게 체결로 가정해 paper PnL ≈ live. 편도 bps(5=0.05%). 0=옛 동작(슬립 무시).
+    #   얇은 알트 위주면 10~20 이 현실적. LIVE 엔 0 영향(실체결가 그대로).
+    paper_slippage_bps: float = 5.0
     # ── 수동 매수(퀵트레이드) 포지션 처리 (2026-06-17 부모) ──────────────────────
     #   퀵트레이드 매수 = self.positions 에 등록 → 패널 표시(슬롯 수 무관·봇 슬롯 미소모).
     #   False(기본·관망): 봇이 안 건드림 — SL/TP 자동 X, 청산 버튼으로 사람이 직접 수확(이윤/손실).
@@ -1403,6 +1408,13 @@ class SpotGazuaManager:
         paper = bool(self.config.paper)
         order_uuid = ""
         if paper:
+            # ★ [2026-06-24] paper 슬리피지 — 매수는 불리하게(비싸게) 체결 가정 → 같은 예산에 더 적은 수량.
+            #   paper PnL 이 live 에 근접하게(슬리피지 미반영 시 가짜 수익). LIVE 분기엔 무관(실체결가 사용).
+            _slip = max(0.0, float(getattr(self.config, "paper_slippage_bps", 0.0))) / 10000.0
+            if _slip > 0:
+                price *= (1.0 + _slip)
+                qty = krw_spend / price
+                targets = self._compute_targets(price, atr)
             order_uuid = f"PAPER-{self._paper_seq}"
             self._paper_seq += 1
             logger.info("[SPOT_GAZUA][PAPER] BUY %s krw=%.0f qty=%.8f @ %.2f (sl=%.2f tp1=%.2f tp2=%.2f)",
@@ -1523,6 +1535,12 @@ class SpotGazuaManager:
         paper = bool(self.config.paper)
         order_uuid = ""
         if paper:
+            # ★ [2026-06-24] paper 슬리피지 — 매수 불리(비싸게) 체결 가정. LIVE 분기는 무관.
+            _slip = max(0.0, float(getattr(self.config, "paper_slippage_bps", 0.0))) / 10000.0
+            if _slip > 0:
+                price *= (1.0 + _slip)
+                qty = krw_spend / price
+                targets = _targets(price)
             order_uuid = f"PAPER-{self._paper_seq}"
             self._paper_seq += 1
             logger.info("[SPOT_CONTRA][PAPER] BUY %s krw=%.0f qty=%.8f @ %.2f (sl=%.2f tp1=%.2f tp2=%.2f)",
@@ -1900,6 +1918,11 @@ class SpotGazuaManager:
         if add_qty <= 0:
             return False
         if pos.paper:
+            # ★ [2026-06-24] paper 슬리피지 — DCA 매수도 불리(비싸게) 체결 가정 → averaged 평단 현실화.
+            _slip = max(0.0, float(getattr(self.config, "paper_slippage_bps", 0.0))) / 10000.0
+            if _slip > 0 and add_price > 0:
+                add_price *= (1.0 + _slip)
+                add_qty = add_krw / add_price
             logger.info("[SPOT_GAZUA][PAPER] DCA#%d %s +krw=%.0f qty=%.8f @ %.4f",
                         pos.dca_count + 1, pos.market, add_krw, add_qty, add_price)
         else:
@@ -2552,6 +2575,12 @@ class SpotGazuaManager:
             cost = float(cost_override) if cost_override is not None else float(pos.krw_spent or 0)
             fee_r = max(0.0, float(getattr(self.config, "fee_rate_pct", 0.0))) / 100.0
             if is_exit:
+                # ★ [2026-06-24] paper 슬리피지 — 매도는 불리하게(싸게) 체결 가정. 전 청산이 이 funnel 을
+                #   거치므로 SL/TP/수동/부분 전부 커버. LIVE 는 price=실체결가라 무관(slip 미적용).
+                if bool(getattr(self.config, "paper", False)):
+                    _eslip = max(0.0, float(getattr(self.config, "paper_slippage_bps", 0.0))) / 10000.0
+                    if _eslip > 0:
+                        price = price * (1.0 - _eslip)
                 ratio = price / entry
                 gross_krw = cost * (ratio - 1.0)
                 fee_krw = cost * fee_r + (cost * ratio) * fee_r   # 매수 + 매도 왕복

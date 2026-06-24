@@ -34,8 +34,11 @@ class PaperTradeClient:
         initial_usdt: float = 1000.0,
         fee_rate: float = _DEFAULT_FEE_RATE,
         state_dir: str = "",
+        slippage_bps: float = 0.0,
     ):
         self._fee_rate = float(fee_rate)
+        # ★ [2026-06-24] paper 슬리피지(편도 bps) — 매수=비싸게/매도=싸게 체결로 가정해 live 근접.
+        self._slip_bps = max(0.0, float(slippage_bps))
         self._lock = threading.Lock()
         self._state_file = os.path.join(
             state_dir or os.path.join(os.getcwd(), "runtime"),
@@ -166,6 +169,7 @@ class PaperTradeClient:
         if price <= 0:
             raise RuntimeError(f"[PaperTrade] No price for {symbol}")
 
+        price *= (1.0 + self._slip_bps / 10000.0)  # ★ paper 슬리피지 — 매수 불리(비싸게) 체결
         amount = float(amount)
         fee = amount * self._fee_rate
         net_amount = amount - fee
@@ -201,6 +205,7 @@ class PaperTradeClient:
         if price <= 0:
             raise RuntimeError(f"[PaperTrade] No price for {symbol}")
 
+        price *= (1.0 - self._slip_bps / 10000.0)  # ★ paper 슬리피지 — 매도 불리(싸게) 체결
         qty = float(qty)
         proceeds = qty * price
         fee = proceeds * self._fee_rate
