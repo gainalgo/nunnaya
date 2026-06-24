@@ -73,7 +73,3 @@ data/autopilot_decisions.jsonl
 docs/_genmirror/*.bak.py
 docs/_genmirror/_spot672_block.py
 docs/_genmirror/spot_config_mirror_fields.txt
-
-# translation scratch (never publish)
-_kr_hints.txt
-_kr_*.txt
