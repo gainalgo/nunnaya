@@ -36,6 +36,9 @@ tmp_*.py
 tmp_*.json
 temp_*.py
 scratch_*.py
+_kr_*.txt
+_port*.py
+_chk_*
 
 # Root-level state/data (separate from runtime/)
 context_state.json

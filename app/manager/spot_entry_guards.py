@@ -155,11 +155,12 @@ def check_momentum_reversal(client: Any, market: str, direction: str, cfg: Any) 
         return True, "mom_error"
 
 
-def check_dca_stabilized(client: Any, market: str, cfg: Any) -> Tuple[bool, str]:
-    """DCA-only falling-knife gate — if the prior 5M bar is dropping hard, defer the DCA add.
+def check_dca_stabilized(client: Any, market: str, cfg: Any, live_price: float = 0.0) -> Tuple[bool, str]:
+    """DCA-only falling-knife gate — if price is dropping hard, defer the DCA add.
     Reuses the check_momentum_reversal core for entry under DCA's own flag (dca_stabilize_gate_enabled).
     Spot=long_only → only looks at drops. Returns True=stable (DCA OK) / False=knife falling (defer). fail-open.
-    ★ Lets the profitable pullback DCA (stalled knife) pass, blocking only freefall knife-catching to prevent a risk/reward flip."""
+    ★ Lets the profitable pullback DCA (stalled knife) pass, blocking only freefall knife-catching to prevent a risk/reward flip.
+    live_price (optional) = current tick price; catches an intra-bar freefall the completed-bar check misses."""
     if not getattr(cfg, "dca_stabilize_gate_enabled", False):
         return True, ""
     try:
@@ -179,10 +180,18 @@ def check_dca_stabilized(client: Any, market: str, cfg: Any) -> Tuple[bool, str]
         atr_val = sum(trs[-14:]) / min(len(trs), 14) if trs else 0.0
         if not atr_val or atr_val <= 0:
             return True, "no-atr"
-        drop_1bar = closes[-2] - closes[-1]   # positive = prior-bar drop magnitude
         strong_thr = float(getattr(cfg, "dca_stabilize_strong_atr", 1.0)) * atr_val
+        drop_1bar = closes[-2] - closes[-1]   # positive = prior completed-bar drop magnitude
         if drop_1bar >= strong_thr:
             return False, f"falling_knife ({drop_1bar / atr_val:.1f}ATR prior-bar plunge) → DCA deferred"
+        # ★ Intra-bar freefall (2026-06-25) — the completed-bar check above is blind to a crash that happens
+        #   inside the *current forming* 5M bar (kline is cached ~25s), so rapid same-minute averaging slipped
+        #   through (XPLA: 6 DCA in 1 min → SL). The live tick price is fresher than the cached kline — compare
+        #   it to the last completed-bar close to catch the freefall on this tick.
+        if live_price and live_price > 0:
+            drop_live = closes[-2] - live_price
+            if drop_live >= strong_thr:
+                return False, f"falling_knife ({drop_live / atr_val:.1f}ATR intra-bar plunge) → DCA deferred"
         return True, "stable"
     except Exception as exc:
         logger.debug("[SPOT_GUARD] dca_stabilized fail-open: %s", exc)

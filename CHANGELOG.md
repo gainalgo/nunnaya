@@ -8,6 +8,36 @@ entries are grouped by date.
 
 ### Fixed
 
+- **Spot dashboard top card never showed win rate or trade count.** The
+  "Cumulative PnL · Win Rate" summary card displayed the cumulative amount but
+  left the win rate and trade count as a placeholder ("— · — trades"), even
+  though the Trade Journal below it showed the correct figures. The card's
+  win-rate element was never populated in JavaScript — only the amount was set on
+  each status refresh, while the win rate and count (available only from the
+  journal summary) were never copied up to the card. Fixed by filling the card
+  from the journal summary when the journal loads. Affects all four spot
+  dashboards.
+
+- **DCA falling-knife gate missed a crash inside the forming candle.** The
+  averaging-down gate judged a hard drop only from the last *completed* 5-minute
+  candle, so a fast crash contained within the *currently forming* candle —
+  compounded by a ~25-second kline cache — was invisible to it. The bot could
+  therefore average down several times within a single minute and stop out
+  immediately afterward (observed: six adds in about one minute followed by a
+  stop-loss). Fixed by passing the live tick price (fresher than the cached
+  kline) into the gate and deferring the add when the live drop from the last
+  completed close exceeds the threshold; a shallow pullback ("stalled knife")
+  still passes. Affects all four spot exchanges.
+
+- **Paper mode ignored the configured per-exchange budget.** The per-slot budget
+  in paper mode was derived from a hardcoded total of 1,000,000 in the quote
+  currency, ignoring each exchange's configured `budget`. Paper accounts
+  therefore traded on the wrong size — for example Upbit/Bithumb on 1,000,000 KRW
+  instead of a configured 10,000,000, and the USDT spot accounts on 1,000,000
+  USDT instead of a configured 10,000. Fixed so paper uses `config.budget` when
+  set (falling back to the default only when it is zero), matching how live mode
+  already handles the budget.
+
 - **Config save silently dropped every setting past position 80 in large
   groups.** The dashboard saves settings by chunking them into multiple POST
   requests to keep each URL within length limits. The loop advanced its cursor
@@ -68,3 +98,14 @@ entries are grouped by date.
   falling-knife guard; DCA did not, so it could keep adding into a freefall and
   enlarge a position right before it stopped out. Pullback DCA on a stabilized
   price still passes — only knife-catching is blocked.
+
+### Changed
+
+- **Codebase translated to English.** All in-repo text — code comments,
+  docstrings, log messages, dashboard UI strings, and the generated
+  README/DISCLAIMER — is now English so the project reads cleanly for an
+  international audience. A small number of Korean string *values* are kept
+  intentionally where they are load-bearing (exchange API responses matched as
+  substrings, and signal/status values compared by the dashboard JavaScript);
+  translating those would break runtime matching. Multi-language UI support is
+  planned — the project already ships English/Korean/Thai dictionaries.

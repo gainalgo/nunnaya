@@ -1858,6 +1858,7 @@ async function loadJournal(){
     const sm = r.summary||{};
     document.getElementById('j-stats').textContent =
       `Total ${krw(sm.total_pnl_krw)} · Today ${krw(sm.today_pnl_krw)} · Win rate ${sm.win_rate||0}% · ${sm.trades||0} trades`;
+    const _cwr=document.getElementById('c-winrate'); if(_cwr) _cwr.textContent=`${sm.win_rate||0}% · ${sm.trades||0} trades`;
     // daily bars
     const daily = sm.daily||[];
     const dd = document.getElementById('j-daily');

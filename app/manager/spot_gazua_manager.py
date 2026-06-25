@@ -1920,7 +1920,7 @@ class SpotGazuaManager:
         #   Blocks the case where freefall knife-catching only grows size and inverts SL/longhold risk-reward (good pullback DCA passes).
         try:
             from app.manager.spot_entry_guards import check_dca_stabilized
-            _stab_ok, _stab_why = check_dca_stabilized(self.client, pos.market, cfg)
+            _stab_ok, _stab_why = check_dca_stabilized(self.client, pos.market, cfg, live_price=price)
             if not _stab_ok:
                 logger.info("[SPOT_GAZUA] %s averaging deferred — %s", pos.market, _stab_why)
                 return False
@@ -2400,7 +2400,9 @@ class SpotGazuaManager:
         slots = max(1, int(self.config.max_positions))
         try:
             if self.config.paper:
-                equity = 1_000_000.0                                   # paper virtual 1M
+                # ★ [2026-06-25] honor config.budget in paper too (per-exchange paper allocation) —
+                #   was hardcoded 1M, silently ignoring the amount the owner set per exchange.
+                equity = float(self.config.budget) if self.config.budget > 0 else 1_000_000.0
                 held = sum(float(p.krw_spent or 0) for p in self.positions)
                 free = max(0.0, equity - held)
             else:
