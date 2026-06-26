@@ -1893,6 +1893,16 @@
           '<button class="v3-btn sm ghost" id="v3-sa-retrain">🧠 Retrain AI</button>' +
           '<button class="v3-btn sm ghost" id="v3-sa-dd-reset">🔧 Reset Drawdown</button>' +
         '</div>' +
+        '<div class="hint" style="display:block;margin:6px 0;padding:6px 8px;border-left:2px solid var(--v3-warn,#c8860d);background:rgba(200,134,13,.06);color:var(--v3-fg-mute);font-size:11px;line-height:1.5">' +
+          '<b>🔄 Reset / fresh start — run in this order:</b><br>' +
+          '① <b>Close All</b> positions (Positions widget → ✕ Close All, or close each manually) — <i>any mode</i> (live closes real positions, paper closes virtual). Empties open positions the next steps can\'t.<br>' +
+          '② <b>🕊️ Run amnesty</b> (FOCUS settings → General Amnesty) — <i>any mode</i>. Releases all pauses / holding pen / consecutive-loss / penalties / re-entry blocks.<br>' +
+          '③ <b>🧹 Clean Slate</b> (below) — <b>paper only</b> (refuses in live to protect real records). Wipes all journals (backed up) + resets the paper balance.<br>' +
+          'Then <b>Restart</b>.<br>' +
+          '→ Full <b>①②③</b> = a clean paper restart. In <b>live</b>, use <b>①②</b> to flatten positions and clear all blocks while keeping your real trade records (skip ③).<br>' +
+          '<b style="color:var(--v3-warn,#c8860d)">⚠️ In live, be very careful.</b> <b>Close All</b> flattens <i>every</i> position at once — <b>including underwater ones</b> — so it <b>locks in real losses</b>. To spare a position you would rather hold or wait out, do <b>not</b> use Close All: close coins <b>individually</b> (per-position ✕ / Exit) and leave the rest. Run amnesty also lifts every block at once — only do it when you really want a clean slate of pauses/penalties.' +
+        '</div>' +
+        '<div class="rib-row" style="gap:6px;align-items:center;flex-wrap:wrap"><span>Paper clean slate <small>(before going live)</small></span><button class="v3-btn sm v3-btn-outline-danger" id="v3-sa-clean-slate">🧹 Clean Slate</button></div>' +
         '<div class="rib-row" style="gap:6px;align-items:center"><span>Emergency Stop</span><span style="display:flex;gap:6px"><button class="v3-btn sm v3-btn-outline-danger" id="v3-sa-estop">🛑 Trigger</button><button class="v3-btn sm ghost" id="v3-sa-resume">▶️ Resume</button></span></div>' +
         '<div class="rib-row" style="gap:6px;align-items:center;flex-wrap:wrap"><span>Server <small>(run after cleanup)</small></span><span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
           '<label style="font-size:11px;white-space:nowrap"><input type="checkbox" id="v3-srv-cleanup" checked> Cleanup</label>' +
@@ -1900,7 +1910,7 @@
           '<button class="v3-btn sm v3-btn-outline-danger" id="v3-sa-restart">🔁 Restart</button>' +
           '<button class="v3-btn sm v3-btn-outline-danger" id="v3-sa-stop">⏹️ Stop</button>' +
         '</span></div>' +
-        '<small class="hint" style="display:block;color:var(--v3-fg-mute);margin-top:6px;">🔄 Sync = exchange balance ↔ OMA / 🧹 Dust = clear small leftovers / 🧠 Retrain = AI model (a few minutes). 🔧 Reset Drawdown = clear a fake CRISIS (-30) left by deposits/withdrawals or a long pause (applies next tick). Cleanup = wait to settle positions/orders before shutdown (5~60s). Server restart/stop needs run.ps1 (stop only if not configured).</small></section>' +
+        '<small class="hint" style="display:block;color:var(--v3-fg-mute);margin-top:6px;">🔄 Sync = exchange balance ↔ OMA / 🧹 Dust = clear small leftovers / 🧠 Retrain = AI model (a few minutes). 🔧 Reset Drawdown = clear a fake CRISIS (-30) left by deposits/withdrawals or a long pause (applies next tick). Cleanup = wait to settle positions/orders before shutdown (5~60s). Server restart/stop needs run.ps1 (stop only if not configured). 🧹 Clean Slate (paper only) = close every position + wipe all journals (backed up first) + reset paper balance, for a fresh paper → live baseline — restart afterwards.</small></section>' +
       '<section class="v3-cset"><div class="v3-cset-h">👥 Peer Servers (Peer Brief)</div>' +
         '<label class="rib-row"><span>Enabled</span><input type="checkbox" id="v3-peer-enabled"></label>' +
         '<label class="rib-row"><span>Paper mode <small>(log only instead of reject)</small></span><input type="checkbox" id="v3-peer-paper"></label>' +
@@ -2039,20 +2049,23 @@
     if (!es || !es.enabled || !(es.events && es.events.length)) return '';
     const now = Date.now();
     const winMs = (es.window_min || 0) * 60000, leadMs = (es.lead_min || 0) * 60000;
-    let evTs = null;
+    let evTs = null, evLab = null;
     for (const lab of es.events) {
       const t = Date.parse(String(lab).replace(' ', 'T') + ':00+09:00');   // explicit KST → correct regardless of timezone
       if (isNaN(t)) continue;
-      if (t + winMs >= now) { evTs = t; break; }   // earliest event whose post-window hasn't passed
+      if (t + winMs >= now) { evTs = t; evLab = lab; break; }   // earliest event whose post-window hasn't passed
     }
     if (evTs == null) return '';
+    // ★ [2026-06-25] show WHAT the news is (event name from ForexFactory), not just the countdown
+    const evName = (es.events_detail && evLab && es.events_detail[evLab]) ? String(es.events_detail[evLab]) : '';
+    const evShort = evName.length > 32 ? evName.slice(0, 30) + '…' : evName;   // keep the header tidy; full name in tooltip
     const startMs = evTs - winMs - leadMs, endMs = evTs + winMs;   // pre = window+lead (slippage lead)
     if (now >= startMs && now <= endMs) {   // SHIELD ON
-      return '<span title="Event Shield active — blocks new entries·tightens SL" style="color:#dc3545;font-weight:600">⏰ SHIELD ON · -' + _esFmt(endMs - now) + '</span>';
+      return '<span title="Event Shield active — blocks new entries·tightens SL' + (evName ? ' · ' + evName : '') + '" style="color:#dc3545;font-weight:600">⏰ SHIELD ON' + (evShort ? ' · ' + evShort : '') + ' · -' + _esFmt(endMs - now) + '</span>';
     }
     const toStart = startMs - now;
     const col = toStart < 3600000 ? '#ffc107' : 'var(--v3-fg-mute)';   // within 1h of block start = yellow
-    return '<span title="Next economic event — blocking starts ' + ((es.window_min || 0) + (es.lead_min || 0)) + 'min before (ahead of the crowd)" style="color:' + col + '">⏰ Event ' + _esFmt(evTs - now) + '</span>';
+    return '<span title="Next economic event' + (evName ? ': ' + evName : '') + ' — blocking starts ' + ((es.window_min || 0) + (es.lead_min || 0)) + 'min before (ahead of the crowd)" style="color:' + col + '">⏰ Event' + (evShort ? ' · ' + evShort : '') + ' ' + _esFmt(evTs - now) + '</span>';
   };
   try {
     setInterval(function () {
@@ -2488,6 +2501,7 @@
         'v3-sa-dust': { url: '/api/engine/clear_dust?threshold=1000', t: '🧹 Clear Dust', msg: 'Clear small leftover (dust) balances?', danger: false },
         'v3-sa-retrain': { url: '/api/ai/train', t: '🧠 Retrain AI', msg: 'Retrain the AI model? (takes a few minutes · runs in background)', danger: false },
         'v3-sa-dd-reset': { url: '/api/strategy/focus/drawdown/reset-cumulative', t: '🔧 Reset Drawdown', msg: 'Reset the drawdown watermark (peak) to current equity?<br><small>Clears a fake CRISIS (-30 conviction) left by deposits/withdrawals or a long pause. Penalty releases on the next tick. Not an entry block.</small>', danger: false },
+        'v3-sa-clean-slate': { url: '/api/system/clean-slate', t: '🧹 Clean Slate', msg: '<b style="color:var(--v3-warn)">Close ALL positions and WIPE all trade records?</b><br><small>Paper-mode only (refuses in live). Journals are backed up first. Closes positions on every engine, clears journals, resets the paper balance — for a fresh paper → live start. Restart afterwards.</small>', danger: true },
         'v3-sa-resume': { url: '/api/system/emergency/resume?reason=manual_ui', t: '▶️ Resume E-STOP', msg: 'Release Emergency Stop and resume trading?', danger: false },
         'v3-sa-estop': { url: '/api/system/emergency/stop?reason=manual_ui', t: '🛑 Trigger E-STOP', msg: '<b style="color:var(--v3-warn)">Immediately halt all trading (Emergency Stop)</b>?<br><small>Stops new entries and auto-trading. (Positions are kept.)</small>', danger: true },
         'v3-sa-restart': { url: '/api/system/restart?delay_sec=' + delay + '&cleanup=' + cleanup, t: '🔁 Restart Server', msg: '<b style="color:var(--v3-warn)">Restart the server</b>? (' + cleanLab + ')<br><small>Needs run.ps1 — only stops if not configured.</small>', danger: true },

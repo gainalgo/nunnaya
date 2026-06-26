@@ -2967,3 +2967,92 @@ def paper_reset(request: Request, body: Dict[str, Any] = {}):
     initial = float(body.get("initial_usdt", 0) or os.getenv("DRY_INITIAL_USDT", "1000"))
     system.trade_client.reset(initial_usdt=initial)
     return {"ok": True, "reset_to": initial, **system.trade_client.get_summary()}
+
+
+@router.post("/clean-slate", summary="Clean slate (paper): close all positions + wipe trade records")
+def clean_slate(request: Request) -> Dict[str, Any]:
+    """PAPER-ONLY clean slate for a fresh paper->live (or fresh paper) start:
+      1. close every position on every engine (in-process — no external file lock),
+      2. wipe all trade journals (each backed up first),
+      3. reset the core paper balance (DRY_INITIAL_USDT) and the PnL baseline.
+    Refuses in LIVE mode — never touches real positions. Restart afterwards for a clean baseline."""
+    system = request.app.state.system
+    mode = str(getattr(system, "trading_mode", "LIVE")).upper()
+    if mode != "PAPER":
+        return {"ok": False, "mode": mode, "error": "Clean Slate is paper-mode only; refusing in LIVE."}
+
+    closed: Dict[str, int] = {}
+    journals: Dict[str, int] = {}
+    errors: list = []
+
+    # 1. Spot managers (binance_spot is a SpotGazuaManager subclass) — uniform clean_slate()
+    for name in ("upbit_gazua_manager", "bithumb_gazua_manager",
+                 "bybit_spot_gazua_manager", "binance_spot_gazua_manager"):
+        mgr = getattr(system, name, None)
+        if mgr is None:
+            continue
+        try:
+            r = mgr.clean_slate()
+            closed[name] = int(r.get("closed", 0))
+            journals[name] = int(r.get("journal_removed", 0))
+        except Exception as exc:  # noqa: BLE001 — best-effort per engine, report and continue
+            errors.append(f"{name}: {exc}")
+
+    # 2. FOCUS + Binance futures — close positions, then clear the TradeJournal
+    for name in ("focus_manager", "binance_futures_manager"):
+        mgr = getattr(system, name, None)
+        if mgr is None:
+            continue
+        try:
+            n = 0
+            for pos in list(getattr(mgr, "positions", []) or []):
+                try:
+                    if mgr._close_position(pos, reason="clean_slate"):
+                        n += 1
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{name} close {getattr(pos, 'market', '?')}: {exc}")
+            legacy = getattr(mgr, "position", None)
+            if legacy and getattr(legacy, "market", None):
+                try:
+                    if mgr._close_position(legacy, reason="clean_slate"):
+                        n += 1
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{name} close legacy: {exc}")
+            closed[name] = n
+            jrnl = getattr(mgr, "_journal", None)
+            if jrnl is not None and hasattr(jrnl, "clear"):
+                journals[name] = int(jrnl.clear())
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{name}: {exc}")
+
+    # 3. HARPOON — paper: flatten in-memory scalps (it shares the FOCUS journal, already cleared)
+    hp = getattr(system, "harpoon_manager", None)
+    if hp is not None:
+        try:
+            closed["harpoon_manager"] = len(getattr(hp, "active_scalps", []) or [])
+            if hasattr(hp, "active_scalps"):
+                hp.active_scalps = []
+            if hasattr(hp, "current_scalp"):
+                hp.current_scalp = None
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"harpoon_manager: {exc}")
+
+    # 4. Reset core paper balance + PnL baseline (so the fresh start reads clean)
+    try:
+        tc = getattr(system, "trade_client", None)
+        if tc is not None and hasattr(tc, "reset"):
+            tc.reset(initial_usdt=float(os.getenv("DRY_INITIAL_USDT", "1000")))
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"paper_reset: {exc}")
+    try:
+        _bp = os.path.join("runtime", "pnl_baseline.json")
+        if os.path.exists(_bp):
+            os.remove(_bp)  # absent -> re-baselines to current (flat) equity on next read/boot
+    except OSError as exc:
+        errors.append(f"baseline_reset: {exc}")
+
+    logger.info("[CLEAN_SLATE] closed=%s journals=%s errors=%d", closed, journals, len(errors))
+    return {
+        "ok": True, "mode": mode, "closed": closed, "journals_cleared": journals,
+        "errors": errors, "note": "Restart the bot to begin the clean post-fix baseline.",
+    }

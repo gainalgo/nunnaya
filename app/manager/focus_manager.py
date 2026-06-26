@@ -430,9 +430,9 @@ class FocusConfig:
     blowoff_filter_enabled: bool = True               # ON/OFF (must be on to fire)
     blowoff_move_pct: float = 30.0                     # 24h |move| ≥ this % = blow-off candidate (chase penalty starts)
     blowoff_penalty: float = 20.0                      # base penalty (at the move_pct point)
-    blowoff_extreme_pct: float = 80.0                  # 24h |move| ≥ this % = extreme (max penalty)
+    blowoff_extreme_pct: float = 45.0                  # 24h |move| ≥ this % = extreme (max penalty). Lowered 80→45 (2026-06-26): hyper-volatile new/Innovation-Zone coins (e.g. a coin -65% on the day) must hit the extreme tier, not slip through with a small penalty.
     blowoff_max_penalty: float = 40.0                  # max penalty at the extreme
-    blowoff_chase_only: bool = True                    # True = penalize only same-direction (chase) / fade (opposite) exempt
+    blowoff_chase_only: bool = False                   # 2026-06-26: was True (chase-only). A coin that has blown off ±45% is too wild in BOTH directions — penalize fade entries too (a short into a -65% crash bounced +8.7% and blew up at 7x).
 
     # ── ★ Profit-headroom penalty (Headroom) — 2026-06-09 owner "penalize even if direction is right but nowhere to go" ──
     #   Owner's insight: the scoreboard gives 48 pts to lagging alignment but only penalty-free bonuses for 'how far it can go (headroom)' → high score = topping.
@@ -556,7 +556,7 @@ class FocusConfig:
     # ★ [2026-04-25 Long Hold System] Hard ROE Cap — hardcoded -10% forced-exit safety net
     # Owner's finding: conflicts with the intent to endure to SL (force-cut at just -1.43% price on LAB lev7)
     hard_roe_cap_enabled: bool = True           # default OFF (Long Hold consistency)
-    hard_roe_cap_roe_pct: float = -50.0          # firing-threshold ROE % (default -50, effectively rarely fires)
+    hard_roe_cap_roe_pct: float = -25.0          # firing-threshold ROE %. Tightened -50→-25 (2026-06-26) as a tail-risk backstop: a single trade riding to -50%+ ROE wipes a day of gains. -25 catches a slide earlier when the normal SL is bypassed (e.g. paper SL lag / restart).
     # ── ★★★ Conviction Override Slot (2026-05-10 owner decision) ──
     #   Allow extra slots equal to slots tied up beyond the set window(h) (max +N).
     #   window is a user knob (default 24h, owner adjusts to the market).
@@ -782,7 +782,7 @@ class FocusConfig:
     # ── ★ Leverage Tier — coin-volatility-tiered leverage (2026-04-25 owner new) ──
     # Dawn case: ETH ATR 1.4% × lev 7 = SL too far so -$12.81 / low-vol fits lev 5
     # ATR%-based 3-tier: low/mid/high. Calls Bybit set_leverage right before entry.
-    leverage_tier_enabled: bool = True
+    leverage_tier_enabled: bool = False                # 2026-06-26: was True. The tier gave HIGH-volatility coins the HIGHEST leverage (ATR≥2.5% → 7x), which is backwards for tail-risk: a hyper-volatile coin's normal ±8% swing at 7x = -56% ROE = blow-up (observed MUSDT -61% ROE / -$1800 in one trade). Disabled → fall back to the static `leverage` (3x), so the most dangerous coins are no longer the most leveraged. Re-enable only with the tiers inverted (high vol → low lev).
     leverage_tier_atr_low_pct: float = 1.5             # ATR < 1.5% (low-vol: BTC/ETH usually)
     leverage_tier_low: int = 5                         # low-vol → lev 5
     leverage_tier_atr_high_pct: float = 2.5            # ATR >= 2.5% (high-vol alt)
@@ -6535,11 +6535,22 @@ class FocusManager:
     def _event_shield_status(self) -> dict:
         """For the UI header countdown -- active flag + all event times + window (asymmetric) params."""
         lab = self._event_shield_label()
+        # ★ [2026-06-25] event titles (what the news *is*) for the header — {time_label: name} from ForexFactory.
+        titles = {}
+        if getattr(self.config, "event_shield_auto_fetch", True):
+            try:
+                from app.manager import economic_calendar as _econ
+                for _e in _econ.get_events_detailed():
+                    if _e.get("time") and _e.get("title"):
+                        titles[_e["time"]] = _e["title"]
+            except Exception:
+                pass
         return {
             "enabled": bool(self.config.event_shield_enabled),
             "active": lab is not None,
             "label": lab or "",
             "events": self._event_shield_events(),
+            "events_detail": titles,   # {time_label: event name} — lets the header show what the news is
             "window_min": float(self.config.event_shield_window_min or 0.0),
             "lead_min": float(getattr(self.config, "event_shield_lead_min", 0.0) or 0.0),
         }

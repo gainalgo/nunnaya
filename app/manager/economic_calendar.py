@@ -57,7 +57,7 @@ def _fetch_one(url):
 
 def _fetch_now(impact="High", country="USD"):
     """Merge this/next week, keep only USD High impact times as KST labels. One feed failing is ignored."""
-    times = set()
+    by_time = {}   # time_label -> title (dedup by time; keep the first title seen)
     got_any = False
     for url in _FEED_URLS:
         try:
@@ -72,11 +72,11 @@ def _fetch_now(impact="High", country="USD"):
             if str(d.get("impact", "")).strip().lower() != impact.lower():
                 continue
             lab = _to_kst_label(d.get("date"))
-            if lab:
-                times.add(lab)
+            if lab and lab not in by_time:
+                by_time[lab] = str(d.get("title") or "").strip()   # ★ capture the event name (was discarded)
     if not got_any:
         raise RuntimeError("all feeds failed")
-    return sorted(times)
+    return [{"time": t, "title": by_time[t], "impact": impact} for t in sorted(by_time)]
 
 
 def _load_disk():
@@ -87,7 +87,8 @@ def _load_disk():
             obj = json.load(f)
         if isinstance(obj, dict) and isinstance(obj.get("events"), list):
             _CACHE = {"fetched_at": float(obj.get("fetched_at", 0.0)),
-                      "events": [str(x) for x in obj["events"]]}
+                      "events": [str(x) for x in obj["events"]],
+                      "detail": [e for e in (obj.get("detail") or []) if isinstance(e, dict)]}
     except (FileNotFoundError, ValueError, OSError, TypeError):
         pass
 
@@ -106,8 +107,9 @@ def _save_disk():
 def _do_refresh(impact, country):
     global _CACHE, _refreshing
     try:
-        events = _fetch_now(impact, country)
-        _CACHE = {"fetched_at": time.time(), "events": events}
+        detail = _fetch_now(impact, country)   # [{time, title, impact}]
+        events = [e["time"] for e in detail]   # time-label list (backward-compat for Event Shield)
+        _CACHE = {"fetched_at": time.time(), "events": events, "detail": detail}
         _save_disk()
         logger.info("[EconCal] refreshed: %d %s %s events: %s",
                     len(events), country, impact, ", ".join(events) or "-")
@@ -140,6 +142,14 @@ def get_event_times():
     if not _CACHE_LOADED:
         _load_disk()
     return list(_CACHE.get("events", []))
+
+
+def get_events_detailed():
+    """Return [{time, title, impact}] for cached USD High-impact events (no network call).
+    Lets the UI show *what* the upcoming event is (the name), not just the countdown."""
+    if not _CACHE_LOADED:
+        _load_disk()
+    return list(_CACHE.get("detail", []))
 
 
 def get_status():

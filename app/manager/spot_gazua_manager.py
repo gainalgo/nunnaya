@@ -97,6 +97,7 @@ class SpotGazuaConfig:
     #   (until the bottom settles). Keep the good pullback DCA (stalled knife), block only the falling-knife catch.
     dca_stabilize_gate_enabled: bool = True   # short-term stabilization check before DCA. 0=OFF (old unconditional averaging)
     dca_stabilize_strong_atr: float = 1.0     # if prior 5M bar drop ≥ this×ATR, judge it a falling knife → defer averaging
+    dca_min_gap_sec: float = 60.0             # min seconds between averaging adds — caps a fast multi-step drop from firing several adds within one bar before the ATR-relative gate catches up (it is too late on high-ATR pumped coins). 0=off
     # ── entry quality gates (§② · live-restore gates · ★ON by default, observe in paper) ─────
     #   owner diagnosis: entries are at the top/late stage → don't add more cuts, add *entry room*. (feedback_bad_entry_not_fixed_by_cut)
     #   ★ 2026-06-17 owner "everything ON" — paper means 0 real orders, observe improvement per restart. 0=that gate OFF.
@@ -938,6 +939,7 @@ class SpotGazuaPosition:
     dca_count: int = 0               # §4 averaging-down execution count (basis for pyramiding/step limit)
     dca_initial_entry: float = 0.0   # initial entry price (basis for averaging depth/absolute floor — fixed, separate from avg cost)
     dca_base_krw: float = 0.0        # initial entry principal (base for add size; unchanged even as avg cost drops)
+    dca_last_ts: float = 0.0         # epoch of the last averaging add — enforces dca_min_gap_sec spacing
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -1801,6 +1803,39 @@ class SpotGazuaManager:
             self._save_state()
             return {"ok": True, "market": market, "exit": round(price, 8)}
 
+    def clean_slate(self, backup: bool = True) -> Dict[str, Any]:
+        """Paper clean-slate for this exchange: close every position, wipe the journal, release cooldown.
+        In-process (no external file lock). force_close() takes its own lock, so it is called OUTSIDE
+        this method's lock to avoid re-entrancy. Returns {closed, journal_removed}."""
+        closed = 0
+        for mkt in [p.market for p in list(self.positions)]:
+            try:
+                if self.force_close(mkt).get("ok"):
+                    closed += 1
+            except Exception as exc:
+                logger.warning("[SPOT_GAZUA] clean_slate close %s failed: %s", mkt, exc)
+        removed = 0
+        with self._lock:
+            jp = getattr(self, "journal_path", None)
+            try:
+                if jp and os.path.exists(jp):
+                    with open(jp, "r", encoding="utf-8", errors="ignore") as f:
+                        removed = sum(1 for ln in f if ln.strip())
+                    if backup:
+                        import shutil
+                        import time as _t
+                        shutil.copy2(jp, f"{jp}.{_t.strftime('%Y%m%d_%H%M%S')}.bak")
+                    with open(jp, "w", encoding="utf-8") as f:
+                        f.flush()
+                        os.fsync(f.fileno())
+            except OSError as exc:
+                logger.warning("[SPOT_GAZUA] clean_slate journal wipe failed: %s", exc)
+        try:
+            self.release_cooldown()
+        except Exception:
+            pass
+        return {"closed": closed, "journal_removed": removed}
+
     def release_cooldown(self) -> Dict[str, Any]:
         """Manually release cooldown/daily limits — resume immediately from COOLDOWN (owner clicks the 'stuck badge').
         Resets the daily plan limit (max_daily_plans), SL limit, and post-trade cooldown at once, state→IDLE.
@@ -1905,6 +1940,13 @@ class SpotGazuaManager:
         next_level = (pos.dca_count + 1) * step
         if not (pos.dca_count < max_steps and drop >= next_level and price < initial):
             return False
+        # ★ DCA spacing (2026-06-25) — at most one add per dca_min_gap_sec. A fast multi-step drop on a
+        #   high-ATR pumped coin (e.g. a freshly +40% coin) can otherwise fire several adds within a single
+        #   bar before the ATR-relative falling-knife gate's cumulative drop reaches its threshold — the gate
+        #   catches a single sharp candle, not a staircase of small drops, so it is "too late" on such coins.
+        _gap = float(getattr(cfg, "dca_min_gap_sec", 60.0))
+        if _gap > 0 and pos.dca_last_ts > 0 and (time.time() - pos.dca_last_ts) < _gap:
+            return False
         # size = initial principal × add_ratio × pyramiding multiplier
         pyr = min(1.0 + pos.dca_count * float(getattr(cfg, "dca_pyramid_step", 0.20)),
                   float(getattr(cfg, "dca_pyramid_max", 2.5)))
@@ -1926,7 +1968,10 @@ class SpotGazuaManager:
                 return False
         except Exception as _stab_exc:
             logger.debug("[SPOT_GAZUA] dca_stabilize fail-open: %s", _stab_exc)
-        return self._book_addbuy(pos, price, add_krw)
+        ok = self._book_addbuy(pos, price, add_krw)
+        if ok:
+            pos.dca_last_ts = time.time()   # start the spacing window from this add
+        return ok
 
     def _book_addbuy(self, pos: "SpotGazuaPosition", ref_price: float, add_krw: float) -> bool:
         """Reflect one averaging-down fill *in the ledger* — update qty/krw_spent/avg + recompute targets +

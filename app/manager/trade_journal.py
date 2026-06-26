@@ -105,6 +105,33 @@ class TradeJournal:
                 logger.warning("[JOURNAL] cache load failed: %s", exc)
             self._cache_loaded = True
 
+    def clear(self, backup: bool = True) -> int:
+        """Wipe every journal record (file + in-memory cache) for a clean-slate baseline.
+        In-process — safe even while the bot runs (this owns the handle, no external lock).
+        Backs the file up (timestamped) first when backup=True. Returns records removed."""
+        with self._lock:
+            # do not call _ensure_cache here (it also takes _lock — not reentrant); count current cache
+            removed = len(self._cache)
+            try:
+                if os.path.exists(self.path):
+                    if backup:
+                        import shutil
+                        import time as _t
+                        bdir = os.path.join(os.path.dirname(self.path), "_journal_backup")
+                        os.makedirs(bdir, exist_ok=True)
+                        stamp = _t.strftime("%Y%m%d_%H%M%S")
+                        shutil.copy2(self.path, os.path.join(bdir, f"{os.path.basename(self.path)}.{stamp}.bak"))
+                    with open(self.path, "w", encoding="utf-8") as f:
+                        f.flush()
+                        os.fsync(f.fileno())
+            except OSError as exc:
+                logger.warning("[JOURNAL] clear failed: %s", exc)
+            self._cache = []
+            self._cache_loaded = True
+            self._recent_exits = {}
+            logger.info("[JOURNAL] cleared %d records (backup=%s)", removed, backup)
+            return removed
+
     def _append(self, record: TradeRecord):
         """Append one JSONL line + update the in-memory cache."""
         with self._lock:

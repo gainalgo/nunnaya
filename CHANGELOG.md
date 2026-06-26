@@ -8,6 +8,36 @@ entries are grouped by date.
 
 ### Fixed
 
+- **A single hyper-volatile coin could wipe a day of gains (tail-risk).** Three
+  compounding causes let one trade on a hyper-volatile "Innovation-Zone" coin run
+  to a catastrophic loss (observed: a short on a coin down ~65% on the day bounced
+  +8.7% and closed at -61% ROE / about -$1,800, erasing the day):
+  1. **Dynamic leverage was backwards for risk.** The ATR-based tier gave the
+     *most* volatile coins the *highest* leverage (ATR ≥ 2.5% → 7x). A volatile
+     coin's normal ±8% swing at 7x is already a -56% ROE move. Disabled the tier
+     (`leverage_tier_enabled` default `True → False`) so the engine uses the
+     static `leverage` (3x); at 3x the same move is ~-26%, well short of a blow-up.
+  2. **The blow-off filter let extreme coins through.** It was a soft score
+     penalty applied to chases only, with the "extreme" threshold at 80% — so a
+     coin down 65% drew only a small penalty and still traded, and a *fade* entry
+     (a short into the crash) was exempt entirely. Lowered the extreme threshold
+     (`blowoff_extreme_pct` `80 → 45`) and made it apply to both directions
+     (`blowoff_chase_only` `True → False`).
+  3. **The emergency ROE cap fired too late.** `hard_roe_cap_roe_pct` was -50%,
+     so a position could lose half its margin before the backstop cut it.
+     Tightened to -25% to catch a slide earlier when the normal stop-loss is
+     bypassed (e.g. paper stop-loss lag or a restart).
+
+- **DCA could still fire several averages within a minute on a high-volatility
+  pumped coin.** The falling-knife gate defers averaging on a sharp drop, but it
+  is ATR-relative and measures the cumulative drop from the last completed bar —
+  on a freshly-pumped, high-ATR coin a fast *staircase* of small drops fires four
+  or five adds before the cumulative drop reaches the threshold (the gate catches
+  a single sharp candle, not a staircase, so it arrives "too late"). Added a
+  minimum gap between averaging adds (`dca_min_gap_sec`, default 60s) so a burst
+  is capped to one add per window regardless of ATR; the falling-knife gate still
+  handles single sharp candles.
+
 - **Spot dashboard top card never showed win rate or trade count.** The
   "Cumulative PnL · Win Rate" summary card displayed the cumulative amount but
   left the win rate and trade count as a placeholder ("— · — trades"), even
@@ -81,6 +111,33 @@ entries are grouped by date.
   on one server no longer overwrites each other's history.
 
 ### Added
+
+- **Reset / fresh-start guide in System Actions.** A short inline note next to
+  Clean Slate spells out the order to fully reset: ① Close All positions → ② Run
+  Amnesty (release pauses/penalties/re-entry blocks) → ③ Clean Slate (wipe
+  journals + reset paper balance) → Restart. Clean Slate alone cannot always
+  close already-open positions, so Close All comes first. The note marks which
+  steps apply in which mode: ① and ② work in any mode, while ③ Clean Slate is
+  paper-only (it refuses in live to protect real records) — so in live, ①② alone
+  flatten positions and clear all blocks while keeping the real trade history.
+  The note carries a live caution: Close All flattens every position at once,
+  including underwater ones, so it locks in real losses — to spare a position you
+  would rather hold, close coins individually instead of using Close All.
+
+- **Header event countdown now shows *what* the news is.** The economic-event
+  countdown previously showed only the time remaining; it now shows the event
+  name (e.g. "Core PCE Price Index m/m") inline and in full in the tooltip. The
+  name comes from the ForexFactory USD high-impact feed, which was already being
+  fetched but had its title discarded — now captured (`get_events_detailed()`)
+  and surfaced through the Event Shield status.
+
+- **Clean Slate (paper) — one-click fresh start.** A button in *Settings →
+  System Actions* closes every position across all engines, wipes all trade
+  journals (each backed up first), and resets the paper balance and PnL baseline
+  — for a clean post-fix or paper-to-live baseline. **Paper-mode only** (it
+  refuses in live, so it can never touch real positions). Runs in-process, which
+  avoids the file-lock and still-held-position problems you hit when clearing
+  journals from an external script.
 
 - **Multi-exchange support — Binance USDT-M futures + spot.** The bot can now
   manage Binance (futures + spot) alongside the existing Bybit (futures + spot),
