@@ -1,0 +1,21 @@
+{
+  "order.buy_complete": "{market} Buy Complete ({amount})",
+  "order.sell_complete": "{market} Sell Complete",
+  "order.short_open": "{market} Short Open ({amount})",
+  "order.short_close": "{market} Short Close",
+  "server.started": "🚀 [Autocoin Server Started]\nMode: {mode}\nHost: {host}\nTime: {time}",
+  "server.stopped": "🛑 [Autocoin Server Stopped]\nHost: {host}\nTime: {time}",
+  "alert.loss_streak": "⚠️ [{market}] {strategy} {count} consecutive losses (Total {total})",
+  "alert.anomaly": "🚨 [{market}] Anomaly detected: {loss} ({deviation}% vs avg)",
+  "alert.daily_summary": "📊 Daily Report ({date})\nTrades: {trades} | Win Rate: {win_rate}%\nPnL: {pnl}\nBest: {best}\nWorst: {worst}",
+  "engine.started": "▶️ Engine Started",
+  "engine.stopped": "⏹️ Engine Stopped",
+  "engine.emergency_stop": "🚨 Emergency Stop!",
+  "tp.hit": "🎯 [{market}] TP Hit ({pnl_pct}%)",
+  "sl.hit": "🛑 [{market}] SL Hit ({pnl_pct}%)",
+  "ladder.filled": "🪜 LADDER Filled: {market} {side} {price}",
+  "autopilot.promoted": "🚀 Autopilot: {market} → ACTIVE ({strategy})",
+  "autopilot.demoted": "⬇️ Autopilot: {market} → WATCH",
+  "guard.btc_alert": "⚠️ BTC Guard Alert: {mode} mode activated",
+  "guard.btc_normal": "✅ BTC Guard Normal: alert cleared"
+}

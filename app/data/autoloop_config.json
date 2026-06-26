@@ -1,0 +1,16 @@
+{
+    "default": {
+        "use_rsi": true,
+        "rsi_low": 25,
+        "rsi_high": 75,
+
+        "use_macd": false,
+        "macd_signal": 1.2,
+
+        "tp": 1.2,
+        "sl": -2.5,
+
+        "max_position": 1,
+        "risk_multiplier": 1.0
+    }
+}

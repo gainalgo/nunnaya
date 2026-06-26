@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+venv/
+.venv/
+
+# Runtime (large/dynamic files)
+runtime/
+logs/
+
+# Secrets
+.env
+.env.bybit
+*.cookie
+*.cookies
+Autocoincookie*
+Autocoinruntime*
+cookie.txt
+*credentials*
+
+# IDE
+.vscode/
+.idea/
+
+# Backups
+backups/
+*.bak
+*.bak_*
+*.backup
+*.backup_*
+
+# Temp/analysis scripts and data
+tmp_*.py
+tmp_*.json
+temp_*.py
+scratch_*.py
+_kr_*.txt
+_port*.py
+_chk_*
+
+# Root-level state/data (separate from runtime/)
+context_state.json
+trade_journal.jsonl*
+
+# Pytest
+.pytest_cache/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Temp
+*.tmp
+nul
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Claude
+.claude/
+
+# security/temp (2026-06-02)
+.env.txt
+_tmp_*.py
+
+# Runtime data (bot auto-generated/updated; tracking causes pull conflicts on every fetch)
+app/data/bybit_markets.json
+app/data/autoloop_markets.json
+data/autopilot_decisions.jsonl
+
+# gen_spot_cfg_ui scratch/backup (not tracked)
+docs/_genmirror/*.bak.py
+docs/_genmirror/_spot672_block.py
+docs/_genmirror/spot_config_mirror_fields.txt

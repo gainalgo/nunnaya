@@ -1,0 +1,12 @@
+{
+    "default": {
+        "base_confidence": 0.5,
+        "min_confidence": 0.2,
+        "max_confidence": 0.95,
+
+        "trend_sensitivity": 1.0,
+        "volatility_sensitivity": 1.0,
+
+        "cooldown": 3
+    }
+}
