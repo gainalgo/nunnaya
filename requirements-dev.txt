@@ -1,7 +1,0 @@
--r requirements-core.txt
--r requirements-ai.txt
-pytest
-pytest-cov
-black
-flake8
-mypy
