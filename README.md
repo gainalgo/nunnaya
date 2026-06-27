@@ -6,6 +6,19 @@ Community & best configs: https://blog.naver.com/gainalgo  (gainalgo.ai coming s
 > NOT a money machine — an experimental framework you tune together. The bot alone is ~break-even; humans do the final harvest.
 > Read DISCLAIMER.md first.
 
+## Philosophy — a partner, not a money printer
+
+The bot tills the field 24/7 with discipline and hard tail-risk guards: it watches
+100+ coins at 3 a.m. without emotion, never panic-closes, and keeps stops a human
+would be tempted to move. But a bot reacts on *completed* signals — it cannot match
+a human's read of the 1-5 second window where fast, thin markets actually turn. That
+timing gap is structural; no amount of code fully closes it.
+
+So this is built as a **human + bot team**: the bot prepares the ground and keeps you
+out of trouble, and *you* harvest the moment (manual entry/exit is always open).
+Expect a teammate, not a magic button. Admitting that limit honestly is what lets us
+build sound guards around it — rather than pretend it away.
+
 ## Supported exchanges
 
 Manage 4 exchanges / 6 markets from one server and one dashboard (per-exchange isolation of capital, records, and settings).

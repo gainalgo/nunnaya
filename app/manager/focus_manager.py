@@ -434,6 +434,16 @@ class FocusConfig:
     blowoff_max_penalty: float = 40.0                  # max penalty at the extreme
     blowoff_chase_only: bool = False                   # 2026-06-26: was True (chase-only). A coin that has blown off ±45% is too wild in BOTH directions — penalize fade entries too (a short into a -65% crash bounced +8.7% and blew up at 7x).
 
+    # ── Exchange warning-listing (futures) — auto-skip hyper-volatile/Innovation-Zone coins; manual stays open [2026-06-27] ──
+    #   Bybit hides the "Innovation Zone" label from the API, but exposes its own risk tier as
+    #   riskParameters.priceLimitRatioY (BEAT/MUSDT/SLX = 0.3 high-risk vs BTC ~0.02). A coin is treated
+    #   as a warning listing when that flag AND a high realised 1h ATR% both hold. AUTO entry is skipped
+    #   (these blow up on a bot's timing); the human can still take them manually (badge shown in UI).
+    #   This is the futures analog of spot's block_warning_coins / block_caution_coins.
+    block_hivol_auto: bool = True       # skip AUTO entry on flagged hyper-volatile coins (manual unaffected)
+    hivol_risk_ratio_min: float = 0.3   # Bybit priceLimitRatioY >= this = exchange high-risk flag (0 = ignore, ATR-only)
+    hivol_atr_pct: float = 3.5          # 1h ATR% >= this = realised hyper-volatility (measured: winners <=2.3 / blow-ups >=4.6). 0 = ignore, riskY-only
+
     # ── ★ Profit-headroom penalty (Headroom) — 2026-06-09 owner "penalize even if direction is right but nowhere to go" ──
     #   Owner's insight: the scoreboard gives 48 pts to lagging alignment but only penalty-free bonuses for 'how far it can go (headroom)' → high score = topping.
     #   Subtract conviction (negative) for no-headroom spots (right at resistance/support · RSI extreme · BB band edge) to filter topping entries.

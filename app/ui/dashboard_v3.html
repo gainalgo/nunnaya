@@ -941,6 +941,13 @@
           <label class="rib-row"><span>Penalize chasing only <small>(same direction only · fade exempt · default ON)</small></span><input type="checkbox" class="v3-cfg-chk" data-cfg="blowoff_chase_only"></label>
         </div>
         <div class="ribbon-group">
+          <h6>⚠️ Exchange Warning — hyper-volatile auto-skip <small style="color:var(--v3-accent,#6cf)">2026-06-27 · manual stays open</small></h6>
+          <small style="color:var(--v3-fg-mute);display:block;margin-bottom:4px">Bybit hides "Innovation Zone" from the API, so a coin is flagged when its risk tier (priceLimitRatioY) AND realised 1h ATR% are both high (e.g. BEAT/MUSDT/SLX). AUTO entry is skipped — the human can still take them manually (⚠️ shown in the scanner).</small>
+          <label class="rib-row"><span>Auto-skip hyper-vol coins <small>(AUTO only · manual unaffected · default ON)</small></span><input type="checkbox" class="v3-cfg-chk" data-cfg="block_hivol_auto"></label>
+          <div class="rib-row"><span>Bybit riskY ≥ <small>(priceLimitRatioY · high-risk tier · 0.3 · 0=ignore)</small></span><input class="v3-mini" type="number" step="0.01" min="0" max="1" data-cfg="hivol_risk_ratio_min"></div>
+          <div class="rib-row"><span>1h ATR% ≥ <small>(realised vol · winners ≤2.3 / blow-ups ≥4.6 · 3.5 · 0=ignore)</small></span><input class="v3-mini" type="number" step="0.1" min="0" max="20" data-cfg="hivol_atr_pct"></div>
+        </div>
+        <div class="ribbon-group">
           <h6>🎯 Inflection setup score <small style="color:var(--v3-accent,#6cf)">2026-06-12 operator · score↔chart</small></h6>
           <small style="color:var(--v3-fg-mute);display:block;margin-bottom:4px">Encode position (within the range) × momentum direction into the score. Top stall = LONG penalty / SHORT bonus, bottom inflection = LONG bonus, wall-riding (momentum alive) = exempt. Direction-symmetric. Verified by guard_eval sim. The trigger (microtiming) is separate.</small>
           <label class="rib-row"><span>Enable <small>(default OFF · must turn on to fire)</small></span><input type="checkbox" class="v3-cfg-chk" data-cfg="inflection_setup_enabled"></label>
@@ -1756,7 +1763,7 @@
 </div>
 
 <script src="/ui/js/v3/ribbon.js?v=20260602be"></script>
-<script src="/ui/js/dashboard_v3.js?v=20260626livecaution"></script>
+<script src="/ui/js/dashboard_v3.js?v=20260627hivol"></script>
 <script src="/ui/js/v3/tab_entry.js?v=20260620a"></script>
 <script>
 /* ── Default reset (2026-06-04 operator) ─────────────────────────────────

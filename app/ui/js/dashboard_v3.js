@@ -717,6 +717,7 @@
         botOp = '<br><span style="display:inline-block;margin-top:2px;padding:1px 6px;font-size:0.7rem;background:' + bg + ';color:' + clr + ';border:1px solid ' + clr + ';border-radius:3px;font-weight:600;">' + item.bot_opinion.text + '</span>';
       }
       const mk = item.market || '', chg = Number(item.change_pct || 0);
+      const hv = item.hivol ? ' <span class="v3-badge warn" style="font-size:0.68rem;padding:0 4px;" title="Hyper-volatile (exchange warning · Innovation-Zone-class) — bot AUTO-skips; manual harvest only">⚠️</span>' : '';
       const meBtns =
         '<button class="v3-scan-me v3-scan-tfm" data-mkt="' + mk + '" data-sig="' + (item.signal || '') + '" title="📊 TF Progress preview — 7 TF (D/H4/H1/30M/15M/5M/3M) candle flow. See it at a glance before L/S decision">📊</button>' +
         '<button class="v3-scan-me" data-mkt="' + mk + '" data-dir="LONG" title="Manual force LONG (gate bypass)">L</button>' +
@@ -724,7 +725,7 @@
         '<button class="v3-scan-me s" data-mkt="' + mk + '" data-dir="SHORT" title="Manual force SHORT (gate bypass)">S</button>' +
         '<button class="v3-scan-me s" data-mkt="' + mk + '" data-dir="SHORT" data-smart="1" title="Smart SHORT (enter after signal confirmed, wait 1h)">S⏳</button>';
       return '<tr>' +
-        '<td><b class="v3-mkt" data-bybit="' + mk + '">' + mk.replace('USDT', '') + '</b><br><small class="text-muted">$' + Number(item.price || 0).toFixed(2) + ' <span class="' + (chg >= 0 ? 'text-success' : 'text-danger') + '">' + (chg >= 0 ? '+' : '') + chg + '%</span></small>' + botOp + '</td>' +
+        '<td><b class="v3-mkt" data-bybit="' + mk + '">' + mk.replace('USDT', '') + '</b>' + hv + '<br><small class="text-muted">$' + Number(item.price || 0).toFixed(2) + ' <span class="' + (chg >= 0 ? 'text-success' : 'text-danger') + '">' + (chg >= 0 ? '+' : '') + chg + '%</span></small>' + botOp + '</td>' +
         '<td><span class="badge ' + sigClass + '">' + item.signal + '</span></td>' +
         '<td>' + paHtml + '</td>' +
         '<td class="' + trendClass + '">' + item.trend + '</td>' +

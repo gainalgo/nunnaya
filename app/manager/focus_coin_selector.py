@@ -31,7 +31,8 @@ def select_focus_coin(
         or None if no candidate passes.
     """
     # ── Source 1: Volume + Momentum top-N ───────────────────
-    candidates = _source1_volume_momentum(client, top_n=top_n)
+    _min_price = float(getattr(getattr(system, "config", None), "scanner_min_price_usdt", 0.2) or 0.2)
+    candidates = _source1_volume_momentum(client, top_n=top_n, min_price=_min_price)
     if not candidates:
         logger.info("[FOCUS_SELECT] Source 1: no candidates from volume scan")
         return None
@@ -71,7 +72,7 @@ def select_focus_coin(
     return best
 
 
-def _source1_volume_momentum(client: Any, top_n: int = 10) -> List[str]:
+def _source1_volume_momentum(client: Any, top_n: int = 10, min_price: float = 1.0) -> List[str]:
     """Fetch top-N linear perp symbols by 24h turnover."""
     try:
         # ★ [2026-06-23] Exchange abstraction — go through client instead of direct bybit_get (respect client param).
@@ -87,8 +88,10 @@ def _source1_volume_momentum(client: Any, top_n: int = 10) -> List[str]:
             turnover = float(t.get("turnover24h", 0) or 0)
             change_pct = float(t.get("price24hPcnt", 0) or 0)
             last_price = float(t.get("lastPrice", 0) or 0)
-            # Minimum price: >= $1.0 (avoid qty explosion on cheap coins — excludes ADA/XPL/PEPE etc.)
-            if last_price < 1.0:
+            # Minimum price (config scanner_min_price_usdt, default 0.2): only excludes ultra-cheap coins
+            # (qty explosion — PEPE etc.). Sub-$1 coins now flow through so the hyper-volatility gate in
+            # source3 (riskY + ATR%) decides, instead of a blunt price cut. [2026-06-27]
+            if last_price < min_price:
                 continue
             # Liquidity: 24h turnover >= $10M (avoid slippage)
             if turnover < 10_000_000:
@@ -234,6 +237,44 @@ def _source3_structural_filter(client: Any, candidate: Dict, system: Any) -> boo
     - Trend structure clear (confidence > 0.4)
     - Not in sideways with no breakout
     """
+    # ── Exchange warning-listing (futures) — auto-skip hyper-volatile coins; manual stays open [2026-06-27] ──
+    # Bybit hides "Innovation Zone" from the API but exposes its risk tier (priceLimitRatioY); pair it with
+    # a high realised 1h ATR% so a coin must be BOTH exchange-flagged AND actually wild. These blow up on a
+    # bot's timing (e.g. BEAT/MUSDT/SLX), so AUTO entry is skipped — the human can still harvest them manually.
+    cfg = getattr(system, "config", None)
+    if cfg is not None and getattr(cfg, "block_hivol_auto", False):
+        mkt = candidate.get("market", "")
+        risk_min = float(getattr(cfg, "hivol_risk_ratio_min", 0.0) or 0.0)
+        atr_min = float(getattr(cfg, "hivol_atr_pct", 0.0) or 0.0)
+        checks = []
+        atr_pct = 0.0
+        if risk_min > 0:
+            try:
+                from app.integrations.bybit_instrument_cache import BybitInstrumentCache
+                rr = BybitInstrumentCache.get_price_limit_ratio(mkt)
+            except Exception:
+                rr = 0.0
+            checks.append(rr >= risk_min)  # unknown flag (0.0) → False → never blocks on riskY alone
+        if atr_min > 0:
+            ok = False
+            try:
+                raw = client.get_kline(mkt, interval="60", limit=20)
+                rows = sorted([r for r in raw if len(r) >= 5], key=lambda r: float(r[0]))
+                if len(rows) >= 15:
+                    trs = [max(float(rows[i][2]) - float(rows[i][3]),
+                               abs(float(rows[i][2]) - float(rows[i - 1][4])),
+                               abs(float(rows[i][3]) - float(rows[i - 1][4]))) for i in range(1, len(rows))]
+                    atr = sum(trs[-14:]) / 14.0
+                    last = float(rows[-1][4])
+                    atr_pct = (atr / last * 100.0) if last > 0 else 0.0
+                    ok = atr_pct >= atr_min
+            except Exception:
+                ok = False
+            checks.append(ok)
+        if checks and all(checks):
+            logger.info("[FOCUS_SELECT] %s hyper-volatile (ATR=%.2f%%) — exchange-warning AUTO-skip, manual harvest open", mkt, atr_pct)
+            return False
+
     conf = candidate.get("confidence", 0)
     trend = candidate.get("trend", "SIDEWAYS")
 

@@ -2815,8 +2815,25 @@ def focus_scan_list(
                 _bot_op = _bot_opinion(signal, gp.structure.trend.value,
                                        _gs.get("total"), _gs.get("threshold"),
                                        _block_reason, pa_name)
+                # ⚠️ hyper-volatile flag (mirror of the source3 auto-skip gate) — drives the scanner ⚠️ badge
+                _hivol = False
+                try:
+                    _hv_price = float(c.get("price", 0) or 0)
+                    _hv_atr_pct = (float(gp.atr) / _hv_price * 100.0) if _hv_price > 0 else 0.0
+                    _hv_rmin = float(getattr(fm.config, "hivol_risk_ratio_min", 0.0) or 0.0)
+                    _hv_amin = float(getattr(fm.config, "hivol_atr_pct", 0.0) or 0.0)
+                    _hv_checks = []
+                    if _hv_rmin > 0:
+                        from app.integrations.bybit_instrument_cache import BybitInstrumentCache
+                        _hv_checks.append(BybitInstrumentCache.get_price_limit_ratio(symbol) >= _hv_rmin)
+                    if _hv_amin > 0:
+                        _hv_checks.append(_hv_atr_pct >= _hv_amin)
+                    _hivol = bool(_hv_checks) and all(_hv_checks)
+                except Exception:
+                    _hivol = False
                 results.append({
                     "market": symbol,
+                    "hivol": _hivol,   # ⚠️ exchange-warning / hyper-volatile → AUTO-skipped, manual-only
                     "signal": signal,
                     "pa_pattern": pa_name,
                     "pa_type": pa_type,

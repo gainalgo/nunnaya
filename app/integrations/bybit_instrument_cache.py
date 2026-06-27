@@ -24,6 +24,14 @@ def _instrument_row(inst: dict) -> Optional[Dict[str, Any]]:
     tick_raw = pf.get("tickSize") or pf.get("tick_size") or "0.01"
     step_raw = lot.get("qtyStep") or lot.get("basePrecision") or "0.000001"
     min_amt_raw = lot.get("minOrderAmt") or lot.get("minNotionalValue") or "1"
+    # Bybit's own risk tier: priceLimitRatioY (how far price may deviate). High-risk/Innovation-Zone
+    # coins get a wider ratio (e.g. 0.3) vs blue chips (BTC ~0.02). Used as the futures analog of an
+    # exchange "warning listing" flag. [2026-06-27]
+    rp = inst.get("riskParameters") or {}
+    try:
+        price_limit_ratio = float(rp.get("priceLimitRatioY") or rp.get("priceLimitRatioX") or 0.0)
+    except (TypeError, ValueError):
+        price_limit_ratio = 0.0
     return {
         "tick_size": float(tick_raw or "0.01"),
         "qty_step": float(step_raw or "0.000001"),
@@ -31,6 +39,7 @@ def _instrument_row(inst: dict) -> Optional[Dict[str, Any]]:
         "max_qty": float(lot.get("maxOrderQty", "0") or "0"),
         "min_notional": float(min_amt_raw or "1"),
         "status": inst.get("status", ""),
+        "price_limit_ratio": price_limit_ratio,
     }
 
 
@@ -83,6 +92,13 @@ class BybitInstrumentCache:
     def get_qty_step(cls, symbol: str, *, category: Optional[str] = None) -> float:
         info = cls.get(symbol, category=category)
         return info["qty_step"] if info else 0.000001
+
+    @classmethod
+    def get_price_limit_ratio(cls, symbol: str, *, category: Optional[str] = None) -> float:
+        """Bybit's risk tier (priceLimitRatioY). High-risk/Innovation-Zone coins ~0.3, blue chips ~0.02.
+        Returns 0.0 if unknown (treated as 'no warning flag')."""
+        info = cls.get(symbol, category=category)
+        return float(info.get("price_limit_ratio", 0.0)) if info else 0.0
 
     @classmethod
     def get_min_qty(cls, symbol: str, *, category: Optional[str] = None) -> float:

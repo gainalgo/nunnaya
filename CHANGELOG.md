@@ -112,6 +112,22 @@ entries are grouped by date.
 
 ### Added
 
+- **Futures: auto-skip hyper-volatile "exchange-warning" coins (manual stays open).**
+  Innovation-Zone / pump-dump coins (e.g. BEAT, MUSDT, SLX) repeatedly produced
+  the day's single big loss on auto entry — the bot buys the top and eats the
+  cliff because it cannot time fast/thin markets. Price and listing age were both
+  red herrings (BEAT $2.65 / 218 days old). The clean discriminator is volatility:
+  Bybit hides its "Innovation Zone" label from the API but exposes its own risk
+  tier as `riskParameters.priceLimitRatioY` (those coins = 0.3 vs BTC ~0.02). A
+  coin is flagged only when that risk tier AND a high realised 1h ATR% both hold
+  (measured split: winners ≤2.3%, blow-ups ≥4.6%). Flagged coins are skipped from
+  **AUTO entry only** — manual entry stays open, since the human can still harvest
+  the swings. Configurable in *Guards → Exchange Warning* (`block_hivol_auto`,
+  `hivol_risk_ratio_min`, `hivol_atr_pct`); the scanner shows a ⚠️ badge on
+  flagged coins. The selector price floor now follows `scanner_min_price_usdt`
+  (0.2) instead of a hardcoded $1, so the volatility gate — not a blunt price cut
+  — decides. This is the futures analog of spot's investment-warning handling.
+
 - **Reset / fresh-start guide in System Actions.** A short inline note next to
   Clean Slate spells out the order to fully reset: ① Close All positions → ② Run
   Amnesty (release pauses/penalties/re-entry blocks) → ③ Clean Slate (wipe
@@ -157,6 +173,11 @@ entries are grouped by date.
   price still passes — only knife-catching is blocked.
 
 ### Changed
+
+- **README now states the project's philosophy up front.** A "Philosophy — a
+  partner, not a money printer" section explains the human + bot division of
+  labour and the bot's honest limit (it cannot match a human's timing on
+  fast/thin markets), so new users expect a teammate rather than a magic button.
 
 - **Codebase translated to English.** All in-repo text — code comments,
   docstrings, log messages, dashboard UI strings, and the generated
