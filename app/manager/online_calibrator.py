@@ -1,0 +1,223 @@
+# ============================================================
+# File: app/manager/online_calibrator.py
+# Phase 3-A: Online Calibration — Self-Evolving Parameter Tuning
+# ============================================================
+"""
+6-cell Bucket System: Volatility(Low/Mid/High) × Regime(Range/Trend)
+
+Each bucket accumulates trade results under its market condition and
+incrementally adjusts the TP/SL/entry parameters of PINGPONG/AUTOLOOP.
+
+Adjustment range is clamped to ×0.7 ~ ×1.4 to prevent extreme parameter drift.
+Calibration values are returned only after a minimum of 10 trades.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import time
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+_STATE_PATH = os.getenv("OMA_CALIBRATOR_STATE_PATH", "runtime/online_calibrator.json")
+_MIN_TRADES = 10
+_VOL_LOW = 1.5   # ATR% boundary
+_VOL_HIGH = 4.0
+
+def _sf(x: Any, default: float = 0.0) -> float:
+    try:
+        v = float(x)
+        return v if math.isfinite(v) else default
+    except (TypeError, ValueError):
+        logger.warning("[Calibrator] _sf: conversion failed for %r", x, exc_info=True)
+        return default
+
+def _default_bucket() -> Dict[str, Any]:
+    return {
+        "trades": 0,
+        "wins": 0,
+        "total_pnl_pct": 0.0,
+        "ema_tp_pct": 2.5,
+        "ema_sl_pct": -2.5,
+        "ema_hold_sec": 3600.0,
+        "last_update_ts": 0.0,
+    }
+
+class OnlineCalibrator:
+    """Online calibrator for strategy parameters per market condition.
+
+    Bucket: Volatility(Low/Mid/High) × Regime(Range/Trend) × Strategy
+    → 12 cells total (6 conditions × 2 strategies PP/AL)
+    """
+
+    def __init__(self, state_path: str = _STATE_PATH):
+        self._state_path = state_path
+        self._buckets: Dict[str, Dict[str, Any]] = {}
+        self._load()
+
+    # ── Persistence ──
+    def _load(self) -> None:
+        if not self._state_path or not os.path.exists(self._state_path):
+            return
+        try:
+            with open(self._state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                buckets = data.get("buckets")
+                if isinstance(buckets, dict):
+                    self._buckets = buckets
+        except (OSError, json.JSONDecodeError, KeyError, AttributeError, TypeError, ValueError) as exc:
+            logger.warning("[online_calibrator] %s: %s", 'online_calibrator._load fallback', exc, exc_info=True)
+
+    def _save(self) -> None:
+        if not self._state_path:
+            return
+        try:
+            from app.core.io_utils import safe_write_json
+            safe_write_json(self._state_path, {"buckets": self._buckets, "ts": time.time()})
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.warning(f"[Calibrator] save failed: {e}", exc_info=True)
+
+    # ── Classification ──
+    def classify_bucket(self, atr_pct: float, regime: str) -> str:
+        """Determine the bucket key from ATR% and regime.
+
+        Returns: e.g. 'LOW_RANGE', 'MID_TREND', 'HIGH_RANGE'
+        """
+        if atr_pct < _VOL_LOW:
+            vol = "LOW"
+        elif atr_pct < _VOL_HIGH:
+            vol = "MID"
+        else:
+            vol = "HIGH"
+        reg = "TREND" if str(regime).upper() in ("TREND", "BULL", "BEAR") else "RANGE"
+        return f"{vol}_{reg}"
+
+    # ── Trade Recording ──
+    def record_trade(
+        self,
+        bucket_key: str,
+        strategy: str,
+        pnl_pct: float,
+        tp_pct: float = 0.0,
+        sl_pct: float = 0.0,
+        hold_sec: float = 0.0,
+    ) -> None:
+        """Record a trade result into the corresponding bucket.
+
+        Uses EMA so recent results carry higher weight.
+        """
+        key = f"{bucket_key}:{strategy.upper()}"
+        b = self._buckets.setdefault(key, _default_bucket())
+        b["trades"] = int(b.get("trades", 0)) + 1
+        b["total_pnl_pct"] = _sf(b.get("total_pnl_pct"), 0.0) + pnl_pct
+        if pnl_pct > 0:
+            b["wins"] = int(b.get("wins", 0)) + 1
+
+        alpha = min(0.2, 2.0 / (int(b["trades"]) + 1))
+        if pnl_pct > 0 and tp_pct > 0:
+            b["ema_tp_pct"] = _sf(b.get("ema_tp_pct"), 2.5) * (1 - alpha) + tp_pct * alpha
+        if pnl_pct < 0 and sl_pct < 0:
+            b["ema_sl_pct"] = _sf(b.get("ema_sl_pct"), -2.5) * (1 - alpha) + sl_pct * alpha
+        if hold_sec > 0:
+            b["ema_hold_sec"] = _sf(b.get("ema_hold_sec"), 3600.0) * (1 - alpha) + hold_sec * alpha
+        b["last_update_ts"] = time.time()
+        self._save()
+
+    # ── Calibrated Parameter Retrieval ──
+    def get_adjustments(
+        self, bucket_key: str, strategy: str
+    ) -> Optional[Dict[str, float]]:
+        """Return bucket-based calibration multipliers.
+
+        Returns None if trade count is insufficient (< MIN_TRADES).
+        PP: pp_tp_mult, pp_sl_mult, pp_gap_mult
+        AL: al_rsi_shift, al_trail_mult
+        """
+        key = f"{bucket_key}:{strategy.upper()}"
+        b = self._buckets.get(key)
+        if not b or int(b.get("trades", 0)) < _MIN_TRADES:
+            return None
+
+        trades = max(1, int(b["trades"]))
+        wins = int(b.get("wins", 0))
+        win_rate = wins / trades
+        strat = strategy.upper()
+
+        if strat == "PINGPONG":
+            # High win rate → widen TP, keep SL
+            # Low win rate → tighten SL, shrink TP
+            tp_mult = 1.0 + (win_rate - 0.5) * 0.4
+            sl_mult = 1.0 - (win_rate - 0.5) * 0.2
+            gap_mult = tp_mult
+            return {
+                "pp_tp_mult": max(0.7, min(1.4, tp_mult)),
+                "pp_sl_mult": max(0.7, min(1.3, sl_mult)),
+                "pp_gap_mult": max(0.8, min(1.3, gap_mult)),
+            }
+        elif strat == "AUTOLOOP":
+            # High win rate → relax RSI buy threshold (easier entry), widen trailing
+            # Low win rate → tighten RSI threshold (harder entry), shrink trailing
+            rsi_shift = (win_rate - 0.5) * 10.0
+            trail_mult = 1.0 + (win_rate - 0.5) * 0.3
+            return {
+                "al_rsi_shift": max(-8.0, min(8.0, rsi_shift)),
+                "al_trail_mult": max(0.7, min(1.4, trail_mult)),
+            }
+        return None
+
+    # ── Bulk Update from Ledger ──
+    def update_from_trades(
+        self, trades: List[Dict[str, Any]]
+    ) -> int:
+        """Apply past trade records in bulk. Returns the number applied."""
+        count = 0
+        for t in trades:
+            try:
+                strat = str(t.get("strategy") or "").upper()
+                if strat not in ("PINGPONG", "AUTOLOOP"):
+                    continue
+                pnl_pct = _sf(t.get("pnl_pct"), 0.0)
+                tp_pct = _sf(t.get("tp_pct"), 0.0)
+                sl_pct = _sf(t.get("sl_pct"), 0.0)
+                hold_sec = _sf(t.get("hold_sec"), 0.0)
+                atr_pct = _sf(t.get("atr_pct"), 2.0)
+                regime = str(t.get("regime") or "RANGE")
+                bucket = self.classify_bucket(atr_pct, regime)
+                self.record_trade(bucket, strat, pnl_pct, tp_pct, sl_pct, hold_sec)
+                count += 1
+            except (KeyError, AttributeError, TypeError, ValueError) as exc:
+                logger.warning("[online_calibrator] %s: %s", 'online_calibrator.update_from_trades except-> continue', exc, exc_info=True)
+                continue
+        return count
+
+    # ── Summary ──
+    def summary(self) -> Dict[str, Any]:
+        """Summary of all buckets."""
+        out: Dict[str, Any] = {}
+        for key, b in self._buckets.items():
+            trades = int(b.get("trades", 0))
+            wins = int(b.get("wins", 0))
+            out[key] = {
+                "trades": trades,
+                "wins": wins,
+                "win_rate": round(wins / max(1, trades), 3),
+                "total_pnl_pct": round(_sf(b.get("total_pnl_pct")), 3),
+                "ema_tp_pct": round(_sf(b.get("ema_tp_pct")), 3),
+                "ema_sl_pct": round(_sf(b.get("ema_sl_pct")), 3),
+                "calibrated": trades >= _MIN_TRADES,
+            }
+        return out
+
+# ── Module-level Singleton ──
+_instance: Optional[OnlineCalibrator] = None
+
+def get_calibrator() -> OnlineCalibrator:
+    global _instance
+    if _instance is None:
+        _instance = OnlineCalibrator()
+    return _instance

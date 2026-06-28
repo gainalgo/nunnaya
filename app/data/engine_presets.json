@@ -1,0 +1,12 @@
+{
+    "autocoin_v3H": {
+        "policy": "default",
+        "risk_mode": "normal",
+        "allocate_ratio": 0.33
+    },
+    "autoloop_default": {
+        "strategy": "default",
+        "risk_mode": "soft",
+        "allocate_ratio": 0.2
+    }
+}
